@@ -302,7 +302,7 @@ lemma MergeOfOwnedValuesIsIdentity(context: map<string, Value>, patch: seq<Patch
   }
 }
 
-// When beta.1 skips the copy, every key reads a value `===` to (or identical
+// When `transition` skips the copy, every key reads a value `===` to (or identical
 // with) what the full merge would read. The skipped merge could still have
 // added an own key or replaced 0 with -0; see the concrete laws below.
 lemma UnchangedMergeReadsStrictlyEqual(inherited: map<string, Value>, context: map<string, Value>, patch: seq<PatchEntry>, k: string)
@@ -377,7 +377,7 @@ lemma ChangedPatchCopies(machine: Machine, snapshot: Snapshot, event: FSMEvent)
 {
 }
 
-// Whether or not beta.1 copies, every key of the next context reads a value
+// Whether or not `transition` copies, every key of the next context reads a value
 // `===` to (or identical with) the full merge's.
 lemma TransitionReadsMatchMerge(machine: Machine, snapshot: Snapshot, event: FSMEvent, k: string)
   requires DistinctKeys(ResolvedPatch(Resolve(machine, snapshot, event)))
@@ -392,6 +392,14 @@ lemma TransitionReadsMatchMerge(machine: Machine, snapshot: Snapshot, event: FSM
     UnchangedMergeReadsStrictlyEqual(machine.inherited, snapshot.context, patch, k);
     StrictEqualsSymmetric(read(machine.inherited, mergePatch(snapshot.context, patch), k), read(machine.inherited, snapshot.context, k));
   }
+}
+
+// A declared value finds its transitions in its own state's table.
+lemma DeclaredStateLookup(machine: Machine, value: string, type_: string)
+  requires value in machine.states
+  ensures lookupTransition(machine, value, type_) ==
+    (if type_ in machine.states[value].on then Some(machine.states[value].on[type_]) else None)
+{
 }
 
 lemma MissingTransitionKeepsSnapshot(machine: Machine, snapshot: Snapshot, event: FSMEvent)
@@ -413,6 +421,54 @@ lemma ReuseIsExactWithoutNaN(machine: Machine, snapshot: Snapshot, event: FSMEve
     MergeValues(snapshot.context, patch);
     var e :| e in patch && !strictEquals(e.value, read(machine.inherited, snapshot.context, e.key));
     assert mergePatch(snapshot.context, patch)[e.key] == e.value;
+    StrictEqualsReflexiveExceptNaN(e.value);
+  }
+}
+
+// A transition that keeps the state with the given patch.
+ghost predicate KeepsStateWithPatch(machine: Machine, snapshot: Snapshot, event: FSMEvent, patch: seq<PatchEntry>)
+{
+  ResolvedTarget(Resolve(machine, snapshot, event), snapshot.value) == snapshot.value &&
+  ResolvedPatch(Resolve(machine, snapshot, event)) == patch
+}
+
+// A transition that keeps the state with a patch that changes nothing returns
+// the same snapshot object.
+lemma UnchangedPatchKeepsSnapshot(machine: Machine, snapshot: Snapshot, event: FSMEvent)
+  requires ResolvedTarget(Resolve(machine, snapshot, event), snapshot.value) == snapshot.value
+  requires !patchChanges(machine.inherited, snapshot.context, ResolvedPatch(Resolve(machine, snapshot, event)))
+  ensures transition(machine, snapshot, event) == Step(snapshot, true)
+{
+}
+
+// A step copies although its result equals the old snapshot exactly when it
+// keeps the state, every patch entry is already owned with an identical value,
+// and some entry is NaN: only NaN over an own NaN copies without a difference.
+lemma EqualCopyIsOwnNaN(machine: Machine, snapshot: Snapshot, event: FSMEvent)
+  requires DistinctKeys(ResolvedPatch(Resolve(machine, snapshot, event)))
+  ensures (!transition(machine, snapshot, event).reused && transition(machine, snapshot, event).snapshot == snapshot) <==>
+    (ResolvedTarget(Resolve(machine, snapshot, event), snapshot.value) == snapshot.value &&
+     (forall e :: e in ResolvedPatch(Resolve(machine, snapshot, event)) ==> e.key in snapshot.context && snapshot.context[e.key] == e.value) &&
+     (exists e :: e in ResolvedPatch(Resolve(machine, snapshot, event)) && e.value.notANumber?))
+{
+  var patch := ResolvedPatch(Resolve(machine, snapshot, event));
+  var step := transition(machine, snapshot, event);
+  TransitionMeaning(machine, snapshot, event);
+  MergeValues(snapshot.context, patch);
+  if (forall e :: e in patch ==> e.key in snapshot.context && snapshot.context[e.key] == e.value) {
+    MergeOfOwnedValuesIsIdentity(snapshot.context, patch);
+  }
+  if e :| e in patch && e.value.notANumber? {
+    strictEquals_ensures(e.value, read(machine.inherited, snapshot.context, e.key));
+    assert patchChanges(machine.inherited, snapshot.context, patch);
+  }
+  if !step.reused && step.snapshot == snapshot {
+    if !patchChanges(machine.inherited, snapshot.context, patch) {
+      assert step.snapshot.value != snapshot.value;
+    }
+    assert mergePatch(snapshot.context, patch) == snapshot.context;
+    var e :| e in patch && !strictEquals(e.value, read(machine.inherited, snapshot.context, e.key));
+    assert snapshot.context[e.key] == e.value;
     StrictEqualsReflexiveExceptNaN(e.value);
   }
 }
@@ -441,75 +497,106 @@ lemma ContextKeysKept(machine: Machine, snapshot: Snapshot, event: FSMEvent)
 }
 
 // `undefined` for a key the context neither owns nor inherits reads the same
-// as before, so beta.1 keeps the snapshot and the context never gains the key.
-lemma UndefinedOnAbsentKeyIsUnchanged(inherited: map<string, Value>, context: map<string, Value>, k: string)
-  requires k !in context && k !in inherited
-  ensures !patchChanges(inherited, context, [PatchEntry(k, Value.undefinedValue)])
-  ensures k in mergePatch(context, [PatchEntry(k, Value.undefinedValue)])
+// as before, so the step keeps the snapshot and the context never gains the
+// key, although a full merge would add it.
+lemma UndefinedOnAbsentKeyIsUnchanged(machine: Machine, snapshot: Snapshot, event: FSMEvent, k: string)
+  requires k !in snapshot.context && k !in machine.inherited
+  requires KeepsStateWithPatch(machine, snapshot, event, [PatchEntry(k, Value.undefinedValue)])
+  ensures transition(machine, snapshot, event) == Step(snapshot, true)
+  ensures k !in transition(machine, snapshot, event).snapshot.context
+  ensures k in mergePatch(snapshot.context, [PatchEntry(k, Value.undefinedValue)])
 {
-  MergeKeys(context, [PatchEntry(k, Value.undefinedValue)], k);
-  assert PatchEntry(k, Value.undefinedValue) in [PatchEntry(k, Value.undefinedValue)];
-}
-
-// -0 over an own 0 is `===`, so beta.1 keeps 0 although Object.is would differ.
-lemma NegativeZeroOverZeroIsUnchanged(inherited: map<string, Value>, context: map<string, Value>, k: string)
-  requires k in context && context[k] == Value.integer(0)
-  ensures !patchChanges(inherited, context, [PatchEntry(k, Value.negativeZero)])
-  ensures k in mergePatch(context, [PatchEntry(k, Value.negativeZero)]) &&
-          !sameValue(mergePatch(context, [PatchEntry(k, Value.negativeZero)])[k], context[k])
-{
-  MergeValues(context, [PatchEntry(k, Value.negativeZero)]);
-  assert PatchEntry(k, Value.negativeZero) in [PatchEntry(k, Value.negativeZero)];
-}
-
-// When another entry changes, the copy applies the whole patch, -0 included.
-lemma NegativeZeroAppliesWithAnotherChange(inherited: map<string, Value>, context: map<string, Value>, zeroKey: string, otherKey: string, v: Value)
-  requires zeroKey != otherKey
-  requires zeroKey in context && context[zeroKey] == Value.integer(0)
-  requires !strictEquals(v, read(inherited, context, otherKey))
-  ensures patchChanges(inherited, context, [PatchEntry(zeroKey, Value.negativeZero), PatchEntry(otherKey, v)])
-  ensures zeroKey in mergePatch(context, [PatchEntry(zeroKey, Value.negativeZero), PatchEntry(otherKey, v)]) &&
-          mergePatch(context, [PatchEntry(zeroKey, Value.negativeZero), PatchEntry(otherKey, v)])[zeroKey] == Value.negativeZero
-{
-  var patch := [PatchEntry(zeroKey, Value.negativeZero), PatchEntry(otherKey, v)];
-  assert patch[1] in patch;
+  var patch := [PatchEntry(k, Value.undefinedValue)];
+  assert !patchChanges(machine.inherited, snapshot.context, patch);
+  UnchangedPatchKeepsSnapshot(machine, snapshot, event);
+  MergeKeys(snapshot.context, patch, k);
   assert patch[0] in patch;
-  MergeValues(context, patch);
 }
 
-// A NaN patch value is never `===` to anything, so it always counts as a change.
-lemma NotANumberAlwaysChanges(inherited: map<string, Value>, context: map<string, Value>, patch: seq<PatchEntry>, e: PatchEntry)
-  requires e in patch && e.value.notANumber?
-  ensures patchChanges(inherited, context, patch)
+// -0 over an own 0 is `===`, so the step keeps the snapshot and its 0,
+// although Object.is would tell the merged -0 apart.
+lemma NegativeZeroOverZeroIsUnchanged(machine: Machine, snapshot: Snapshot, event: FSMEvent, k: string)
+  requires k in snapshot.context && snapshot.context[k] == Value.integer(0)
+  requires KeepsStateWithPatch(machine, snapshot, event, [PatchEntry(k, Value.negativeZero)])
+  ensures transition(machine, snapshot, event) == Step(snapshot, true)
+  ensures transition(machine, snapshot, event).snapshot.context[k] == Value.integer(0)
+  ensures k in mergePatch(snapshot.context, [PatchEntry(k, Value.negativeZero)]) &&
+          !sameValue(mergePatch(snapshot.context, [PatchEntry(k, Value.negativeZero)])[k], snapshot.context[k])
 {
-  strictEquals_ensures(e.value, read(inherited, context, e.key));
+  var patch := [PatchEntry(k, Value.negativeZero)];
+  assert !patchChanges(machine.inherited, snapshot.context, patch);
+  UnchangedPatchKeepsSnapshot(machine, snapshot, event);
+  MergeValues(snapshot.context, patch);
+  assert patch[0] in patch;
 }
 
-// Opaque values such as strings, booleans, and objects compare by identity.
-lemma OpaqueComparesByIdentity(inherited: map<string, Value>, context: map<string, Value>, k: string, a: int, b: int)
-  requires k in context && context[k] == Value.opaque_(a)
-  ensures patchChanges(inherited, context, [PatchEntry(k, Value.opaque_(b))]) <==> a != b
+// When another entry changes, the step copies and applies the whole patch,
+// -0 included.
+lemma NegativeZeroAppliesWithAnotherChange(machine: Machine, snapshot: Snapshot, event: FSMEvent, zeroKey: string, other: PatchEntry)
+  requires DistinctKeys(ResolvedPatch(Resolve(machine, snapshot, event)))
+  requires PatchEntry(zeroKey, Value.negativeZero) in ResolvedPatch(Resolve(machine, snapshot, event))
+  requires zeroKey in snapshot.context && snapshot.context[zeroKey] == Value.integer(0)
+  requires other in ResolvedPatch(Resolve(machine, snapshot, event))
+  requires !strictEquals(other.value, read(machine.inherited, snapshot.context, other.key))
+  ensures !transition(machine, snapshot, event).reused
+  ensures zeroKey in transition(machine, snapshot, event).snapshot.context &&
+          transition(machine, snapshot, event).snapshot.context[zeroKey] == Value.negativeZero
 {
-  assert PatchEntry(k, Value.opaque_(b)) in [PatchEntry(k, Value.opaque_(b))];
+  var patch := ResolvedPatch(Resolve(machine, snapshot, event));
+  assert patchChanges(machine.inherited, snapshot.context, patch);
+  ChangedPatchCopies(machine, snapshot, event);
+  MergeValues(snapshot.context, patch);
+}
+
+// A NaN patch value is never `===` to anything, so the step always copies.
+lemma NotANumberAlwaysChanges(machine: Machine, snapshot: Snapshot, event: FSMEvent, e: PatchEntry)
+  requires e in ResolvedPatch(Resolve(machine, snapshot, event)) && e.value.notANumber?
+  ensures !transition(machine, snapshot, event).reused
+{
+  strictEquals_ensures(e.value, read(machine.inherited, snapshot.context, e.key));
+  ChangedPatchCopies(machine, snapshot, event);
+}
+
+// Opaque values such as strings, booleans, and objects compare by id: the
+// same value keeps the snapshot and a different one copies.
+lemma OpaqueComparesByIdentity(machine: Machine, snapshot: Snapshot, event: FSMEvent, k: string, a: int, b: int)
+  requires k in snapshot.context && snapshot.context[k] == Value.opaque_(a)
+  requires KeepsStateWithPatch(machine, snapshot, event, [PatchEntry(k, Value.opaque_(b))])
+  ensures transition(machine, snapshot, event).reused <==> a == b
+{
+  var patch := [PatchEntry(k, Value.opaque_(b))];
+  assert patch[0] in patch;
+  if a == b {
+    UnchangedPatchKeepsSnapshot(machine, snapshot, event);
+  } else {
+    ChangedPatchCopies(machine, snapshot, event);
+  }
 }
 
 // A patch value `===` to the inherited one (such as Object.prototype.toString)
-// counts as unchanged, so the context never gains the own key.
-lemma InheritedValueIsUnchanged(inherited: map<string, Value>, context: map<string, Value>, k: string)
-  requires k !in context && k in inherited && !inherited[k].notANumber?
-  ensures !patchChanges(inherited, context, [PatchEntry(k, inherited[k])])
+// keeps the snapshot, so the context never gains the own key.
+lemma InheritedValueIsUnchanged(machine: Machine, snapshot: Snapshot, event: FSMEvent, k: string)
+  requires k !in snapshot.context && k in machine.inherited && !machine.inherited[k].notANumber?
+  requires KeepsStateWithPatch(machine, snapshot, event, [PatchEntry(k, machine.inherited[k])])
+  ensures transition(machine, snapshot, event) == Step(snapshot, true)
+  ensures k !in transition(machine, snapshot, event).snapshot.context
 {
-  StrictEqualsReflexiveExceptNaN(inherited[k]);
+  StrictEqualsReflexiveExceptNaN(machine.inherited[k]);
+  assert !patchChanges(machine.inherited, snapshot.context, [PatchEntry(k, machine.inherited[k])]);
+  UnchangedPatchKeepsSnapshot(machine, snapshot, event);
 }
 
 // A patch value that differs from the inherited one copies and adds an own key.
-lemma InheritedMismatchOwnsKey(inherited: map<string, Value>, context: map<string, Value>, k: string, v: Value)
-  requires k !in context && k in inherited && !strictEquals(v, inherited[k])
-  ensures patchChanges(inherited, context, [PatchEntry(k, v)])
-  ensures k in mergePatch(context, [PatchEntry(k, v)])
+lemma InheritedMismatchOwnsKey(machine: Machine, snapshot: Snapshot, event: FSMEvent, k: string, v: Value)
+  requires k !in snapshot.context && k in machine.inherited && !strictEquals(v, machine.inherited[k])
+  requires KeepsStateWithPatch(machine, snapshot, event, [PatchEntry(k, v)])
+  ensures !transition(machine, snapshot, event).reused
+  ensures k in transition(machine, snapshot, event).snapshot.context
 {
-  assert PatchEntry(k, v) in [PatchEntry(k, v)];
-  MergeKeys(context, [PatchEntry(k, v)], k);
+  var patch := [PatchEntry(k, v)];
+  assert patch[0] in patch;
+  ChangedPatchCopies(machine, snapshot, event);
+  MergeKeys(snapshot.context, patch, k);
 }
 
 ghost predicate TargetDeclared(machine: Machine, config: TransitionConfig)

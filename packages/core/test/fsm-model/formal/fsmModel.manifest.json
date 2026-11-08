@@ -1,6 +1,6 @@
 {
   "source": "fsmModel.ts",
-  "verifiedCount": 62,
+  "verifiedCount": 67,
   "functions": {
     "strictEquals": {
       "parameters": [],
@@ -64,6 +64,7 @@
     "ResolvedPatch",
     "ResolvedTarget",
     "Resolve",
+    "KeepsStateWithPatch",
     "TargetDeclared",
     "TransitionTargetsDeclared",
     "TargetsDeclared"
@@ -88,8 +89,11 @@
     "TransitionMeaning",
     "ChangedPatchCopies",
     "TransitionReadsMatchMerge",
+    "DeclaredStateLookup",
     "MissingTransitionKeepsSnapshot",
     "ReuseIsExactWithoutNaN",
+    "UnchangedPatchKeepsSnapshot",
+    "EqualCopyIsOwnNaN",
     "StringTargetIsConfigTarget",
     "EmptyConfigKeepsSnapshot",
     "ContextKeysKept",
@@ -135,6 +139,11 @@
       "after": "(entry) =>\n      !(entry.key in context) ||\n      !strictEquals(entry.value, read(inherited, context, entry.key))"
     },
     {
+      "name": "the copy merges only the changed entries",
+      "before": "return mergePatch({ ...context, [entry.key]: entry.value }, patch.slice(1));",
+      "after": "return mergePatch(\n    entry.key in context && strictEquals(entry.value, read({}, context, entry.key))\n      ? context\n      : { ...context, [entry.key]: entry.value },\n    patch.slice(1)\n  );"
+    },
+    {
       "name": "the copy drops the first patch entry",
       "before": "context: changed ? mergePatch(snapshot.context, patch) : snapshot.context",
       "after": "context: changed ? mergePatch(snapshot.context, patch.slice(1)) : snapshot.context"
@@ -170,7 +179,7 @@
       "after": "snapshot,"
     },
     {
-      "name": "an undeclared value uses the initial state's transitions",
+      "name": "every value uses the initial state's transitions",
       "before": "const node = machine.states.get(value);",
       "after": "const node = machine.states.get(machine.initial);"
     }

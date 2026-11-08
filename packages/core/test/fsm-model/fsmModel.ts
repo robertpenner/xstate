@@ -1,7 +1,9 @@
-// LemmaScript model of `createFSM` from `xstate/fsm` (packages/core/src/fsm.ts).
-// A context or patch value is one of the values JavaScript `===` can tell
+// LemmaScript model of `createFSM` from `xstate/fsm`. Its `transition` follows
+// `packages/core/src/fsm.ts`, which matches the published 6.0.0-beta.1 build.
+// A context or patch value is a JavaScript value as `Object.is` tells them
 // apart: an integer (`0` is +0), -0, NaN, undefined, or an opaque value with an
-// identity. A context patch is the entry list of the patch object, so its keys
+// id (strings by content; booleans, null, fractions, and objects by `===`).
+// `strictEquals` is JavaScript `===` over these values. A context patch is the entry list of the patch object, so its keys
 // are distinct. Transition tables are Maps, which find only own keys, as
 // xstate's `Object.hasOwn` lookup does.
 export type Value =
@@ -127,7 +129,7 @@ export function resolveTransition(
   }
 }
 
-// beta.1 copies when `patch[key] !== context[key]` for some patch key.
+// `transition` copies when `patch[key] !== context[key]` for some patch key.
 export function patchChanges(
   inherited: Record<string, Value>,
   context: Record<string, Value>,
