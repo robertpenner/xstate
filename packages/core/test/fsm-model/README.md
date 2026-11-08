@@ -1,7 +1,7 @@
 # A verified model of `xstate/fsm`
 
 This directory holds a [LemmaScript](https://www.npmjs.com/package/lemmascript)
-model of `createFSM` from [`src/fsm.ts`](../../src/fsm.ts), Dafny proofs of 31
+model of `createFSM` from [`src/fsm.ts`](../../src/fsm.ts), Dafny proofs of 34
 laws about it, and tests that compare the model with `createFSM`.
 
 [`fsmModel.ts`](./fsmModel.ts) writes `createFSM`'s `initialState` and
@@ -9,9 +9,10 @@ laws about it, and tests that compare the model with `createFSM`.
 LemmaScript translates it to [`formal/fsmModel.dfy.gen`](./formal/fsmModel.dfy.gen),
 and [`formal/fsmModel.dfy`](./formal/fsmModel.dfy) is that file with the laws
 appended. Dafny proves the laws for every machine configuration whose
-transition functions are pure, over every context value JavaScript `===` can
-tell apart, including `-0`, `NaN`, `undefined`, and keys a context inherits
-from `Object.prototype`. Nothing proves that the model matches `fsm.ts`; the
+transition functions are pure functions of the context's entries and the
+event. Context values are integers, `-0`, `NaN`, `undefined`, and opaque values
+that stand for everything else, kept apart as `Object.is` keeps them apart, and
+a context can inherit keys from `Object.prototype`. Nothing proves that the model matches `fsm.ts`; the
 tests in this directory check that they agree.
 
 ## What `createFSM` does
@@ -50,9 +51,12 @@ it represents data:
 - `Machine.inherited` holds the value read for each key the context does not
   own: the properties of `Object.prototype`. `read` returns the own value, then
   the inherited one, then `undefined`.
-- A patch is a list of `{ key, value }` entries with distinct keys. `fsm.ts`
-  merges a patch object with one spread; the model merges entry by entry.
-  After the first copy every key matches, so the two merges agree.
+- A patch is a list of `{ key, value }` entries with distinct keys. On the
+  first difference `fsm.ts` spreads the whole patch over the context, then
+  keeps comparing; a later `NaN` entry differs again and spreads the same
+  patch again, which leaves the same entries. The model merges entry by entry,
+  which gives those entries too.
+- An event is `{ type, payload }` with an integer payload.
 - Transition and state tables are `Map`s, which find only their own keys.
 
 ## Laws
@@ -65,16 +69,22 @@ hints, such as "a reused step returns the given snapshot". The laws in
   only on `NaN` against `NaN` and on `0` against `-0`.
 - The next snapshot is the resolved target (or the current value), with the
   patch merged exactly when the patch changes something; a changed patch never
-  reuses the snapshot; a missing transition or a `{}` result reuses it; a
-  string transition `T` resolves the same as `{ target: T }`.
-- When the copy is skipped, every key still reads a value `===` to what a full
-  merge would read, but the context can lack an own key the patch named
-  (`undefined` for an absent key, or a value `===` to the inherited one) and
-  can keep `0` where the patch said `-0`. Whether `-0` lands depends on whether
-  another entry in the same patch changes.
+  reuses the snapshot; a missing transition, a `{}` result, or a patch that
+  changes nothing under a target equal to the value reuses it; a string
+  transition `T` resolves the same as `{ target: T }`; a declared value finds
+  its transitions in its own state.
+- When the copy is skipped, every key still reads a value `===` to, or
+  identical with, what a full merge would read. Each of these is stated for a
+  whole step: the context can lack an own key the patch named (`undefined` for
+  an absent key, or a value `===` to the inherited one) and can keep `0` where
+  the patch said `-0`; `-0` lands when any other entry of the same patch
+  changes; `NaN` always copies; opaque values compare by identity; and a value
+  that differs from the inherited one gives the context an own key.
 - With distinct patch keys and no `NaN`, a step reuses the snapshot exactly
-  when the next snapshot equals it. A `NaN` patch value always counts as a
-  change.
+  when the next snapshot equals it. With `NaN` allowed, a step copies although
+  its result equals the old snapshot exactly when it keeps the state, the
+  context already owns every patched key with the identical value, and some
+  patched value is `NaN`.
 - A step never removes a context key, and no sequence of events does.
 - If every target the machine can produce is a declared state, the initial
   snapshot and every step from a declared state stay declared.
@@ -82,11 +92,11 @@ hints, such as "a reused step returns the given snapshot". The laws in
   `a + b`.
 
 [`formal/fsmModel.manifest.json`](./formal/fsmModel.manifest.json) lists all
-31 law names and the contract of each function.
+34 law names and the contract of each function.
 
 ## Deliberate defects
 
-The manifest also lists thirteen edits to `fsmModel.ts`. Dafny must reject
+The manifest also lists fourteen edits to `fsmModel.ts`. Dafny must reject
 each one with a proof failure:
 
 - a self-transition with no change copies the snapshot;
@@ -94,6 +104,7 @@ each one with a proof failure:
 - a patch for a key the context does not own counts as unchanged;
 - patches compare with `Object.is` instead of `===`;
 - a key the context does not own counts as changed;
+- the copy merges only the changed entries;
 - the copy drops the first patch entry;
 - inherited keys read as `undefined`;
 - `NaN` is `===` to `NaN`;
@@ -101,7 +112,7 @@ each one with a proof failure:
 - a string transition loses its target;
 - the initial snapshot drops the configured context;
 - `run` skips each event's transition;
-- an undeclared value uses the initial state's transitions.
+- every value uses the initial state's transitions.
 
 The manifest also lists a rewrite of `strictEquals` that keeps its behavior.
 The verifier checks that the rewrite makes the committed Dafny stale and that
@@ -121,7 +132,9 @@ checks what the model leaves out: every snapshot has exactly the keys
 `context`, `error`, `output`, `status`, and `value`, with `status: 'active'`
 and undefined `output` and `error`; every transition returns no effects;
 `initialTransition` and `getInitialSnapshot` return the initial snapshot; and
-`getPersistedSnapshot` returns its argument.
+`getPersistedSnapshot` returns its argument. The model calls a transition
+function itself, so each function runs twice per event: once in `createFSM` and
+once in the model.
 
 The adapter refuses a context or patch whose prototype is not
 `Object.prototype`, or that has symbol keys, accessors, or non-enumerable
@@ -167,8 +180,15 @@ Both test files run in `pnpm test`.
   transitions that the model lacks. The generator builds `states` with
   `Object.fromEntries`, so a generated `__proto__` state is an own property,
   and no named case inherits a state.
-- Transition functions are total and pure in Dafny. A function that throws,
-  mutates its argument, or reads outside state is outside the model.
+- The adapter reads `states` and each `on` table with `Object.entries`, which
+  skips non-enumerable properties, and does not check them further.
+  `Object.hasOwn` finds a non-enumerable own transition, so `createFSM` can
+  take a transition that the model lacks.
+- Transition functions are total and pure in Dafny: each result depends only
+  on the context's entries and the event. A function that throws, mutates its
+  argument, reads outside state, or returns different results on its two calls
+  is outside the model.
+- Events carry only `type` and an integer `payload`.
 - `setup`, schemas, and actors are outside the model.
 
 ## Reproduce
@@ -177,13 +197,18 @@ The verifier needs Dafny 4.11.0 on `PATH` and LemmaScript 0.6.6 installed
 outside this workspace:
 
 ```sh
-npm install --prefix /tmp/lemmascript --ignore-scripts lemmascript@0.6.6
+mkdir -p /tmp/lemmascript
+cp .github/fsm-model/package.json .github/fsm-model/package-lock.json /tmp/lemmascript/
+(cd /tmp/lemmascript && npm ci --ignore-scripts)
 LEMMASCRIPT_LSC=/tmp/lemmascript/node_modules/lemmascript/tools/dist/lsc.js \
   node scripts/verify-fsm-model.mjs
 ```
 
+[`.github/fsm-model/package-lock.json`](../../../../.github/fsm-model/package-lock.json)
+locks LemmaScript and its dependencies.
+
 It checks that the committed `.dfy.gen` is what LemmaScript generates from
-`fsmModel.ts`, verifies the model (62 Dafny tasks), rejects the thirteen
+`fsmModel.ts`, verifies the model (67 Dafny tasks), rejects the fourteen
 defects, and checks the rewrite. The `fsm model verification` workflow runs it
 on pull requests that change `src/fsm.ts` or this directory.
 
