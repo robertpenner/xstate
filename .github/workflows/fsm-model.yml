@@ -8,6 +8,7 @@ on:
       - 'packages/core/test/fsm-model/**'
       - 'scripts/verify-fsm-model.mjs'
       - '.github/workflows/fsm-model.yml'
+      - '.github/fsm-model/**'
 
 permissions:
   contents: read
@@ -37,10 +38,15 @@ jobs:
           sha256sum --check "$RUNNER_TEMP/dafny.sha256"
           unzip -q "$RUNNER_TEMP/dafny.zip" -d "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/dafny" >> "$GITHUB_PATH"
+      # .github/fsm-model locks LemmaScript and its dependencies. The install
+      # runs in RUNNER_TEMP so nothing it adds reaches the workspace.
       - name: Install LemmaScript 0.6.6 outside the workspace
         run: |
-          npm install --prefix "$RUNNER_TEMP/lemmascript" --ignore-scripts \
-            --no-audit --no-fund lemmascript@0.6.6
+          mkdir -p "$RUNNER_TEMP/lemmascript"
+          cp .github/fsm-model/package.json .github/fsm-model/package-lock.json \
+            "$RUNNER_TEMP/lemmascript/"
+          cd "$RUNNER_TEMP/lemmascript"
+          npm ci --ignore-scripts --no-audit --no-fund
           echo "LEMMASCRIPT_LSC=$RUNNER_TEMP/lemmascript/node_modules/lemmascript/tools/dist/lsc.js" >> "$GITHUB_ENV"
       - name: Verify the model, reject its defects, and detect stale Dafny
         run: node scripts/verify-fsm-model.mjs
