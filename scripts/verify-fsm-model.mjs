@@ -29,7 +29,7 @@ const lscOptions = [
   '--extra-flags=--cores=2'
 ];
 const proofFailure =
-  /a postcondition could not be proved|assertion might not hold/;
+  /a postcondition could not be proved|assertion might not hold|possible violation of postcondition of forall statement/;
 
 const read = (file) => readFileSync(path.join(modelDirectory, file), 'utf8');
 const manifest = JSON.parse(read('formal/fsmModel.manifest.json'));
@@ -277,16 +277,28 @@ async function regenerateRefactor(directory) {
   return 'Detected stale Dafny after the refactor; regeneration verifies.';
 }
 
+// After a failure, workers start no new tasks, and the running ones finish
+// before the caller deletes their scratch directories.
 async function inParallel(tasks, limit) {
   const results = new Array(tasks.length);
   let next = 0;
+  let failed = false;
   const worker = async () => {
-    while (next < tasks.length) {
+    while (!failed && next < tasks.length) {
       const index = next++;
-      results[index] = await tasks[index]();
+      try {
+        results[index] = await tasks[index]();
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
     }
   };
-  await Promise.all(Array.from({ length: limit }, worker));
+  const settled = await Promise.allSettled(
+    Array.from({ length: limit }, worker)
+  );
+  const rejection = settled.find(({ status }) => status === 'rejected');
+  if (rejection) throw rejection.reason;
   return results;
 }
 
