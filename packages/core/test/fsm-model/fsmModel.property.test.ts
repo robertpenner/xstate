@@ -77,12 +77,30 @@ const definition = fc.oneof(
   transitionFunction,
   fc.constant(undefined)
 );
-const stateNode = record(eventTypes, definition).map((on) => ({ on }));
+// Copies own data properties, keeping a `__proto__` key own, onto an object
+// whose prototype is `base`. Both levels draw from the same names, so an own
+// entry often shadows an inherited one.
+const withPrototype = ([own, base]: [object, object]) =>
+  Object.defineProperties(
+    Object.create(base),
+    Object.getOwnPropertyDescriptors(own)
+  );
+const table = <T>(keys: string[], value: fc.Arbitrary<T>) =>
+  fc.oneof(
+    { weight: 2, arbitrary: record(keys, value) },
+    {
+      weight: 1,
+      arbitrary: fc
+        .tuple(record(keys, value), record(keys, value))
+        .map(withPrototype)
+    }
+  );
+const stateNode = table(eventTypes, definition).map((on) => ({ on }));
 const config: fc.Arbitrary<JsConfig> = fc.record(
   {
     initial: target,
     context: record(contextKeys, contextValue),
-    states: record(stateNames, stateNode)
+    states: table(stateNames, stateNode)
   },
   { requiredKeys: ['initial', 'states'] }
 );

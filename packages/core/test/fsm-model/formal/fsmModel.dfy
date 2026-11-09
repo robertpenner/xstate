@@ -13,9 +13,9 @@ datatype TransitionConfig = TransitionConfig(target: Option<string>, context: Op
 
 datatype Transition = target(target: string) | config(config: TransitionConfig) | function_(compute: (map<string, Value>, FSMEvent) -> Option<TransitionConfig>)
 
-datatype StateNode = StateNode(on: map<string, Transition>)
+datatype StateNode = StateNode(on: map<string, Transition>, inheritedOn: map<string, Transition>)
 
-datatype Machine = Machine(initial: string, context: Option<map<string, Value>>, inherited: map<string, Value>, states: map<string, StateNode>)
+datatype Machine = Machine(initial: string, context: Option<map<string, Value>>, inherited: map<string, Value>, states: map<string, StateNode>, inheritedStates: map<string, StateNode>)
 
 datatype Snapshot = Snapshot(value: string, context: map<string, Value>)
 
@@ -95,17 +95,33 @@ lemma initialState_ensures(machine: Machine)
 {
 }
 
-function lookupTransition(machine: Machine, value: string, type_: string): Option<Transition>
+function lookupState(machine: Machine, value: string): Option<StateNode>
 {
   if (value in machine.states) then
-    var i_node_val := machine.states[value];
-    (if type_ in i_node_val.on then Some(i_node_val.on[type_]) else None)
+    var i_own_val := machine.states[value];
+    Some(i_own_val)
   else
-    None
+    (if value in machine.inheritedStates then Some(machine.inheritedStates[value]) else None)
+}
+
+lemma lookupState_ensures(machine: Machine, value: string)
+  ensures (!((value in machine.states)) ==> !((value in machine.inheritedStates)) ==> (match lookupState(machine, value) { case Some(i_) => false case None => true }))
+{
+}
+
+function lookupTransition(machine: Machine, value: string, type_: string): Option<Transition>
+{
+  var node := lookupState(machine, value);
+  match node {
+    case Some(i_node_val) =>
+      (if type_ in i_node_val.on then Some(i_node_val.on[type_]) else None)
+    case None =>
+      None
+  }
 }
 
 lemma lookupTransition_ensures(machine: Machine, value: string, type_: string)
-  ensures (!((value in machine.states)) ==> (match lookupTransition(machine, value, type_) { case Some(i_) => false case None => true }))
+  ensures (!((value in machine.states)) ==> !((value in machine.inheritedStates)) ==> (match lookupTransition(machine, value, type_) { case Some(i_) => false case None => true }))
 {
 }
 
@@ -394,11 +410,47 @@ lemma TransitionReadsMatchMerge(machine: Machine, snapshot: Snapshot, event: FSM
   }
 }
 
-// A declared value finds its transitions in its own state's table.
-lemma DeclaredStateLookup(machine: Machine, value: string, type_: string)
+// A value is declared when `config.states` owns or inherits a state with that name.
+ghost predicate Declared(machine: Machine, v: string)
+{
+  v in machine.states || v in machine.inheritedStates
+}
+
+// The state `config.states[v]` finds: the own state, else the inherited one.
+ghost function StateOf(machine: Machine, v: string): StateNode
+  requires Declared(machine, v)
+{
+  if v in machine.states then machine.states[v] else machine.inheritedStates[v]
+}
+
+// An own state shadows an inherited state of the same name.
+lemma OwnStateShadowsInherited(machine: Machine, value: string)
   requires value in machine.states
+  ensures lookupState(machine, value) == Some(machine.states[value])
+{
+}
+
+// An inherited state is used when no own state has its name.
+lemma InheritedStateLookup(machine: Machine, value: string)
+  requires value !in machine.states && value in machine.inheritedStates
+  ensures lookupState(machine, value) == Some(machine.inheritedStates[value])
+{
+}
+
+// A declared value finds its transitions in the own table of the state it names.
+lemma DeclaredStateLookup(machine: Machine, value: string, type_: string)
+  requires Declared(machine, value)
   ensures lookupTransition(machine, value, type_) ==
-    (if type_ in machine.states[value].on then Some(machine.states[value].on[type_]) else None)
+    (if type_ in StateOf(machine, value).on then Some(StateOf(machine, value).on[type_]) else None)
+{
+}
+
+// An event that the found state's `on` table does not own finds no
+// transition, whatever the table inherits.
+lemma InheritedEventIsNotFound(machine: Machine, value: string, type_: string)
+  requires Declared(machine, value)
+  requires type_ !in StateOf(machine, value).on
+  ensures lookupTransition(machine, value, type_).None?
 {
 }
 
@@ -601,32 +653,35 @@ lemma InheritedMismatchOwnsKey(machine: Machine, snapshot: Snapshot, event: FSME
 
 ghost predicate TargetDeclared(machine: Machine, config: TransitionConfig)
 {
-  config.target.Some? ==> config.target.value in machine.states
+  config.target.Some? ==> Declared(machine, config.target.value)
 }
 
 ghost predicate TransitionTargetsDeclared(machine: Machine, t: Transition)
 {
   match t
-  case target(s) => s in machine.states
+  case target(s) => Declared(machine, s)
   case config(c) => TargetDeclared(machine, c)
   case function_(f) => forall c, e :: f(c, e).Some? ==> TargetDeclared(machine, f(c, e).value)
 }
 
+// The initial value is declared, and so is every target of every transition
+// in the own table of a state that a declared value finds.
 ghost predicate TargetsDeclared(machine: Machine)
 {
-  machine.initial in machine.states &&
-  forall v, t :: v in machine.states && t in machine.states[v].on.Values ==> TransitionTargetsDeclared(machine, t)
+  Declared(machine, machine.initial) &&
+  forall v, t :: Declared(machine, v) && t in StateOf(machine, v).on.Values ==> TransitionTargetsDeclared(machine, t)
 }
 
 lemma StepStaysDeclared(machine: Machine, snapshot: Snapshot, event: FSMEvent)
   requires TargetsDeclared(machine)
-  requires snapshot.value in machine.states
-  ensures transition(machine, snapshot, event).snapshot.value in machine.states
+  requires Declared(machine, snapshot.value)
+  ensures Declared(machine, transition(machine, snapshot, event).snapshot.value)
 {
   TransitionMeaning(machine, snapshot, event);
+  DeclaredStateLookup(machine, snapshot.value, event.type_);
   var t := lookupTransition(machine, snapshot.value, event.type_);
   if t.Some? {
-    assert t.value in machine.states[snapshot.value].on.Values;
+    assert t.value in StateOf(machine, snapshot.value).on.Values;
     assert TransitionTargetsDeclared(machine, t.value);
     match t.value {
       case target(s) =>
@@ -639,8 +694,8 @@ lemma StepStaysDeclared(machine: Machine, snapshot: Snapshot, event: FSMEvent)
 
 lemma RunStaysDeclared(machine: Machine, snapshot: Snapshot, events: seq<FSMEvent>)
   requires TargetsDeclared(machine)
-  requires snapshot.value in machine.states
-  ensures run(machine, snapshot, events).value in machine.states
+  requires Declared(machine, snapshot.value)
+  ensures Declared(machine, run(machine, snapshot, events).value)
   decreases |events|
 {
   if |events| > 0 {
@@ -657,7 +712,7 @@ lemma InitialContext(machine: Machine)
 
 lemma InitialDeclared(machine: Machine)
   requires TargetsDeclared(machine)
-  ensures initialState(machine).value in machine.states
+  ensures Declared(machine, initialState(machine).value)
 {
 }
 

@@ -5,7 +5,8 @@
 // id (strings by content; booleans, null, fractions, and objects by `===`).
 // `strictEquals` is JavaScript `===` over these values. A context patch is the entry list of the patch object, so its keys
 // are distinct. Transition tables are Maps, which find only own keys, as
-// xstate's `Object.hasOwn` lookup does.
+// xstate's `Object.hasOwn` lookup does. `config.states[value]` reads through
+// the prototype chain, so a machine has own and inherited state tables.
 export type Value =
   | { kind: 'integer'; value: number }
   | { kind: 'negativeZero' }
@@ -28,14 +29,21 @@ export type Transition =
         event: FSMEvent
       ) => TransitionConfig | undefined;
     };
-export type StateNode = { on: Map<string, Transition> };
+// `inheritedOn` holds the transitions an `on` table inherits from its
+// prototypes, which xstate never takes.
+export type StateNode = {
+  on: Map<string, Transition>;
+  inheritedOn: Map<string, Transition>;
+};
 // `inherited` holds the values a context reads for keys it does not own: the
-// properties of its prototype, Object.prototype.
+// properties of its prototype, Object.prototype. `inheritedStates` holds the
+// states `config.states` inherits from its prototypes, nearest first.
 export type Machine = {
   initial: string;
   context: Record<string, Value> | undefined;
   inherited: Record<string, Value>;
   states: Map<string, StateNode>;
+  inheritedStates: Map<string, StateNode>;
 };
 export type Snapshot = { value: string; context: Record<string, Value> };
 export type Step = { snapshot: Snapshot; reused: boolean };
@@ -97,14 +105,26 @@ export function initialState(machine: Machine): Snapshot {
   return { value: machine.initial, context: machine.context ?? {} };
 }
 
+// `config.states[value]`: the own state, else the inherited state, else none.
+export function lookupState(
+  machine: Machine,
+  value: string
+): StateNode | undefined {
+  //@ verify
+  //@ ensures !machine.states.has(value) && !machine.inheritedStates.has(value) ==> \result === undefined
+  const own = machine.states.get(value);
+  if (own !== undefined) return own;
+  return machine.inheritedStates.get(value);
+}
+
 export function lookupTransition(
   machine: Machine,
   value: string,
   type: string
 ): Transition | undefined {
   //@ verify
-  //@ ensures !machine.states.has(value) ==> \result === undefined
-  const node = machine.states.get(value);
+  //@ ensures !machine.states.has(value) && !machine.inheritedStates.has(value) ==> \result === undefined
+  const node = lookupState(machine, value);
   if (node === undefined) return undefined;
   return node.on.get(type);
 }

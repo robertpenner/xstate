@@ -1,6 +1,6 @@
 {
   "source": "fsmModel.ts",
-  "verifiedCount": 67,
+  "verifiedCount": 76,
   "functions": {
     "strictEquals": {
       "parameters": [],
@@ -20,10 +20,16 @@
       "parameters": [],
       "ensures": ["(initialState(machine).value == machine.initial)"]
     },
+    "lookupState": {
+      "parameters": [],
+      "ensures": [
+        "(!((value in machine.states)) ==> !((value in machine.inheritedStates)) ==> (match lookupState(machine, value) { case Some(i_) => false case None => true }))"
+      ]
+    },
     "lookupTransition": {
       "parameters": [],
       "ensures": [
-        "(!((value in machine.states)) ==> (match lookupTransition(machine, value, type_) { case Some(i_) => false case None => true }))"
+        "(!((value in machine.states)) ==> !((value in machine.inheritedStates)) ==> (match lookupTransition(machine, value, type_) { case Some(i_) => false case None => true }))"
       ]
     },
     "resolveTransition": {
@@ -65,6 +71,8 @@
     "ResolvedTarget",
     "Resolve",
     "KeepsStateWithPatch",
+    "Declared",
+    "StateOf",
     "TargetDeclared",
     "TransitionTargetsDeclared",
     "TargetsDeclared"
@@ -72,7 +80,8 @@
   "modelDeclarations": [
     "datatype Value = integer(value: int) | negativeZero | notANumber | undefinedValue | opaque_(id: int)",
     "datatype Transition = target(target: string) | config(config: TransitionConfig) | function_(compute: (map<string, Value>, FSMEvent) -> Option<TransitionConfig>)",
-    "datatype Machine = Machine(initial: string, context: Option<map<string, Value>>, inherited: map<string, Value>, states: map<string, StateNode>)",
+    "datatype StateNode = StateNode(on: map<string, Transition>, inheritedOn: map<string, Transition>)",
+    "datatype Machine = Machine(initial: string, context: Option<map<string, Value>>, inherited: map<string, Value>, states: map<string, StateNode>, inheritedStates: map<string, StateNode>)",
     "datatype Snapshot = Snapshot(value: string, context: map<string, Value>)",
     "datatype Step = Step(snapshot: Snapshot, reused: bool)"
   ],
@@ -89,7 +98,10 @@
     "TransitionMeaning",
     "ChangedPatchCopies",
     "TransitionReadsMatchMerge",
+    "OwnStateShadowsInherited",
+    "InheritedStateLookup",
     "DeclaredStateLookup",
+    "InheritedEventIsNotFound",
     "MissingTransitionKeepsSnapshot",
     "ReuseIsExactWithoutNaN",
     "UnchangedPatchKeepsSnapshot",
@@ -180,8 +192,18 @@
     },
     {
       "name": "every value uses the initial state's transitions",
-      "before": "const node = machine.states.get(value);",
-      "after": "const node = machine.states.get(machine.initial);"
+      "before": "const node = lookupState(machine, value);",
+      "after": "const node = lookupState(machine, machine.initial);"
+    },
+    {
+      "name": "state lookup ignores inherited states",
+      "before": "return machine.inheritedStates.get(value);",
+      "after": "return undefined;"
+    },
+    {
+      "name": "event lookup reads inherited events",
+      "before": "return node.on.get(type);",
+      "after": "return node.on.get(type) ?? node.inheritedOn.get(type);"
     }
   ],
   "refactor": {

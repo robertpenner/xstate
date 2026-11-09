@@ -13,9 +13,9 @@ datatype TransitionConfig = TransitionConfig(target: Option<string>, context: Op
 
 datatype Transition = target(target: string) | config(config: TransitionConfig) | function_(compute: (map<string, Value>, FSMEvent) -> Option<TransitionConfig>)
 
-datatype StateNode = StateNode(on: map<string, Transition>)
+datatype StateNode = StateNode(on: map<string, Transition>, inheritedOn: map<string, Transition>)
 
-datatype Machine = Machine(initial: string, context: Option<map<string, Value>>, inherited: map<string, Value>, states: map<string, StateNode>)
+datatype Machine = Machine(initial: string, context: Option<map<string, Value>>, inherited: map<string, Value>, states: map<string, StateNode>, inheritedStates: map<string, StateNode>)
 
 datatype Snapshot = Snapshot(value: string, context: map<string, Value>)
 
@@ -95,17 +95,33 @@ lemma initialState_ensures(machine: Machine)
 {
 }
 
-function lookupTransition(machine: Machine, value: string, type_: string): Option<Transition>
+function lookupState(machine: Machine, value: string): Option<StateNode>
 {
   if (value in machine.states) then
-    var i_node_val := machine.states[value];
-    (if type_ in i_node_val.on then Some(i_node_val.on[type_]) else None)
+    var i_own_val := machine.states[value];
+    Some(i_own_val)
   else
-    None
+    (if value in machine.inheritedStates then Some(machine.inheritedStates[value]) else None)
+}
+
+lemma lookupState_ensures(machine: Machine, value: string)
+  ensures (!((value in machine.states)) ==> !((value in machine.inheritedStates)) ==> (match lookupState(machine, value) { case Some(i_) => false case None => true }))
+{
+}
+
+function lookupTransition(machine: Machine, value: string, type_: string): Option<Transition>
+{
+  var node := lookupState(machine, value);
+  match node {
+    case Some(i_node_val) =>
+      (if type_ in i_node_val.on then Some(i_node_val.on[type_]) else None)
+    case None =>
+      None
+  }
 }
 
 lemma lookupTransition_ensures(machine: Machine, value: string, type_: string)
-  ensures (!((value in machine.states)) ==> (match lookupTransition(machine, value, type_) { case Some(i_) => false case None => true }))
+  ensures (!((value in machine.states)) ==> !((value in machine.inheritedStates)) ==> (match lookupTransition(machine, value, type_) { case Some(i_) => false case None => true }))
 {
 }
 
