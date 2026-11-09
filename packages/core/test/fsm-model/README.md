@@ -80,8 +80,8 @@ hints, such as "a reused step returns the given snapshot". The laws in
   reuses the snapshot; a missing transition, a `{}` result, or a patch that
   changes nothing under a target equal to the value reuses it; a string
   transition `T` resolves the same as `{ target: T }`.
-- A value is declared when `config.states` owns or inherits a state with that
-  name. An own state shadows an inherited state of the same name, an
+- A value is declared when `config.states` owns a state with that name or
+  inherits one from a prototype below `Object.prototype`. An own state shadows an inherited state of the same name, an
   inherited state is used when no own state has its name, a declared value
   finds its transitions in that state's own `on` table, and an event that
   table does not own finds nothing, whatever it inherits.
@@ -157,26 +157,31 @@ as they do for `config.states[value]` and `Object.hasOwn`. The object's own
 level fills `states` or `on`; each prototype level below `Object.prototype`
 fills `inheritedStates` or `inheritedOn` with the names that no nearer
 prototype has, including names the object also owns. `Object.prototype` is
-left out because none of its properties has an `on`: a state name such as
+left out: the model assumes, and the adapter checks, that none of its
+properties has an `on`. A state name such as
 `toString` or `constructor` that only `Object.prototype` supplies finds a
 method, and `__proto__` finds the prototype of `config.states`. The adapter
 checks that each such name still finds no `on` in `config.states`, which also
-catches a `states` object whose prototype has a state named `on`.
+catches a `states` object whose prototype has a state named `on` and an
+`Object.prototype` polluted with a property that has an `on`.
 
 The adapter refuses a context or patch whose prototype is not
 `Object.prototype`, or that has symbol keys, accessors, or non-enumerable
 properties. `createFSM` reads an accessor twice, compares no symbol keys but
 copies them, and reads absent keys through other prototypes, so the model does
 not cover those inputs. It also refuses an accessor on any level of
-`config.states` or an `on` table, which `createFSM` would run on every lookup,
-and a name that only `Object.prototype` supplies but that finds an `on`.
+`config.states` or an `on` table, and a name that only `Object.prototype`
+supplies but that finds an `on`. The accessor refusal is conservative:
+`createFSM` never reads an inherited `on` entry or a shadowed state, so some
+refused accessors would never run, but the adapter does not try to tell which.
 
 [`fsmModel.test.ts`](./fsmModel.test.ts) runs named cases: inherited event
 types, the empty-string target, functions that return `undefined` or `{}`, an
 undeclared snapshot value, states inherited through `Object.create` (two
 levels deep) and through a literal `__proto__: { ... }`, an own state
-shadowing an inherited state of the same name, an event that an `on` table
-inherits and that is not taken, the snapshot values `toString`,
+shadowing an inherited state of the same name, an event that the `on` table
+of an own or an inherited state inherits and that is not taken, the snapshot
+values `toString`,
 `constructor`, `hasOwnProperty`, and `__proto__` finding no transitions in a
 plain `states` object, a non-enumerable own state and transition, a table of
 patches that keep or copy the context
@@ -201,12 +206,15 @@ change from `!==` to `Object.is` in `fsm.ts`.
 In three measured runs of the generator, 26% to 30% of the
 configurations inherited at least one state. Of the 2,930 to 4,799 steps per
 run, 7% to 8% started from a state found only through the prototype, 2.0% to
-2.4% took one of that state's transitions, and 6% to 7% started from an own
-state that shadows an inherited one. Replacing the lookup in `fsm.ts` with
+2.4% found a transition in that state, and 6% to 7% started from an own state
+that shadows an inherited one. Replacing the lookup in `fsm.ts` with
 `Object.hasOwn(config.states, value) ? config.states[value]?.on : undefined`
-fails the two named inherited-state cases and the generated comparison.
-Making `lookupState` prefer the inherited state fails the shadowing case and
-the generated comparison.
+fails three named cases ("finds a state that config.states inherits through
+Object.create", "finds a state inherited through a literal `__proto__`",
+and the inherited `away` state whose `on` table inherits an event) and the
+generated comparison. Making `lookupState` prefer the inherited state fails
+"uses an own state over an inherited state of the same name" and the
+generated comparison.
 
 Both test files run in `pnpm test`.
 
@@ -222,7 +230,11 @@ Both test files run in `pnpm test`.
   prototype of `config.states` or an `on` table, later is outside the model.
 - The adapter reads each state's `on` once, through its prototype, and does
   not check it for an accessor, which `createFSM` would run on every event.
-- The generator builds one prototype level; the named cases cover two.
+- The generator builds one prototype level for `config.states` and each `on`
+  table; the named cases cover two levels for `config.states`.
+- The adapter builds the machine once. A program that adds, removes, or
+  replaces a state or transition in `config.states` or an `on` table after
+  `createFSM` is called is outside the model.
 - Transition functions are total and pure in Dafny: each result depends only
   on the context's entries and the event. A function that throws, mutates its
   argument, reads outside state, or returns different results on its two calls
