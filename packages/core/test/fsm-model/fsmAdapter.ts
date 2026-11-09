@@ -77,12 +77,15 @@ export function assertPlainData(object: object, label: string) {
 // nearest prototype below Object.prototype that has it, whether or not the
 // object also owns the name. `createFSM` reads states with
 // `config.states[value]` and transitions with `Object.hasOwn(on, type)`, both
-// of which find non-enumerable properties, so every string key counts. It
-// would run an accessor on every lookup, so accessors are refused.
+// of which find non-enumerable properties, so every string key counts.
+// `createFSM` would run an own or nearest accessor on every lookup. Accessors
+// are refused on every level, including shadowed entries and inherited
+// transitions that `createFSM` never reads, which refuses some configs it
+// handles.
 function ownAndInherited<T>(
   object: object,
   label: string,
-  convert: (value: unknown) => T | undefined
+  convert: (value: unknown, key: string) => T | undefined
 ) {
   const levels: object[] = [];
   for (
@@ -104,7 +107,7 @@ function ownAndInherited<T>(
         if (seen.has(key)) continue;
         seen.add(key);
       }
-      const converted = convert(descriptor.value);
+      const converted = convert(descriptor.value, key);
       if (converted !== undefined)
         (depth === 0 ? own : inherited).set(key, converted);
     }
@@ -218,8 +221,8 @@ export function toModel(config: JsConfig) {
     );
     return { on: own, inheritedOn: inherited };
   };
-  const states = ownAndInherited(config.states, 'config.states', (node) =>
-    toStateNode(node, 'config.states')
+  const states = ownAndInherited(config.states, 'config.states', (node, name) =>
+    toStateNode(node, `config.states[${JSON.stringify(name)}]`)
   );
   // A name that only Object.prototype supplies reads a method, or for
   // `__proto__` the prototype of config.states. The model gives such a name
