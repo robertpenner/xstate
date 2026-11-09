@@ -5,6 +5,7 @@ import {
   transition,
   type FSMEvent,
   type Machine,
+  type StateNode,
   type Transition,
   type TransitionConfig,
   type Value
@@ -70,6 +71,44 @@ export function assertPlainData(object: object, label: string) {
       'value' in descriptor && descriptor.enumerable,
       `${label}: ${JSON.stringify(key)} must be an enumerable data property`
     ).toBe(true);
+}
+
+// The own data properties of `object`, and for each name the value from the
+// nearest prototype below Object.prototype that has it, whether or not the
+// object also owns the name. `createFSM` reads states with
+// `config.states[value]` and transitions with `Object.hasOwn(on, type)`, both
+// of which find non-enumerable properties, so every string key counts. It
+// would run an accessor on every lookup, so accessors are refused.
+function ownAndInherited<T>(
+  object: object,
+  label: string,
+  convert: (value: unknown) => T | undefined
+) {
+  const levels: object[] = [];
+  for (
+    let level: object | null = object;
+    level !== null && level !== Object.prototype;
+    level = Object.getPrototypeOf(level)
+  )
+    levels.push(level);
+  const [own, inherited] = [new Map<string, T>(), new Map<string, T>()];
+  const seen = new Set<string>();
+  for (const [depth, level] of levels.entries())
+    for (const key of Object.getOwnPropertyNames(level)) {
+      const descriptor = Object.getOwnPropertyDescriptor(level, key)!;
+      expect(
+        'value' in descriptor,
+        `${label}: ${JSON.stringify(key)} must be a data property`
+      ).toBe(true);
+      if (depth > 0) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+      }
+      const converted = convert(descriptor.value);
+      if (converted !== undefined)
+        (depth === 0 ? own : inherited).set(key, converted);
+    }
+  return { own, inherited };
 }
 
 class Values {
@@ -164,6 +203,34 @@ export function toModel(config: JsConfig) {
   const inherited: Record<string, Value> = {};
   for (const key of Object.getOwnPropertyNames(Object.prototype))
     setOwn(inherited, encodeKey(key), values.toValue(({} as JsContext)[key]));
+  // createFSM treats an undefined transition as no transition, so the
+  // model's transition tables leave it out. The empty string is a target.
+  // A state whose `on` is missing has no transitions, and it still shadows
+  // an inherited state of the same name.
+  const toStateNode = (node: unknown, label: string): StateNode => {
+    const { own, inherited } = ownAndInherited(
+      (node as { on?: object } | null | undefined)?.on ?? {},
+      `${label}.on`,
+      (definition) =>
+        definition === undefined
+          ? undefined
+          : toTransition(definition as Exclude<JsTransition, undefined>)
+    );
+    return { on: own, inheritedOn: inherited };
+  };
+  const states = ownAndInherited(config.states, 'config.states', (node) =>
+    toStateNode(node, 'config.states')
+  );
+  // A name that only Object.prototype supplies reads a method, or for
+  // `__proto__` the prototype of config.states. The model gives such a name
+  // no state, which is right only while it finds no `on`.
+  for (const name of Object.getOwnPropertyNames(Object.prototype))
+    if (!states.own.has(name) && !states.inherited.has(name))
+      expect(
+        (config.states as Record<string, { on?: unknown } | undefined>)[name]
+          ?.on,
+        `config.states.${name} finds transitions outside the model`
+      ).toBe(undefined);
   const machine: Machine = {
     initial: config.initial,
     context:
@@ -171,22 +238,8 @@ export function toModel(config: JsConfig) {
         ? undefined
         : encodeContext(config.context, 'config.context'),
     inherited,
-    // createFSM treats an undefined transition as no transition, so the
-    // model's transition table leaves it out. The empty string is a target.
-    states: new Map(
-      Object.entries(config.states).map(([name, node]) => [
-        name,
-        {
-          on: new Map(
-            Object.entries(node.on ?? {}).flatMap(([type, definition]) =>
-              definition === undefined
-                ? []
-                : [[type, toTransition(definition)] as const]
-            )
-          )
-        }
-      ])
-    )
+    states: states.own,
+    inheritedStates: states.inherited
   };
   return { machine, decodeContext };
 }

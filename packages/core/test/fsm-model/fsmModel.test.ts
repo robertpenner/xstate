@@ -1,5 +1,5 @@
 import { assertAgrees, toModel, type JsConfig } from './fsmAdapter.ts';
-import { initialState, transition } from './fsmModel.ts';
+import { initialState, run, transition } from './fsmModel.ts';
 
 const setOwn = (object: object, key: string, value: unknown) =>
   Object.defineProperty(object, key, {
@@ -59,6 +59,86 @@ describe('the fsm model and createFSM', () => {
       { initial: 'gone', states: { idle: { on: { go: 'idle' } } } },
       [{ type: 'go', payload: 0 }]
     );
+  });
+
+  const events = (...types: string[]) =>
+    types.map((type) => ({ type, payload: 0 }));
+  const finalValue = (config: JsConfig, types: string[]) => {
+    const { machine } = toModel(config);
+    return run(machine, initialState(machine), events(...types)).value;
+  };
+
+  it('finds a state that config.states inherits through Object.create', () => {
+    const base = { busy: { on: { back: 'idle' } } };
+    const deeper = Object.create(base) as JsConfig['states'];
+    setOwn(deeper, 'done', { on: { reset: 'idle' } });
+    const states = Object.create(deeper) as JsConfig['states'];
+    setOwn(states, 'idle', { on: { go: 'busy', finish: 'done' } });
+    const config: JsConfig = { initial: 'idle', states };
+    const types = ['go', 'back', 'finish', 'reset', 'go'];
+    expect(finalValue(config, types)).toBe('busy');
+    assertAgrees(config, events(...types));
+  });
+
+  it('finds a state inherited through a literal __proto__', () => {
+    const config: JsConfig = {
+      initial: 'idle',
+      states: {
+        idle: { on: { go: 'busy' } },
+        __proto__: { busy: { on: { back: 'idle' } } }
+      } as JsConfig['states']
+    };
+    expect(Object.hasOwn(config.states, 'busy')).toBe(false);
+    expect(finalValue(config, ['go', 'back'])).toBe('idle');
+    assertAgrees(config, events('go', 'back'));
+  });
+
+  it('uses an own state over an inherited state of the same name', () => {
+    const states = Object.create({
+      idle: { on: { go: 'inherited' } },
+      inherited: {}
+    }) as JsConfig['states'];
+    setOwn(states, 'idle', { on: { stay: { context: { x: 2 } } } });
+    setOwn(states, 'own', {});
+    const config: JsConfig = { initial: 'idle', context: { x: 1 }, states };
+    const { machine } = toModel(config);
+    expect(machine.inheritedStates.has('idle')).toBe(true);
+    expect(finalValue(config, ['go', 'stay'])).toBe('idle');
+    assertAgrees(config, events('go', 'stay', 'go'));
+  });
+
+  it('does not take an event that the on table inherits', () => {
+    const on = Object.create({ go: 'busy' }) as Record<string, string>;
+    setOwn(on, 'stay', 'idle');
+    const config: JsConfig = {
+      initial: 'idle',
+      states: { idle: { on }, busy: {} }
+    };
+    const { machine } = toModel(config);
+    const step = transition(machine, initialState(machine), events('go')[0]);
+    expect(step.reused).toBe(true);
+    expect(step.snapshot.value).toBe('idle');
+    assertAgrees(config, events('go', 'stay', 'go'));
+  });
+
+  it.each(['toString', 'constructor', 'hasOwnProperty', '__proto__'])(
+    'gives the snapshot value %s no transitions with a plain states object',
+    (initial) => {
+      assertAgrees(
+        { initial, states: { idle: { on: { go: 'idle' } } } },
+        events('go', 'on', 'toString')
+      );
+    }
+  );
+
+  it('finds a non-enumerable own state and transition', () => {
+    const on: Record<string, string> = {};
+    Object.defineProperty(on, 'go', { value: 'busy' });
+    const states = { idle: { on } } as JsConfig['states'];
+    Object.defineProperty(states, 'busy', { value: { on: { back: 'idle' } } });
+    const config: JsConfig = { initial: 'idle', states };
+    expect(finalValue(config, ['go'])).toBe('busy');
+    assertAgrees(config, events('go', 'back'));
   });
 
   // Each case patches the context `{ zero: 0, text: 'a', ref }` and states
@@ -195,6 +275,36 @@ describe('the fsm model and createFSM', () => {
       assertAgrees({ initial: 'idle', context, states: { idle: { on } } }, [
         { type: 'go', payload: 0 }
       ])
+    ).toThrow(/outside the model|must be/);
+  });
+
+  const accessor = (object: object, key: string, value: unknown) =>
+    Object.defineProperty(object, key, { get: () => value, enumerable: true });
+  it.each([
+    ['an own state with an accessor', () => accessor({ idle: {} }, 'busy', {})],
+    [
+      'an inherited state with an accessor',
+      () => {
+        const states = Object.create(accessor({}, 'busy', {}));
+        setOwn(states, 'idle', {});
+        return states;
+      }
+    ],
+    [
+      'a transition with an accessor',
+      () => ({ idle: { on: accessor({}, 'go', 'idle') } })
+    ],
+    [
+      'an inherited state named on, which states.__proto__ reaches',
+      () => {
+        const states = Object.create({ on: { on: { go: 'idle' } } });
+        setOwn(states, 'idle', {});
+        return states;
+      }
+    ]
+  ])('refuses states with %s, which is outside the model', (_name, build) => {
+    expect(() =>
+      assertAgrees({ initial: '__proto__', states: build() }, events('go'))
     ).toThrow(/outside the model|must be/);
   });
 });
