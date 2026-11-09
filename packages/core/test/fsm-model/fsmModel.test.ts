@@ -99,7 +99,6 @@ describe('the fsm model and createFSM', () => {
       inherited: {}
     }) as JsConfig['states'];
     setOwn(states, 'idle', { on: { stay: { context: { x: 2 } } } });
-    setOwn(states, 'own', {});
     const config: JsConfig = { initial: 'idle', context: { x: 1 }, states };
     const { machine } = toModel(config);
     expect(machine.inheritedStates.has('idle')).toBe(true);
@@ -107,27 +106,37 @@ describe('the fsm model and createFSM', () => {
     assertAgrees(config, events('go', 'stay', 'go'));
   });
 
-  it('does not take an event that the on table inherits', () => {
-    const on = Object.create({ go: 'busy' }) as Record<string, string>;
-    setOwn(on, 'stay', 'idle');
-    const config: JsConfig = {
-      initial: 'idle',
-      states: { idle: { on }, busy: {} }
-    };
-    const { machine } = toModel(config);
-    const step = transition(machine, initialState(machine), events('go')[0]);
-    expect(step.reused).toBe(true);
-    expect(step.snapshot.value).toBe('idle');
-    assertAgrees(config, events('go', 'stay', 'go'));
-  });
+  it.each(['idle', 'away'])(
+    'does not take an event that the on table of the %s state inherits',
+    (initial) => {
+      const on = Object.create({ go: 'busy' }) as Record<string, string>;
+      setOwn(on, 'stay', 'idle');
+      const states = Object.create({ away: { on } }) as JsConfig['states'];
+      setOwn(states, 'idle', { on });
+      setOwn(states, 'busy', {});
+      const config: JsConfig = { initial, states };
+      const { machine } = toModel(config);
+      expect(machine.states.has(initial)).toBe(initial === 'idle');
+      const step = transition(machine, initialState(machine), events('go')[0]);
+      expect(step.reused).toBe(true);
+      expect(step.snapshot.value).toBe(initial);
+      assertAgrees(config, events('go', 'stay', 'go'));
+    }
+  );
 
   it.each(['toString', 'constructor', 'hasOwnProperty', '__proto__'])(
     'gives the snapshot value %s no transitions with a plain states object',
     (initial) => {
-      assertAgrees(
-        { initial, states: { idle: { on: { go: 'idle' } } } },
-        events('go', 'on', 'toString')
-      );
+      const config: JsConfig = {
+        initial,
+        states: { idle: { on: { go: 'idle' } } }
+      };
+      const { machine } = toModel(config);
+      for (const event of events('go', 'on', 'toString'))
+        expect(transition(machine, initialState(machine), event).reused).toBe(
+          true
+        );
+      assertAgrees(config, events('go', 'on', 'toString'));
     }
   );
 
@@ -306,5 +315,22 @@ describe('the fsm model and createFSM', () => {
     expect(() =>
       assertAgrees({ initial: '__proto__', states: build() }, events('go'))
     ).toThrow(/outside the model|must be/);
+  });
+
+  it('refuses a state name that a polluted Object.prototype answers with an on', () => {
+    Object.defineProperty(Object.prototype, 'polluted', {
+      value: { on: { go: 'idle' } },
+      configurable: true
+    });
+    try {
+      expect(() =>
+        assertAgrees(
+          { initial: 'polluted', states: { idle: {} } },
+          events('go')
+        )
+      ).toThrow(/polluted finds transitions outside the model/);
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).polluted;
+    }
   });
 });

@@ -36,8 +36,9 @@ export type StateNode = {
   inheritedOn: Map<string, Transition>;
 };
 // `inherited` holds the values a context reads for keys it does not own: the
-// properties of its prototype, Object.prototype. `inheritedStates` holds the
-// states `config.states` inherits from its prototypes, nearest first.
+// properties of its prototype, Object.prototype. `inheritedStates` holds, for
+// each name, the state from the nearest prototype of `config.states` that has
+// one.
 export type Machine = {
   initial: string;
   context: Record<string, Value> | undefined;
