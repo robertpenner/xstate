@@ -1,0 +1,15 @@
+{
+  "name": "xstate-fsm-beta1-patch-change-detection",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "xstate": "6.0.0-beta.1"
+  },
+  "stackblitz": {
+    "installDependencies": true,
+    "startCommand": "npm start"
+  }
+}
