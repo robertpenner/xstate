@@ -109,7 +109,23 @@ function checkInventory(gen, proven) {
   const declarations = (text) =>
     new Map(
       [...text.matchAll(/^((?:function|lemma) (\w+)[\s\S]*?)^\{/gm)].map(
-        ([, header, name]) => {
+        (match) => {
+          const [, header, name] = match;
+          const message = `Generated declaration contract must remain unchanged: ${name}`;
+          let end = match.index + match[0].length;
+          let depth = 1;
+          while (end < text.length && depth > 0) {
+            if (text[end] === '{') depth++;
+            if (text[end] === '}') depth--;
+            end++;
+          }
+          assert.equal(depth, 0, message);
+          // A specification's set display must not masquerade as the body.
+          assert.match(
+            text.slice(end),
+            /^\s*(?:(?:ghost\s+)?(?:function|predicate|lemma|datatype|type)\b|$)/,
+            message
+          );
           const clauses = [
             ...header.matchAll(
               /(?<![\p{ID_Continue}'?])(requires|ensures|decreases|reads|modifies)(?![\p{ID_Continue}'?])/gu

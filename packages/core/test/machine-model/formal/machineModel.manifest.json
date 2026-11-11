@@ -152,6 +152,16 @@
   ],
   "proofDefects": [
     {
+      "name": "set display hides restrictive precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures\n{\n0\n} == {0}\n  requires false\n"
+    },
+    {
+      "name": "standalone set delimiter hides restrictive precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures\n{\n0\n}\n  == {0}\n  requires false\n"
+    },
+    {
       "name": "inline restrictive precondition",
       "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
       "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures true requires false\n"

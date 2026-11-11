@@ -278,6 +278,21 @@ or timeout expectation was changed.
 
 **Remaining blockers:** final independent review and PR publication checks.
 
+The lexical correction was published as `a96252d`. Its follow-up review
+accepted the exact inline repair and requested a set-display probe: a
+column-zero `{` inside an added postcondition could be mistaken for the
+declaration body, hiding a later `requires false`. A new anti-weakening
+regression reproduced that acceptance. The driver now checks balanced body
+braces and rejects trailing expression or contract tokens after the apparent
+body. Two set-display regressions bring the probe count to eleven. Complete
+execution of the original set-display proof passed all 252 verification tasks,
+13 model defects, freshness and regeneration. The repaired driver rejects that
+exact proof before verification. Its full run passes eleven anti-weakening
+probes, 252 tasks, 13 semantic defects, freshness and regeneration. Build,
+typecheck, lint, formatting and changed-file Markdown checks pass. The full
+core suite again passes 187 files and 3029 tests (29 skipped, three todo) with
+two workers, in 181.51 seconds. Follow-up review remains pending.
+
 **Completed:** pending.
 
 **Duration:** not measured.

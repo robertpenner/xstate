@@ -217,6 +217,9 @@ with `|| true`; all are rejected before verification. Probes include multiple
 clauses on one line, nested comments, and string/character literals containing
 comment markers. The scanner distinguishes specification keywords from strings
 and comments without treating line breaks as clause delimiters.
+It also checks balanced body braces and requires a declaration or end of file
+after the closing brace. Ambiguous header layouts, including column-zero set
+displays in added postconditions, are rejected instead of hiding later clauses.
 The driver rejects assumptions and proof-disabling attributes; only
 `induction false` and `isolate_assertions` are allowed to control proof search.
 It requires every seeded edit to
