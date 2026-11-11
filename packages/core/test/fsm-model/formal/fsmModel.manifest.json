@@ -1,0 +1,214 @@
+{
+  "source": "fsmModel.ts",
+  "verifiedCount": 81,
+  "functions": {
+    "sameValue": {
+      "parameters": [],
+      "ensures": ["(sameValue(a, b) == (a == b))"]
+    },
+    "initialState": {
+      "parameters": [],
+      "ensures": ["(initialState(machine).value == machine.initial)"]
+    },
+    "lookupState": {
+      "parameters": [],
+      "ensures": [
+        "(!((value in machine.states)) ==> (match lookupState(machine, value) { case Some(i_) => false case None => true }))"
+      ]
+    },
+    "lookupTransition": {
+      "parameters": [],
+      "ensures": [
+        "(!((value in machine.states)) ==> (match lookupTransition(machine, value, type_) { case Some(i_) => false case None => true }))"
+      ]
+    },
+    "resolveTransition": {
+      "parameters": [],
+      "ensures": [
+        "((match transition { case Some(i_) => false case None => true }) ==> (match resolveTransition(transition, context, event) { case Some(i_) => false case None => true }))"
+      ]
+    },
+    "entryUnchanged": {
+      "parameters": [],
+      "ensures": [
+        "(!((entry.key in context)) ==> !(entryUnchanged(context, entry)))"
+      ]
+    },
+    "patchChanges": {
+      "parameters": [],
+      "ensures": ["((|patch| == 0) ==> !(patchChanges(context, patch)))"]
+    },
+    "mergePatch": {
+      "parameters": [],
+      "ensures": [
+        "((|patch| == 0) ==> (mergePatch(context, patch) == context))"
+      ]
+    },
+    "transition": {
+      "parameters": [],
+      "ensures": [
+        "(transition(machine, snapshot, event).reused ==> (transition(machine, snapshot, event).snapshot == snapshot))"
+      ]
+    },
+    "run": {
+      "parameters": [],
+      "ensures": [
+        "((|events| == 0) ==> (run(machine, snapshot, events) == snapshot))"
+      ]
+    }
+  },
+  "specFunctions": [
+    "HasKey",
+    "DistinctKeys",
+    "OwnsPatch",
+    "ResolvedPatch",
+    "ResolvedTarget",
+    "Resolve",
+    "Declared",
+    "KeepsStateWithPatch",
+    "TargetDeclared",
+    "TransitionTargetsDeclared",
+    "TargetsDeclared",
+    "WitnessMachine",
+    "PatchTransition"
+  ],
+  "modelDeclarations": [
+    "datatype Value = integer(value: int) | negativeZero | notANumber | undefinedValue | opaque_(id: int)",
+    "datatype Transition = target(target: string) | config(config: TransitionConfig) | function_(compute: (map<string, Value>, FSMEvent) -> Option<TransitionConfig>)",
+    "datatype StateNode = StateNode(on: map<string, Transition>, inheritedOn: map<string, Transition>)",
+    "datatype Machine = Machine(initial: string, context: Option<map<string, Value>>, states: map<string, StateNode>, inheritedStates: map<string, StateNode>)",
+    "datatype Snapshot = Snapshot(value: string, context: map<string, Value>)",
+    "datatype Step = Step(snapshot: Snapshot, reused: bool)"
+  ],
+  "laws": [
+    "MergeKeys",
+    "MergeValues",
+    "MergeOfOwnedValuesIsIdentity",
+    "PatchUnchangedIffOwned",
+    "MergeSettles",
+    "MergeIdempotent",
+    "TransitionMeaning",
+    "ChangedPatchCopies",
+    "ContextIsFullMerge",
+    "PatchKeysOwnedAfterStep",
+    "DeclaredStateLookup",
+    "InheritedStateHasNoTransitions",
+    "InheritedStatesIgnored",
+    "InheritedEventIsNotFound",
+    "MissingTransitionKeepsSnapshot",
+    "ReuseIsExact",
+    "UnchangedPatchKeepsSnapshot",
+    "StringTargetIsConfigTarget",
+    "EmptyConfigKeepsSnapshot",
+    "ContextKeysKept",
+    "AbsentKeyAlwaysChanges",
+    "OwnedEntryComparesWithObjectIs",
+    "NegativeZeroOverZeroCopies",
+    "NotANumberOverOwnNotANumberKeepsSnapshot",
+    "StepStaysDeclared",
+    "RunStaysDeclared",
+    "InitialContext",
+    "InitialDeclared",
+    "RunSingleEvent",
+    "RunConcat",
+    "RunKeepsContextKeys"
+  ],
+  "witnesses": {
+    "MergeValues": "MergeValuesWitness",
+    "MergeOfOwnedValuesIsIdentity": "MergeOfOwnedValuesIsIdentityWitness",
+    "MergeSettles": "MergeSettlesWitness",
+    "MergeIdempotent": "MergeIdempotentWitness",
+    "ChangedPatchCopies": "ChangedPatchCopiesWitness",
+    "PatchKeysOwnedAfterStep": "PatchKeysOwnedAfterStepWitness",
+    "DeclaredStateLookup": "DeclaredStateLookupWitness",
+    "InheritedStateHasNoTransitions": "InheritedStateHasNoTransitionsWitness",
+    "InheritedEventIsNotFound": "InheritedEventIsNotFoundWitness",
+    "MissingTransitionKeepsSnapshot": "MissingTransitionKeepsSnapshotWitness",
+    "ReuseIsExact": "ReuseIsExactWitness",
+    "UnchangedPatchKeepsSnapshot": "UnchangedPatchKeepsSnapshotWitness",
+    "EmptyConfigKeepsSnapshot": "EmptyConfigKeepsSnapshotWitness",
+    "AbsentKeyAlwaysChanges": "AbsentKeyAlwaysChangesWitness",
+    "OwnedEntryComparesWithObjectIs": "OwnedEntryComparesWithObjectIsWitness",
+    "NegativeZeroOverZeroCopies": "NegativeZeroOverZeroCopiesWitness",
+    "NotANumberOverOwnNotANumberKeepsSnapshot": "NotANumberOverOwnNotANumberKeepsSnapshotWitness",
+    "StepStaysDeclared": "StepStaysDeclaredWitness",
+    "RunStaysDeclared": "RunStaysDeclaredWitness",
+    "InitialDeclared": "InitialDeclaredWitness"
+  },
+  "defects": [
+    {
+      "name": "a self-transition with no change copies the snapshot",
+      "before": "if (target === snapshot.value && !changed) return { snapshot, reused: true };",
+      "after": "if (target === snapshot.value && !changed) return { snapshot, reused: false };"
+    },
+    {
+      "name": "the merge drops patched values",
+      "before": "return mergePatch({ ...context, [entry.key]: entry.value }, patch.slice(1));",
+      "after": "return mergePatch(context, patch.slice(1));"
+    },
+    {
+      "name": "the copy applies only the first changed entry",
+      "before": "return mergePatch({ ...context, [entry.key]: entry.value }, patch.slice(1));",
+      "after": "return entryUnchanged(context, entry)\n    ? mergePatch(context, patch.slice(1))\n    : { ...context, [entry.key]: entry.value };"
+    },
+    {
+      "name": "the copy drops the first patch entry",
+      "before": "context: changed ? mergePatch(snapshot.context, patch) : snapshot.context",
+      "after": "context: changed ? mergePatch(snapshot.context, patch.slice(1)) : snapshot.context"
+    },
+    {
+      "name": "a patch for a key the context does not own counts as unchanged",
+      "before": "return false;",
+      "after": "return true;"
+    },
+    {
+      "name": "a key the context does not own compares as undefined",
+      "before": "return false;",
+      "after": "return sameValue(entry.value, { kind: 'undefinedValue' });"
+    },
+    {
+      "name": "-0 equals 0 and NaN differs from NaN, as with ===",
+      "before": "case 'negativeZero':\n      return b.kind === 'negativeZero';\n    case 'notANumber':\n      return b.kind === 'notANumber';",
+      "after": "case 'negativeZero':\n      return b.kind === 'negativeZero' || (b.kind === 'integer' && b.value === 0);\n    case 'notANumber':\n      return false;"
+    },
+    {
+      "name": "the configured target is ignored",
+      "before": "const target = config.target ?? snapshot.value;",
+      "after": "const target = snapshot.value;"
+    },
+    {
+      "name": "a string transition loses its target",
+      "before": "return { target: transition.target, context: undefined };",
+      "after": "return { target: undefined, context: undefined };"
+    },
+    {
+      "name": "the initial snapshot drops the configured context",
+      "before": "context: machine.context ?? {} }",
+      "after": "context: {} }"
+    },
+    {
+      "name": "run skips each event's transition",
+      "before": "transition(machine, snapshot, events[0]).snapshot,",
+      "after": "snapshot,"
+    },
+    {
+      "name": "every value uses the initial state's transitions",
+      "before": "const node = lookupState(machine, value);",
+      "after": "const node = lookupState(machine, machine.initial);"
+    },
+    {
+      "name": "state lookup reads inherited states",
+      "before": "return machine.states.get(value);",
+      "after": "return machine.states.get(value) ?? machine.inheritedStates.get(value);"
+    },
+    {
+      "name": "event lookup reads inherited events",
+      "before": "return node.on.get(type);",
+      "after": "return node.on.get(type) ?? node.inheritedOn.get(type);"
+    }
+  ],
+  "refactor": {
+    "before": "return sameValue(entry.value, context[entry.key]);",
+    "after": "return sameValue(context[entry.key], entry.value);"
+  }
+}

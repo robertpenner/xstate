@@ -1,0 +1,8 @@
+{
+  "name": "fsm-model-lemmascript",
+  "private": true,
+  "description": "LemmaScript for the fsm model verifier, installed outside the workspace",
+  "dependencies": {
+    "lemmascript": "0.6.6"
+  }
+}
