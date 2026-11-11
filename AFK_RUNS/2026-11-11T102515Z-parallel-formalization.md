@@ -186,8 +186,11 @@ that contradicts a ticket. Each entry gives a classification and evidence.
    regions. The same target from `p` exits only `r2x` and enters `r2y`.
    `narrowParallelDomain` narrows only while the domain is a parallel node,
    so the result matches SCXML's domain for an internal transition from a
-   compound source (SCXML 1.0 Appendix D, `getTransitionDomain`); XState's
-   non-reentering transition corresponds to SCXML `type="internal"`. The
+   compound source (SCXML 1.0 Appendix D, `getTransitionDomain`). XState's
+   non-reentering transition corresponds to SCXML `type="internal"` only for
+   compound sources with descendant targets; cross-region narrowing has no
+   SCXML counterpart, because SCXML's domain for a cross-region transition is
+   the LCCA, which lies above the parallel node. The
    `parallel-regions-scoped` changeset says "a transition targeting a state
    inside one region no longer exits and resets sibling regions" without
    restricting the source. Its example uses a source on the parallel node.
@@ -218,8 +221,15 @@ that contradicts a ticket. Each entry gives a classification and evidence.
    `exit B, exit a1, exit A, exit P, enter P, enter a1, enter B` and ended with
    active ids `m, m.P, m.P.A.a1, m.P.B`: region `A` exits and is never
    re-entered, while its leaf `a1` is. Targetless reentry also has the
-   entry-without-exit behavior in statelyai/xstate#5897; I did not trace how
-   the runtime chooses region entries when both transitions are kept. The
+   entry-without-exit behavior in statelyai/xstate#5897. Mechanism, read from
+   `stateUtils.ts` at `902573c`: `A`'s targetless reentry is processed first
+   and adds its source `a1` to `statesToEnter` directly. `B`'s transition
+   then calls `addDescendantStatesToEnter(P)`, whose parallel-node branch
+   adds a region only when `hasDescendantState(statesToEnter, region)` is
+   false. `a1` is already there, so region `A` is skipped while `a1` is
+   entered. (The post-run review named `addAncestorStatesToEnter`, which has
+   the same check; this machine reaches the descendant branch because the
+   target is `P` itself.) The
    reproduction is "targetless reentry beside a parallel-node reentry leaves a
    leaf without its region" in `runtimeFindings.test.ts`. The #16 model
    refuses a targetless reentry in any multi-selection step.
@@ -229,11 +239,15 @@ that contradicts a ticket. Each entry gives a classification and evidence.
    #5895 pattern (two kept transitions with disjoint exit sets, where one
    exit set contains the other's target or an ancestor of it) as its own
    refusal. The adapter has no separate check. If transition 2's target, or
-   an ancestor of it, lies in transition 1's exit set, it lies strictly below
-   domain 1; domain 2 is an ancestor of that target, so both domains lie on
-   the target's path and are comparable. `domainsApart` therefore refuses
-   every instance. This argument is informal, not a proved law. Some refused
-   instances are valid in the runtime: an atomic self-target in one region
+   an ancestor of it, lies in transition 1's exit set, it lies inside or at
+   domain 1 (a reentering source can be its own domain); domain 2 is an
+   ancestor-or-self of that target, so both domains lie on the target's path
+   and are comparable. Conversely, comparable kept domains put the inner
+   domain, which is active, in the outer exit set, and the inner domain is an
+   ancestor-or-self of its own target. On kept selections, `domainsApart`
+   therefore refuses exactly the pattern's instances. This argument is
+   informal, not a proved law. Some refused instances are valid in the
+   runtime: an atomic self-target in one region
    (domain is the atomic node itself, so it is neither exited nor entered)
    kept alongside a region transition that exits the parallel node yields a
    valid configuration. The validity proof needs pairwise incomparable
@@ -287,14 +301,48 @@ that contradicts a ticket. Each entry gives a classification and evidence.
 - `pnpm test:core`: 189 files; 3062 passed, 29 skipped, 3 todo.
 - No pre-existing failures were observed.
 
+## Post-run PR review
+
+After the run, a fresh `review-axis` agent (Opus) reviewed `902573c` against
+`47cfafb`; the findings were checked against the code and posted on
+robertpenner/xstate#17. Fixes:
+
+- `049396c` feat(machine-model): prove reenter resets for parallel and
+  ancestor sources. Spec defect: #15 asks for reenter-widening laws for
+  ancestor and parallel-node sources, which only tests covered.
+  `ReenterResetsSubtree` states that a reentering transition from the
+  parallel node or an ancestor into a region has the source as its domain,
+  exits and reenters the source, and exits every active node at or below the
+  parallel node. `ReenterWidens` now also states that every active node
+  below the parallel node exits.
+- `3082715` docs(machine-model): correct comparable-domains argument and cite
+  #5899. The README had called the refusal wider than the #5895 pattern while
+  its own example was an instance of the pattern; on kept selections the two
+  coincide. The active-region refusal now cites statelyai/xstate#5899.
+- This run-log commit: Result no longer counts statelyai/xstate#5895 as new;
+  entry 1 limits the SCXML `type="internal"` correspondence; entry 4 records
+  the orphaned-leaf mechanism; entry 5 gives the argument in both directions.
+
+Left open for the owner: #16 listed the #5895 pattern as a separate refusal;
+the adapter covers it through the comparable-domains check with an informal
+argument and no separate reason or count.
+
+Verification at `3082715`:
+
+- `pnpm verify:machine-model`: 456 verified, 0 errors; 22 seeded defects and
+  11 proof weakenings rejected. 136 laws.
+- `pnpm test:machine-model`: 8 files, 116 tests passed.
+- `pnpm format:check`: passed. No TypeScript changed, so typecheck, lint,
+  build and `test:core` were not rerun.
+
 ## Result
 
 #15 and #16 are integrated and verified on robertpenner/xstate#17. The model
 covers machines with at most one parallel node, single- and multi-transition
 steps with faithful conflict removal, 135 Dafny laws (454 verified
 obligations), 22 rejected seeded defects, and 7 rejected runtime mutations.
-The run characterized two new suspected runtime bugs (behavior entries 4 and
-7, the latter filed as statelyai/xstate#5895) and one documentation
-ambiguity (entry 1). Issues stay open until the PR merges.
+The run found one new suspected runtime bug (behavior entry 4), characterized
+the existing statelyai/xstate#5895 in the model's terms (entry 7), and
+recorded one documentation ambiguity (entry 1). Issues stay open until the PR merges.
 
 **Duration:** 3 h 35 min 0 s (final run-log commit at 2026-11-11T09:00:15-05:00 minus Started)
