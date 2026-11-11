@@ -1,6 +1,6 @@
 # XState parallel-subtree formalization
 
-**Status:** active
+**Status:** completed
 
 **Branch:** `machine-formalization-parallel`
 
@@ -18,7 +18,7 @@ distinguish observations from suspected defects.
 **Baseline:** `47cfafb` (`origin/machine-formalized`, carrying upstream `next`
 at `da64b0a`).
 
-**Verified integration head:** `5ec20b1` (#16).
+**Verified integration head:** `93829d7` (#16 plus final-review fixes).
 
 ## Workflow authorization
 
@@ -116,6 +116,65 @@ These results re-verify the existing flat and compound suites against runtime
   region target, 28 targetless reentry, 4 comparable domains.
 - `pnpm typecheck`, `pnpm lint`, `pnpm format:check`: passed.
 
+## Final series review
+
+Base `47cfafb` (`origin/machine-formalized`), head `d31954f`, 12 changed
+files. The `code-review` skill ran three `review-axis` children over
+materialized artifacts: Standards, Spec (the #14 contract, the #15 and #16
+bodies and newest briefs), and Ideas and evidence. No finding changed the
+model, proofs or manifest. Resolutions are in `f2adfc4` (tests) and `93829d7`
+(README), plus this log.
+
+Resolved findings:
+
+- The README listed two runtime reproductions; `runtimeFindings.test.ts` has
+  four. The README now lists all four, and behavior entry 7 records the
+  statelyai/xstate#5895 characterization.
+- The orphaned-leaf test asserted that an unused spy was never called. It now
+  logs entry and exit callbacks and pins the observed order; behavior entry 4
+  now matches the test's names (`a1`, event `E`).
+- The README described the active-region refusal as non-reentering only. The
+  code refuses both; the README says so, and a test checks the reentering
+  case and the exact statelyai/xstate#5895 machine through the adapter.
+- The brief's separate #5895-pattern refusal is subsumed by the
+  comparable-domains refusal. The README and behavior entry 5 give the
+  informal argument and the valid runtime case it also refuses.
+- The README's validity claims omitted the well-formed-machine,
+  valid-configuration and `parallelStepReady` preconditions; they are now
+  stated.
+- The SCXML comparison omitted SCXML's conflict-removal pass. The README now
+  cites Appendix D and limits the visible difference to non-overlapping exit
+  sets. Behavior entry 1 now names SCXML internal transitions.
+- Behavior entry 3 cited no losing transition. A probe with two regions both
+  leaving the parallel node recorded `A saw 0, B saw 0`, kept `A`'s result,
+  and is recorded in the entry.
+- Missing #15 named cases now exist: a reentering compound ancestor into a
+  region, and the parallel node targeting itself with and without `reenter`.
+  The non-reentering self-target resets both regions without exiting the
+  parallel node; model and runtime agree.
+- The property generator gave every leaf the same depth. Nodes below the root
+  can now stop early; at seed 8912, 87 machines had parallel regions of
+  different heights. README statistics were re-measured and now say they are
+  printed, not asserted, and count only traces that ran to completion.
+- Refusal tests now assert the specific messages; the nested-parallel test
+  name includes the parallel-initial case.
+- The README notes that `ParallelWellFormed` does not require `order` to be
+  a preorder, and labels the pre-step-context and reentry-half claims as
+  following from definitions instead of named laws.
+
+Accepted without change:
+
+- Duplicated readiness checks between `parallelReady` and `selectionReady`,
+  adapter duplication, the `ParallelPlan.active` name, `exiting` parameter
+  shadowing, recomputed `kept` in `parallelAdapter`, and the unreachable
+  `?? 'single'` fallback. Changing model code would require re-proving
+  unchanged laws for no behavior change.
+- Optional stronger laws (`Subseq(kept, selections)`,
+  `sourcesApart ⇒ NoDescendantSources`, a fuller `ReenterWidens`) are left for
+  a later ticket.
+
+No actionable findings remain.
+
 ## Behavior log
 
 Entries record runtime behavior observed at `da64b0a` that looks unintended or
@@ -126,12 +185,14 @@ that contradicts a ticket. Each entry gives a classification and evidence.
    transition on `a` targeting `#r2y` exits and re-enters `p` and both
    regions. The same target from `p` exits only `r2x` and enters `r2y`.
    `narrowParallelDomain` narrows only while the domain is a parallel node,
-   so the result matches SCXML's domain for a compound source. The
+   so the result matches SCXML's domain for an internal transition from a
+   compound source (SCXML 1.0 Appendix D, `getTransitionDomain`); XState's
+   non-reentering transition corresponds to SCXML `type="internal"`. The
    `parallel-regions-scoped` changeset says "a transition targeting a state
    inside one region no longer exits and resets sibling regions" without
    restricting the source. Its example uses a source on the parallel node.
    #15 assumed narrowing for ancestors too; the brief corrects that.
-2. **Region-first ancestor fallback (intended per `transitionNode`; differs
+2. **Region-first ancestor fallback (implemented by `transitionNode`; differs
    from SCXML).** When any region selects a transition, the parallel node and
    its ancestors are not consulted, even for regions that declined. SCXML
    lets each atomic state fall back to its own ancestors independently, then
@@ -141,31 +202,58 @@ that contradicts a ticket. Each entry gives a classification and evidence.
 3. **Callbacks of losing transitions run (observation).** Every selected
    transition's callback runs during selection against the pre-step context,
    before conflict removal. A transition that later loses has already run its
-   callback; only its returned patch and effects are discarded. Two regions
-   patching `count` to 10 and 20 from `count: 0` both saw `0`, and the step
-   ended with `count: 20`.
+   callback; only its returned patch and effects are discarded. Probe during
+   the final review: regions `A` and `B` of root-level child `P` both handle
+   `E` with callbacks that record the `count` they see and return
+   `{ target: '#m.X', context: { count: 10 } }` and
+   `{ target: '#m.Y', context: { count: 20 } }`. Both exit `P`, so conflict
+   removal keeps `A`'s. The runtime recorded `A saw 0, B saw 0` and ended in
+   `X` with `count: 10`. The model does not represent invocation counts, so
+   no committed test checks this.
 4. **Targetless reentry plus a parallel-node reentry leaves an orphaned leaf
-   (suspected runtime bug).** Region `A` sits in `a2`, which handles `go`
-   with a targetless `reenter: true`; region `B` handles `go` with
+   (suspected runtime bug).** Region `A` sits in `a1`, which handles `E`
+   with a targetless `reenter: true`; region `B` handles `E` with
    `{ target: '#m.P', reenter: true }`. The exit sets do not overlap (the
    targetless one is empty), so both are kept. The runtime logged
-   `exit B, exit a2, exit A, exit P, enter P, enter a2, enter B` and ended with
-   active ids `m, m.P, m.P.A.a2, m.P.B`: `a2` is active while its region `A`
-   is not. The targetless reentry adds `a2` to the entry set without an exit
-   (statelyai/xstate#5897), and nothing re-enters `A`. The #16 model refuses a
-   targetless reentry in any multi-selection step.
+   `exit B, exit a1, exit A, exit P, enter P, enter a1, enter B` and ended with
+   active ids `m, m.P, m.P.A.a1, m.P.B`: region `A` exits and is never
+   re-entered, while its leaf `a1` is. Targetless reentry also has the
+   entry-without-exit behavior in statelyai/xstate#5897; I did not trace how
+   the runtime chooses region entries when both transitions are kept. The
+   reproduction is "targetless reentry beside a parallel-node reentry leaves a
+   leaf without its region" in `runtimeFindings.test.ts`. The #16 model
+   refuses a targetless reentry in any multi-selection step.
 
-5. **Comparable-domain refusal is conservative (model limitation, not a
-   runtime finding).** An atomic self-target in one region kept alongside a
-   region transition that exits the parallel node has comparable domains,
-   so the model refuses it. The runtime produces a valid configuration for
-   that step. The validity proof needs pairwise incomparable domains; a
-   later extension could prove the union case.
+5. **Comparable-domain refusal covers the statelyai/xstate#5895 pattern
+   (model limitation, not a runtime finding).** The #16 brief listed the
+   #5895 pattern (two kept transitions with disjoint exit sets, where one
+   exit set contains the other's target or an ancestor of it) as its own
+   refusal. The adapter has no separate check. If transition 2's target, or
+   an ancestor of it, lies in transition 1's exit set, it lies strictly below
+   domain 1; domain 2 is an ancestor of that target, so both domains lie on
+   the target's path and are comparable. `domainsApart` therefore refuses
+   every instance. This argument is informal, not a proved law. Some refused
+   instances are valid in the runtime: an atomic self-target in one region
+   (domain is the atomic node itself, so it is neither exited nor entered)
+   kept alongside a region transition that exits the parallel node yields a
+   valid configuration. The validity proof needs pairwise incomparable
+   domains; a later extension could prove the union case.
 6. **LemmaScript regen merge can misalign short generated bodies (tooling).**
    When proof text separates two generated sections, `lsc regen`'s
    three-way merge can match a changed one-line body against unrelated proof
    lines with the same surrounding braces and report a conflict. Keeping
    generated declarations contiguous avoids it. Not reported upstream.
+
+7. **Cross-region transition plus an exit from the parallel node
+   (suspected runtime bug, statelyai/xstate#5895).** Region `A`'s `a1`
+   targets region `#m.P.B` while atomic region `B` targets `#m.X`. The
+   cross-region domain narrows to `B`, so it exits nothing; the exit sets are
+   disjoint and both transitions are kept. The runtime logged
+   `exit B, exit a1, exit A, exit P, enter B, enter X` and ended with active
+   ids `m, m.P.B, m.X`: region `B` is active without its parent `P`. The
+   reproduction is "cross-region transition and an exit from the parallel
+   node are both taken" in `runtimeFindings.test.ts`. The adapter refuses
+   this machine at the active-region target.
 
 ## Commits
 
@@ -183,3 +271,30 @@ that contradicts a ticket. Each entry gives a classification and evidence.
 - `e9042e7` feat(machine-model): prove multi-transition parallel laws
 - `452bc52` test(machine-model): add multi-transition runtime mutations
 - `5ec20b1` docs(machine-model): document multi-transition parallel steps
+- `d31954f` chore(machine-model): record #16 integration in run log
+- `f2adfc4` test(machine-model): add review-requested parallel cases
+- `93829d7` docs(machine-model): correct parallel claims from series review
+
+## Final verification at `93829d7`
+
+- `pnpm test:machine-model`: 8 files, 116 tests passed.
+- `pnpm verify:machine-model` (last run at `5ec20b1`; the `.dfy`, manifest
+  and `machineModel.ts` are unchanged since): 454 verified, 0 errors; 11 proof
+  weakenings and 22 seeded defects rejected.
+- `pnpm test:machine-model:runtime-defects`: 7 mutations rejected; source
+  restored.
+- `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm build`: passed.
+- `pnpm test:core`: 189 files; 3062 passed, 29 skipped, 3 todo.
+- No pre-existing failures were observed.
+
+## Result
+
+#15 and #16 are integrated and verified on robertpenner/xstate#17. The model
+covers machines with at most one parallel node, single- and multi-transition
+steps with faithful conflict removal, 135 Dafny laws (454 verified
+obligations), 22 rejected seeded defects, and 7 rejected runtime mutations.
+The run characterized two new suspected runtime bugs (behavior entries 4 and
+7, the latter filed as statelyai/xstate#5895) and one documentation
+ambiguity (entry 1). Issues stay open until the PR merges.
+
+**Duration:** 3 h 35 min 0 s (final run-log commit at 2026-11-11T09:00:15-05:00 minus Started)
