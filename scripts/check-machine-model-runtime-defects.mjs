@@ -21,6 +21,14 @@ const defects = [
     before: 'return { ...context, ...patch };',
     after: 'return { ...context };',
     test: 'orders exit, transition, and entry effects'
+  },
+  {
+    name: 'compound exits run ancestor before descendant',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'statesToExit.sort((a, b) => b.order - a.order);',
+    after: 'statesToExit.sort((a, b) => a.order - b.order);',
+    testFile: 'packages/core/test/machine-model/compoundModel.test.ts',
+    test: 'orders multiple exits and entries around a pre-exit transition calculation'
   }
 ];
 for (const defect of defects) {
@@ -51,7 +59,8 @@ for (const defect of defects) {
         'run',
         '--project',
         'xstate',
-        'packages/core/test/machine-model/machineModel.test.ts',
+        defect.testFile ??
+          'packages/core/test/machine-model/machineModel.test.ts',
         '-t',
         defect.test
       ],

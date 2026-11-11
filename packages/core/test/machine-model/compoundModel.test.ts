@@ -1,6 +1,172 @@
 import { compareCompoundTrace } from './compoundAdapter';
 
 describe('compound machine model', () => {
+  it('handles a root-only atomic machine and preserves missing-event identity', () => {
+    const trace = compareCompoundTrace(
+      {
+        context: { count: 0 },
+        on: {
+          increment: ({ context }) => ({
+            context: { count: Number(context.count) + 1 }
+          })
+        }
+      },
+      [{ type: 'missing' }, { type: 'increment' }]
+    );
+    expect(trace.map((step) => step.value)).toEqual([{}, {}, {}]);
+    expect(trace[1].snapshotReused).toBe(true);
+    expect(trace[2].context).toEqual({ count: 1 });
+  });
+
+  it('reenters the root and its initial descendants', () => {
+    const record = vi.fn();
+    const trace = compareCompoundTrace(
+      {
+        id: 'root',
+        context: {},
+        initial: 'a',
+        on: { reset: { target: '#root', reenter: true } },
+        entry: (_, enq) => {
+          enq(record, 'enter root');
+        },
+        exit: (_, enq) => {
+          enq(record, 'exit root');
+        },
+        states: {
+          a: {
+            entry: (_, enq) => {
+              enq(record, 'enter a');
+            },
+            exit: (_, enq) => {
+              enq(record, 'exit a');
+            }
+          }
+        }
+      },
+      [{ type: 'reset' }]
+    );
+    expect(trace[1].effects.map((effect) => effect.args)).toEqual([
+      ['exit a'],
+      ['exit root'],
+      ['enter root'],
+      ['enter a']
+    ]);
+  });
+
+  it('resets an explicitly targeted ancestor from a noninitial leaf', () => {
+    const record = vi.fn();
+    const trace = compareCompoundTrace(
+      {
+        id: 'root',
+        context: {},
+        initial: 'p',
+        states: {
+          p: {
+            id: 'p.with.dots',
+            initial: 'a',
+            entry: (_, enq) => {
+              enq(record, 'enter p');
+            },
+            exit: (_, enq) => {
+              enq(record, 'exit p');
+            },
+            states: {
+              a: { on: { next: { target: 'b' } } },
+              b: { on: { reset: { target: '#p.with.dots' } } }
+            }
+          }
+        }
+      },
+      [{ type: 'next' }, { type: 'reset' }]
+    );
+    expect(trace.map((step) => step.value)).toEqual([
+      { p: 'a' },
+      { p: 'b' },
+      { p: 'a' }
+    ]);
+    expect(trace[2].effects.map((effect) => effect.args)).toEqual([
+      ['exit p'],
+      ['enter p']
+    ]);
+  });
+
+  it.each([
+    ['always', { always: {} }],
+    ['invoke', { invoke: {} }],
+    ['after', { after: {} }],
+    ['onDone', { onDone: {} }],
+    ['output', { output: {} }],
+    ['input', { input: {} }]
+  ] as const)(
+    'refuses unsupported nested %s before running the machine',
+    (_, extra) => {
+      expect(() =>
+        compareCompoundTrace(
+          {
+            context: {},
+            initial: 'p',
+            states: { p: { on: {}, ...extra } }
+          },
+          []
+        )
+      ).toThrow(/Unsupported/);
+    }
+  );
+
+  it('refuses invalid nested initials, duplicate IDs and missing targets', () => {
+    expect(() =>
+      compareCompoundTrace(
+        {
+          context: {},
+          initial: 'p',
+          states: { p: { initial: 'missing', states: { a: {} } } }
+        },
+        []
+      )
+    ).toThrow(/Unsupported initial/);
+    expect(() =>
+      compareCompoundTrace(
+        {
+          context: {},
+          initial: 'a',
+          states: { a: { id: 'same' }, b: { id: 'same' } }
+        },
+        []
+      )
+    ).toThrow(/duplicate id/);
+    expect(() =>
+      compareCompoundTrace(
+        {
+          context: {},
+          initial: 'a',
+          states: { a: { on: { event: { target: '#missing' } } } }
+        },
+        []
+      )
+    ).toThrow(/Unsupported ID target/);
+    expect(() =>
+      compareCompoundTrace(
+        {
+          context: {},
+          initial: 'a',
+          states: { a: { on: { event: { target: '.missing' } } } }
+        },
+        []
+      )
+    ).toThrow(/Unsupported relative target/);
+  });
+
+  it.each(['parallel', 'history', 'final'])(
+    'refuses nested %s states',
+    (type) => {
+      const config = { context: {}, initial: 'p', states: { p: { type } } };
+      // @ts-expect-error Deliberately test an unsupported runtime state type.
+      expect(() => compareCompoundTrace(config, [])).toThrow(
+        /Unsupported state type/
+      );
+    }
+  );
+
   it('initializes descendants and selects the deepest enabled handler', () => {
     const trace = compareCompoundTrace(
       {

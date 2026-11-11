@@ -43,36 +43,58 @@ function names(text, pattern) {
 }
 
 function checkInventory(gen, proven) {
-  assert.ok(
-    proven.startsWith(gen),
-    'Proof must retain the exact generated prefix'
+  const generatedLines = gen.trimEnd().split('\n');
+  let retained = 0;
+  for (const line of proven.split('\n')) {
+    if (line === generatedLines[retained]) retained++;
+  }
+  assert.equal(
+    retained,
+    generatedLines.length,
+    'Proof must retain every generated line in order'
   );
-  const code = proven.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, '');
-  const added = proven
-    .slice(gen.length)
-    .replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, '');
+  const strip = (text) => text.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, '');
+  const code = strip(proven).replace(
+    /\{:\s*(?:induction false|isolate_assertions)\s*\}/g,
+    ''
+  );
+  const bodies = (text) =>
+    [...text.matchAll(/^function (\w+)[\s\S]*?^\{([\s\S]*?)^\}/gm)].map(
+      ([, name, body]) => [
+        name,
+        body.replace(/^\s*assert [^;\n{}]*;\s*$/gm, '').trim()
+      ]
+    );
+  assert.deepEqual(
+    bodies(strip(proven)),
+    bodies(strip(gen)),
+    'Generated executable bodies may only gain checked assertions'
+  );
   assert.doesNotMatch(
     code,
     /\b(assume|expect|include|import|method|const|axiom)\b|\{\s*:/
   );
-  assert.doesNotMatch(
-    added,
-    /\b(datatype|type|class|trait|module|newtype|codatatype)\b/
+  assert.deepEqual(
+    names(
+      code,
+      /\b(datatype|type|class|trait|module|newtype|codatatype)\s+\w+/g
+    ),
+    names(
+      strip(gen),
+      /\b(datatype|type|class|trait|module|newtype|codatatype)\s+\w+/g
+    )
   );
   assert.deepEqual(
     names(code, /\b(?:function|predicate) (\w+)/g),
     [...manifest.functions, ...manifest.specFunctions].sort()
   );
   assert.deepEqual(
-    names(added, /\bghost (?:function|predicate) (\w+)/g),
+    names(code, /\bghost (?:function|predicate) (\w+)/g),
     [...manifest.specFunctions].sort()
   );
   assert.deepEqual(
-    names(code, /\blemma (\w+)/g),
-    [
-      ...manifest.functions.map((name) => `${name}_ensures`),
-      ...manifest.laws
-    ].sort()
+    names(code, /\blemma\s+(\w+)/g),
+    [...manifest.contracts, ...manifest.laws].sort()
   );
   assert.equal(
     manifest.defects.length >= 4,

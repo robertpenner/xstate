@@ -1,14 +1,51 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 39,
+  "verifiedCount": 252,
   "functions": [
     "mergePatch",
     "apply",
     "emptyEvaluation",
     "initialTransition",
-    "transition"
+    "transition",
+    "declaredPath",
+    "lookupNode",
+    "select",
+    "commonPrefix",
+    "initialWitness",
+    "descend",
+    "reverse",
+    "lifecycle",
+    "ready",
+    "compoundInitialTransition",
+    "compoundTransition"
   ],
-  "specFunctions": ["Selected", "LastPatchValue"],
+  "contracts": [
+    "mergePatch_ensures",
+    "apply_ensures",
+    "emptyEvaluation_ensures",
+    "initialTransition_ensures",
+    "transition_ensures",
+    "declaredPath_ensures",
+    "select_ensures",
+    "commonPrefix_ensures",
+    "descend_ensures",
+    "reverse_ensures",
+    "lifecycle_ensures",
+    "compoundInitialTransition_ensures",
+    "compoundTransition_ensures"
+  ],
+  "specFunctions": [
+    "Selected",
+    "LastPatchValue",
+    "TreePath",
+    "WellFormed",
+    "ValidConfiguration",
+    "NodeEvaluation",
+    "Enabled",
+    "Target",
+    "Reenters",
+    "Kept"
+  ],
   "laws": [
     "LastPatchCons",
     "MergeMeaning",
@@ -29,7 +66,22 @@
     "TargetlessLifecycle",
     "NonReenteringSelf",
     "LifecycleOrderAndContext",
-    "TargetlessReentryCharacterization"
+    "TargetlessReentryCharacterization",
+    "PathHasExactlyOneChild",
+    "CompoundInitialValid",
+    "CompoundStepValid",
+    "InitialDescendantTraversal",
+    "DeepestSelection",
+    "DecliningChildFallsBack",
+    "ExplicitBlockWins",
+    "EffectOnlyChildWins",
+    "LifecycleCons",
+    "LifecycleConcatenation",
+    "CompoundLifecycleMeaning",
+    "CompoundSelfResetsDescendants",
+    "ReverseLifecycleOrder",
+    "PreservedAncestorsAreNotExited",
+    "CompoundLifecycleWitness"
   ],
   "defects": [
     {
@@ -44,13 +96,13 @@
     },
     {
       "name": "unhandled event copies snapshot",
-      "before": "return { snapshot, snapshotReused: true, contextReused: true, effects: [] };",
-      "after": "return { snapshot, snapshotReused: false, contextReused: true, effects: [] };"
+      "before": "if (selected.result === undefined && selected.effects.length === 0) {\n    return { snapshot, snapshotReused: true, contextReused: true, effects: [] };",
+      "after": "if (selected.result === undefined && selected.effects.length === 0) {\n    return { snapshot, snapshotReused: false, contextReused: true, effects: [] };"
     },
     {
       "name": "reversed lifecycle effects",
-      "before": "effects: [...exited.effects, ...updated.effects, ...entered.effects]",
-      "after": "effects: [...entered.effects, ...updated.effects, ...exited.effects]"
+      "before": "snapshot: { value: next, context: entered.context },\n    snapshotReused: false,\n    contextReused: exited.reused && updated.reused && entered.reused,\n    effects: [...exited.effects, ...updated.effects, ...entered.effects]",
+      "after": "snapshot: { value: next, context: entered.context },\n    snapshotReused: false,\n    contextReused: exited.reused && updated.reused && entered.reused,\n    effects: [...entered.effects, ...updated.effects, ...exited.effects]"
     },
     {
       "name": "empty patch incorrectly reuses context",
@@ -71,6 +123,31 @@
       "name": "ignored self reentry",
       "before": "const changes = target !== undefined && (next !== snapshot.value || reenter);",
       "after": "const changes = target !== undefined && next !== snapshot.value;"
+    },
+    {
+      "name": "ancestor takes priority over child",
+      "before": "const id = path[path.length - 1];",
+      "after": "const id = path[0];"
+    },
+    {
+      "name": "missing initial descendant",
+      "before": "return descend(nodes, initial);",
+      "after": "return node.path;"
+    },
+    {
+      "name": "exits unaffected ancestors",
+      "before": "const exitKept = target === machine.root && !reenter ? 1 : kept;",
+      "after": "const exitKept = 0;"
+    },
+    {
+      "name": "reverses lifecycle callback effects",
+      "before": "effects: [...first.effects, ...rest.effects]",
+      "after": "effects: [...rest.effects, ...first.effects]"
+    },
+    {
+      "name": "compound reentry preserves source",
+      "before": "? sourcePath.length - (reenter ? 1 : 0)",
+      "after": "? sourcePath.length - (reenter ? 0 : 0)"
     }
   ],
   "refactor": {

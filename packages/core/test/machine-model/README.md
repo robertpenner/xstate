@@ -1,10 +1,10 @@
-# Verified flat-machine model
+# Verified flat and compound machine models
 
 This directory models XState v6 `createMachine` initialization and external-event
 steps. The runtime baseline is `bcd3840` on the fork's `next` branch. Work belongs
-to [#9](https://github.com/robertpenner/xstate/issues/9), under
-[#8](https://github.com/robertpenner/xstate/issues/8). Nested compound states are
-the dependent [#10](https://github.com/robertpenner/xstate/issues/10).
+to [#9](https://github.com/robertpenner/xstate/issues/9) and the compound extension
+[#10](https://github.com/robertpenner/xstate/issues/10), under
+[#8](https://github.com/robertpenner/xstate/issues/8).
 
 ## What is verified
 
@@ -12,9 +12,10 @@ the dependent [#10](https://github.com/robertpenner/xstate/issues/10).
 unmodified LemmaScript 0.6.6. Dafny 4.11.0 proves its contracts and the laws in
 [`formal/machineModel.dfy`](./formal/machineModel.dfy).
 [`formal/machineModel.manifest.json`](./formal/machineModel.manifest.json) lists
-20 laws (including one patch helper), five generated function contracts, and
-eight deliberately incorrect model edits. The complete proof currently checks
-39 verification tasks.
+35 laws (including proof helpers and a concrete lifecycle witness), 13 generated
+contract lemmas, and 13 deliberately incorrect model edits. The complete proof
+currently checks 252 verification tasks. Function postconditions support
+composition; they are also checked against the generated bodies.
 
 The laws establish:
 
@@ -23,11 +24,11 @@ The laws establish:
 - Context patches retain unrelated keys and store the last supplied value for
   each patched key. Missing keys and present values remain distinct.
 - Every supplied patch copies context, including an empty or unchanged patch.
-  No supplied patch preserves context identity.
+  Omitting a patch preserves context identity.
 - Missing and declining handlers leave the snapshot unchanged. A handled no-op
   creates a snapshot but preserves context. Effect-only callbacks handle events.
 - A selected target becomes the next state; valid targets preserve membership.
-- Targetless and non-reentering self-transitions skip exit and entry callbacks.
+- Flat targetless and non-reentering self-transitions skip exit and entry callbacks.
 - Targeted transitions exit before applying the transition patch, then enter.
   The selected callback observes pre-exit context. The exit callback also observes
   pre-exit context. The entry callback observes exit patches overwritten by any
@@ -35,13 +36,30 @@ The laws establish:
 - Targetless `reenter: true` currently runs entry without exit. Its separate
   characterization law records an apparent runtime bug, not an intended
   lifecycle rule.
+- Compound initialization and event steps preserve declared active nodes,
+  required ancestors, and exactly one active direct child for each active
+  compound node, assuming a well-formed normalized machine and valid targets.
+- Selection considers the deepest active node first. A declining callback
+  falls back to ancestors; an explicit block or an effect-only callback handles
+  the event.
+- Initial entry follows initial-child pointers to an atomic leaf. The normalized
+  path witness supplies the termination measure and is proved equal to that
+  traversal's result.
+- Compound self-targets reset active descendants to initial descendants.
+  Reentry additionally exits and enters the source. Exit callbacks run from
+  leaf to ancestor; entry callbacks run from ancestor to leaf. Each callback
+  sees patches from the preceding lifecycle callbacks.
+- The complete compound step's effects and context equal the composition of
+  its exit plan, preselected transition result, and entry plan. An ancestor
+  before the exit cut is preserved. A concrete sibling/self-reentry witness
+  additionally checks the plan against distinguishable callback effects.
 
 The patch and identity contracts differ from `createFSM`, which compares patch
 values before deciding whether to copy. No FSM reuse law is imported here.
 
 ## Supported domain and explicit refusals
 
-The current adapter accepts a root with a declared `initial`, a plain `context`
+The flat adapter accepts a root with a declared `initial`, a plain `context`
 record, and flat atomic `states`. State definitions accept `on`, `entry` and
 `exit`. Local target names are nonempty strings without dots or hashes.
 Exact event names may not contain `*`; the empty event name is refused.
@@ -58,6 +76,15 @@ including references, `undefined`, `NaN` and signed zero. Configuration and
 callback-result fields not listed above cause explicit refusal. Unknown
 callback arguments and enqueue operations also cause explicit refusal.
 
+[`compoundAdapter.ts`](./compoundAdapter.ts) additionally accepts root handlers
+and lifecycle callbacks, nested atomic/compound states, and a root-only atomic
+machine. Every compound node declares an initial direct child. It supports
+relative `.child` targets, ordinary sibling paths, and exact `#id` lookup.
+IDs containing dots remain exact IDs. Implicit IDs use the root machine ID and
+the authored key path, even below an explicitly named parent. Duplicate IDs,
+missing initial children, unknown targets, and inconsistent state types are
+refused.
+
 Callbacks receive `context` and `event`; `enq(fn, ...args)` records an ordinary
 effect. The model never invokes the effect body. Callback purity, termination
 and determinism are assumptions. In particular, callback-produced opaque values
@@ -67,10 +94,9 @@ the differential harness reports disagreement instead of claiming equivalence.
 Callback invocation counts and identity of the context record passed into a
 callback are not modeled.
 
-Root handlers/lifecycle callbacks, nested states, relative/ID targets, parallel
-regions, choices, history, completion, eventless transitions, raised events,
-timers, actors, routes, state input and persistence are refused at this stage.
-The nested-state ticket extends this domain. Refusal is not a statement that
+Parallel regions, choices, history, completion, eventless transitions, raised
+events, timers, actors, routes, state input and persistence remain refused.
+Refusal is not a statement that
 the runtime lacks these features.
 
 ## Representation and trust
@@ -90,7 +116,15 @@ context object.
 The model does not import production selection, lifecycle, or context-merge
 algorithms. The adapter runs callbacks independently for the model and runtime,
 then compares state, own context keys/values, both reuse flags, and ordered
-effect identities/arguments at initialization and after every event.
+effect identities/arguments at initialization and after every event. Compound
+comparisons also inspect the public snapshot's active `nodes`, hierarchical
+state value, parent membership, and exactly-one-active-child condition.
+
+The compound laws assume the normalized tree's path and initial-child
+relationships. Authored target resolution and construction of that normalized
+tree remain executable adapter code covered by comparisons and refusal tests.
+The model functions share one translation unit because LemmaScript emits
+cross-module function calls as axioms, which this proof inventory forbids.
 
 Dafny proves properties of the translated model. Differential tests sample
 agreement with XState. Neither proves implementation equivalence or correctness
@@ -112,9 +146,30 @@ targets, reentry and entry/exit patches/effects. It uses a four-second
 interruption limit that fails the test if reached. It does not generate arbitrary
 JavaScript callbacks or prove complete runtime coverage.
 
-[`runtimeFindings.test.ts`](./runtimeFindings.test.ts) is a direct public-API
-reproduction of the targetless-reentry finding. It asserts the observed output
-so a runtime change requires revisiting this characterization and its model law.
+[`compoundModel.test.ts`](./compoundModel.test.ts) covers descendant entry,
+deepest selection, fallback through multiple ancestors, explicit blocks,
+effect-only handlers, root-only machines, ancestor/relative/exact-ID targets,
+compound self-reset from a noninitial descendant, root reentry, lifecycle context
+and effect order, invalid trees, and excluded nested features.
+
+[`compoundModel.property.test.ts`](./compoundModel.property.test.ts) generates
+500 trees with seed 8912, nesting depths one through four, and one or two
+children per compound node. Traces contain up to 20 events. Handlers vary among
+missing, blocked, declining, effect-only, and object/callback results. ID targets
+range over the generated tree, including roots, ancestors, siblings and other
+branches. Reentry, patches, and lifecycle effects are varied. This test has the
+same four-second fail-on-interruption limit.
+
+[`runtimeFindings.test.ts`](./runtimeFindings.test.ts) contains direct public-API
+reproductions of two suspected runtime bugs:
+
+- Targetless reentry runs entry without exit.
+- A descendant targeting the root without reentry invokes root entry without
+  root exit. Seed 8912 discovered this after six cases and 77 shrinks; the named
+  reproduction retains the minimal root/child behavior.
+
+Both assert observed output, so a runtime change requires revisiting these
+characterizations and the model's exit/entry plans.
 The AFK run log records the investigation; no production fix is included.
 
 ## Reproduce
@@ -135,17 +190,25 @@ pnpm build
 ```
 
 The proof driver regenerates into temporary directories, checks exact freshness,
-requires an unchanged generated prefix in the proof, checks the declaration
-inventory, rejects assumptions/attributes, and requires every seeded edit to
+requires every generated line to remain in order, and checks the declaration
+inventory. Generated executable bodies may only gain checked assertions.
+Proof additions include function postconditions and ghost declarations.
+The driver rejects assumptions and proof-disabling attributes; only
+`induction false` and `isolate_assertions` are allowed to control proof search.
+It requires every seeded edit to
 produce a proof failure. Parser/type/tool failures do not count as rejected
-defects. It also checks that a behavior-preserving rewrite changes the generated
+defects; a timeout alone also does not count. The compound edits select an
+ancestor prematurely, skip initial descent, exit an unaffected ancestor,
+reverse lifecycle effects, and ignore source reentry. It also checks that a
+behavior-preserving rewrite changes the generated
 artifact and still proves after regeneration.
 
 The runtime-defect command temporarily changes a clean production file, runs
 the corresponding differential test, requires an assertion failure, and restores
 the original bytes in `finally`. Run it only in a dedicated checkout with no
-other test/build process. It tests an ignored fast-path target and a dropped
-context patch; production mutations are never committed.
+other test/build process. It tests an ignored fast-path target, a dropped
+context patch, and compound exits ordered ancestor-before-descendant.
+Production mutations are never committed.
 
 After model edits:
 

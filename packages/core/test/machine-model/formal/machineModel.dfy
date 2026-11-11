@@ -49,6 +49,7 @@ lemma mergePatch_ensures(context: map<string, int>, patch: seq<PatchEntry>)
 }
 
 function apply(context: map<string, int>, evaluation: Evaluation): Applied
+  ensures apply(context, evaluation).effects == evaluation.effects
 {
   var result := evaluation.result;
   var patch := (match result { case Some(i_result_val) => i_result_val.patch case None => Option.None });
@@ -323,6 +324,7 @@ lemma declaredPath_ensures(nodes: map<string, CompoundNode>, path: seq<string>)
 
 function lookupNode(nodes: map<string, CompoundNode>, id: string): CompoundNode
   requires (id in nodes)
+  ensures lookupNode(nodes, id) == nodes[id]
 {
   nodes[id]
 }
@@ -439,13 +441,16 @@ lemma reverse_ensures(path: seq<string>)
 function lifecycle(nodes: map<string, CompoundNode>, path: seq<string>, context: map<string, int>, event: Event, exiting: bool): Applied
   requires declaredPath(nodes, path)
   decreases |path|
+  ensures |path| == 0 ==> lifecycle(nodes, path, context, event, exiting) == Applied(context, true, [])
 {
   if (|path| == 0) then
     Applied(context, true, [])
   else
     var node := lookupNode(nodes, path[0]);
-    var callback := (if exiting then node.exit else node.entry);
-    var first := apply(context, callback(context, event));
+    var exit := node.exit;
+    var entry := node.entry;
+    var evaluation := (if exiting then exit(context, event) else entry(context, event));
+    var first := apply(context, evaluation);
     var rest := lifecycle(nodes, path[1..], first.context, event, exiting);
     Applied(rest.context, (first.reused && rest.reused), (first.effects + rest.effects))
 }
@@ -582,8 +587,8 @@ ghost predicate ValidConfiguration(machine: CompoundMachine, path: seq<string>)
   (forall i :: 0 <= i < |path| && |machine.nodes[path[i]].children| > 0 ==>
     (exists child :: child in machine.nodes[path[i]].children && child in path) &&
     (forall a, b ::
-      a in machine.nodes[path[i]].children && a in path &&
-      b in machine.nodes[path[i]].children && b in path ==> a == b))
+      (a in machine.nodes[path[i]].children && a in path &&
+      b in machine.nodes[path[i]].children && b in path) ==> a == b))
 }
 
 lemma PathHasExactlyOneChild(machine: CompoundMachine, path: seq<string>)
@@ -594,8 +599,8 @@ lemma PathHasExactlyOneChild(machine: CompoundMachine, path: seq<string>)
   forall i | 0 <= i < |path| && |machine.nodes[path[i]].children| > 0
     ensures (exists child :: child in machine.nodes[path[i]].children && child in path) &&
       (forall a, b ::
-        a in machine.nodes[path[i]].children && a in path &&
-        b in machine.nodes[path[i]].children && b in path ==> a == b)
+        (a in machine.nodes[path[i]].children && a in path &&
+        b in machine.nodes[path[i]].children && b in path) ==> a == b)
   {
     assert i < |path| - 1;
     assert path[i + 1] in machine.nodes[path[i]].children;
@@ -673,14 +678,30 @@ lemma DeepestSelection(nodes: map<string, CompoundNode>, path: seq<string>,
       assert select(nodes, path, context, event).value ==
         Selection(path[last], nodes[path[last]], NodeEvaluation(nodes, path[last], context, event));
     } else {
-      DeepestSelection(nodes, path[..last], context, event);
-      if select(nodes, path[..last], context, event).Some? {
+      var prefix := path[..last];
+      DeepestSelection(nodes, prefix, context, event);
+      assert select(nodes, path, context, event) == select(nodes, prefix, context, event);
+      if select(nodes, prefix, context, event).Some? {
         var i :| 0 <= i < last &&
-          select(nodes, path[..last], context, event).value ==
-            Selection(path[i], nodes[path[i]], NodeEvaluation(nodes, path[i], context, event)) &&
-          Enabled(NodeEvaluation(nodes, path[i], context, event)) &&
-          (forall j :: i < j < last ==> !Enabled(NodeEvaluation(nodes, path[j], context, event)));
-        assert forall j :: i < j < |path| ==> !Enabled(NodeEvaluation(nodes, path[j], context, event));
+          select(nodes, prefix, context, event).value ==
+            Selection(prefix[i], nodes[prefix[i]], NodeEvaluation(nodes, prefix[i], context, event)) &&
+          Enabled(NodeEvaluation(nodes, prefix[i], context, event)) &&
+          (forall j :: i < j < last ==> !Enabled(NodeEvaluation(nodes, prefix[j], context, event)));
+        forall j | i < j < |path|
+          ensures !Enabled(NodeEvaluation(nodes, path[j], context, event))
+        {
+          if j < last {
+            assert prefix[j] == path[j];
+          }
+        }
+      } else {
+        forall i | 0 <= i < |path|
+          ensures !Enabled(NodeEvaluation(nodes, path[i], context, event))
+        {
+          if i < last {
+            assert prefix[i] == path[i];
+          }
+        }
       }
     }
   }
@@ -713,7 +734,18 @@ lemma EffectOnlyChildWins(nodes: map<string, CompoundNode>, path: seq<string>,
 {
 }
 
-lemma LifecycleConcatenation(nodes: map<string, CompoundNode>, a: seq<string>, b: seq<string>,
+lemma {:induction false} {:isolate_assertions} LifecycleCons(nodes: map<string, CompoundNode>, path: seq<string>,
+  context: map<string, int>, event: Event, exiting: bool)
+  requires declaredPath(nodes, path) && |path| > 0
+  ensures var evaluation := if exiting then nodes[path[0]].exit(context, event) else nodes[path[0]].entry(context, event);
+    var first := apply(context, evaluation);
+    var rest := lifecycle(nodes, path[1..], first.context, event, exiting);
+    lifecycle(nodes, path, context, event, exiting) ==
+      Applied(rest.context, first.reused && rest.reused, first.effects + rest.effects)
+{
+}
+
+lemma {:induction false} {:isolate_assertions} LifecycleConcatenation(nodes: map<string, CompoundNode>, a: seq<string>, b: seq<string>,
                              context: map<string, int>, event: Event, exiting: bool)
   requires declaredPath(nodes, a + b)
   ensures var first := lifecycle(nodes, a, context, event, exiting);
@@ -722,11 +754,30 @@ lemma LifecycleConcatenation(nodes: map<string, CompoundNode>, a: seq<string>, b
             Applied(second.context, first.reused && second.reused, first.effects + second.effects)
   decreases |a|
 {
+  hide *;
   if |a| > 0 {
-    var callback := if exiting then nodes[a[0]].exit else nodes[a[0]].entry;
-    var first := apply(context, callback(context, event));
-    LifecycleConcatenation(nodes, a[1..], b, first.context, event, exiting);
+    assert lookupNode(nodes, a[0]) == nodes[a[0]];
+    var evaluation := if exiting then nodes[a[0]].exit(context, event) else nodes[a[0]].entry(context, event);
+    var first := apply(context, evaluation);
     assert a + b == [a[0]] + (a[1..] + b);
+    assert (a + b)[1..] == a[1..] + b;
+    LifecycleCons(nodes, a, context, event, exiting);
+    LifecycleCons(nodes, a + b, context, event, exiting);
+    LifecycleConcatenation(nodes, a[1..], b, first.context, event, exiting);
+    var rest := lifecycle(nodes, a[1..], first.context, event, exiting);
+    var second := lifecycle(nodes, b, rest.context, event, exiting);
+    assert lifecycle(nodes, a, context, event, exiting) ==
+      Applied(rest.context, first.reused && rest.reused, first.effects + rest.effects);
+    assert lifecycle(nodes, a[1..] + b, first.context, event, exiting) ==
+      Applied(second.context, rest.reused && second.reused, rest.effects + second.effects);
+    assert lifecycle(nodes, a + b, context, event, exiting) ==
+      Applied(second.context, first.reused && (rest.reused && second.reused),
+        first.effects + (rest.effects + second.effects));
+    assert first.effects + (rest.effects + second.effects) ==
+      (first.effects + rest.effects) + second.effects;
+  } else {
+    assert a + b == b;
+    assert lifecycle(nodes, a, context, event, exiting) == Applied(context, true, []);
   }
 }
 
@@ -747,7 +798,7 @@ ghost function Kept(source: seq<string>, target: seq<string>, reenter: bool): in
   else commonPrefix(source, if |target| == 0 then [] else target[..|target| - 1])
 }
 
-lemma CompoundLifecycleMeaning(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event)
+lemma {:induction false} {:isolate_assertions} CompoundLifecycleMeaning(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event)
   requires WellFormed(machine)
   requires ValidConfiguration(machine, snapshot.path)
   requires ready(machine, snapshot, event)
@@ -770,6 +821,39 @@ lemma CompoundLifecycleMeaning(machine: CompoundMachine, snapshot: CompoundSnaps
           exited.reused && updated.reused && entered.reused,
           exited.effects + chosen.value.evaluation.effects + entered.effects)
 {
+  hide *;
+  reveal WellFormed(), ValidConfiguration(), TreePath(), ready();
+  reveal Target(), Reenters(), Kept(), compoundTransition();
+  var chosen := select(machine.nodes, snapshot.path, snapshot.context, event);
+  if chosen.Some? {
+    var target := Target(chosen.value.evaluation);
+    var reenter := Reenters(chosen.value.evaluation);
+    if target.Some? {
+      assert descend(machine.nodes, target.value) == machine.nodes[target.value].initialPath;
+      var sourcePath := chosen.value.node.path;
+      var targetPath := machine.nodes[target.value].path;
+      var kept := Kept(sourcePath, targetPath, reenter);
+      var exitKept := if target.value == machine.root && !reenter then 1 else kept;
+      var exited := lifecycle(machine.nodes, reverse(snapshot.path[exitKept..]), snapshot.context, event, true);
+      var updated := apply(exited.context, chosen.value.evaluation);
+      var entered := lifecycle(machine.nodes, machine.nodes[target.value].initialPath[kept..], updated.context, event, false);
+      if reenter {
+        assert chosen.value.evaluation.result.value.reenter;
+      } else {
+        assert !chosen.value.evaluation.result.value.reenter;
+      }
+      assert compoundTransition(machine, snapshot, event) ==
+        CompoundStep(CompoundSnapshot(machine.nodes[target.value].initialPath, entered.context), false,
+          exited.reused && updated.reused && entered.reused,
+          exited.effects + updated.effects + entered.effects);
+    } else {
+      if reenter {
+        assert chosen.value.evaluation.result.Some?;
+      } else {
+        assert !Reenters(chosen.value.evaluation);
+      }
+    }
+  }
 }
 
 lemma CompoundSelfResetsDescendants(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event)
@@ -784,13 +868,17 @@ lemma CompoundSelfResetsDescendants(machine: CompoundMachine, snapshot: Compound
 {
 }
 
-lemma ReverseLifecycleOrder(path: seq<string>, i: int)
+lemma {:induction false} ReverseLifecycleOrder(path: seq<string>, i: int)
   requires 0 <= i < |path|
   ensures reverse(path)[i] == path[|path| - 1 - i]
   decreases |path|
 {
   if i < |path| - 1 {
     ReverseLifecycleOrder(path[1..], i);
+    assert reverse(path)[i] == reverse(path[1..])[i];
+    assert path[1..][|path| - 2 - i] == path[|path| - 1 - i];
+  } else {
+    assert reverse(path)[i] == path[0];
   }
 }
 
@@ -799,4 +887,48 @@ lemma PreservedAncestorsAreNotExited(path: seq<string>, kept: int, i: int)
   requires forall a, b :: 0 <= a < b < |path| ==> path[a] != path[b]
   ensures path[i] !in reverse(path[kept..])
 {
+}
+
+lemma {:induction false} {:isolate_assertions} CompoundLifecycleWitness(reenter: bool)
+{
+  var empty: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(None, []);
+  var rootExit: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(None, [Effect(0, [])]);
+  var parentEntry: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(None, [Effect(1, [])]);
+  var parentExit: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(None, [Effect(2, [])]);
+  var childEntry: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(None, [Effect(3, [])]);
+  var childExit: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(None, [Effect(4, [])]);
+  var sibling: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(Some(Result(Some("b"), None, false)), []);
+  var reset: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(Some(Result(Some("p"), None, reenter)), []);
+  var root := CompoundNode(["r"], ["r", "p", "a"], ["p"], Some("p"), map[], empty, rootExit);
+  var parent := CompoundNode(["r", "p"], ["r", "p", "a"], ["a", "b"], Some("a"), map["reset" := reset], parentEntry, parentExit);
+  var a := CompoundNode(["r", "p", "a"], ["r", "p", "a"], [], None, map["go" := sibling], childEntry, childExit);
+  var b := CompoundNode(["r", "p", "b"], ["r", "p", "b"], [], None, map[], childEntry, childExit);
+  var machine := CompoundMachine("r", map[], map["r" := root, "p" := parent, "a" := a, "b" := b]);
+  var snapshot := CompoundSnapshot(["r", "p", "a"], map[]);
+  assert forall id :: id in machine.nodes ==> initialWitness(machine.nodes, id);
+  assert compoundTransition(machine, snapshot, Event("go", 0)).effects ==
+    [Effect(4, []), Effect(3, [])];
+  assert select(machine.nodes, snapshot.path, snapshot.context, Event("reset", 0)) ==
+    Some(Selection("p", parent, Evaluation(Some(Result(Some("p"), None, reenter)), [])));
+  if reenter {
+    LifecycleCons(machine.nodes, ["a", "p"], map[], Event("reset", 0), true);
+    LifecycleCons(machine.nodes, ["p", "a"], map[], Event("reset", 0), false);
+    assert lifecycle(machine.nodes, ["a", "p"], map[], Event("reset", 0), true).effects ==
+      [Effect(4, []), Effect(2, [])];
+    assert lifecycle(machine.nodes, ["p", "a"], map[], Event("reset", 0), false).effects ==
+      [Effect(1, []), Effect(3, [])];
+    assert compoundTransition(machine, snapshot, Event("reset", 0)).effects ==
+      [Effect(4, []), Effect(2, []), Effect(1, []), Effect(3, [])];
+  } else {
+    assert compoundTransition(machine, snapshot, Event("reset", 0)).effects ==
+      [Effect(4, []), Effect(3, [])];
+  }
 }

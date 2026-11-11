@@ -234,8 +234,10 @@ function lifecycle(nodes: map<string, CompoundNode>, path: seq<string>, context:
     Applied(context, true, [])
   else
     var node := lookupNode(nodes, path[0]);
-    var callback := (if exiting then node.exit else node.entry);
-    var first := apply(context, callback(context, event));
+    var exit := node.exit;
+    var entry := node.entry;
+    var evaluation := (if exiting then exit(context, event) else entry(context, event));
+    var first := apply(context, evaluation);
     var rest := lifecycle(nodes, path[1..], first.context, event, exiting);
     Applied(rest.context, (first.reused && rest.reused), (first.effects + rest.effects))
 }

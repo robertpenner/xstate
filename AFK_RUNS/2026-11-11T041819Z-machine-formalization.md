@@ -28,10 +28,10 @@ worktree/lifecycle scripts do not exist in this fork. Existing `main` and
 
 ## Ticket progress
 
-| Issue | Outcome                                        | Status              | Blocker                  | Integration | Verification         |
-| ----- | ---------------------------------------------- | ------------------- | ------------------------ | ----------- | -------------------- |
-| #9    | Flat-machine model, proofs, differential tests | integrated/verified | None                     | `f3e9b7d`   | Flat milestone below |
-| #10   | Nested compound-state model and evidence       | in-progress         | None; consumes `f3e9b7d` | None        | Pending              |
+| Issue | Outcome                                        | Status              | Blocker                  | Integration           | Verification             |
+| ----- | ---------------------------------------------- | ------------------- | ------------------------ | --------------------- | ------------------------ |
+| #9    | Flat-machine model, proofs, differential tests | integrated/verified | None                     | `f3e9b7d`             | Flat milestone below     |
+| #10   | Nested compound-state model and evidence       | integrated/verified | None; consumes `f3e9b7d` | This milestone commit | Compound milestone below |
 
 ## Verification evidence
 
@@ -73,6 +73,27 @@ is byte-identical to `bcd3840`.
   `/Users/robertpenner/git/penner-agent-scratch/branch-xstate-machine-model/run-sXCxa90t`.
 
 ## Suspected bugs and unexpected behavior
+
+### Compound proof and generator limitations
+
+- LemmaScript 0.6.6 emits cross-module calls as axioms. The combined flat and
+  compound model therefore lives in one TypeScript translation unit; the proof
+  driver rejects axioms.
+- A negative slice endpoint, `slice(0, -1)`, emitted an invalid Dafny slice.
+  The executable model uses the equivalent explicit length-minus-one endpoint.
+- Direct calls to function-valued node fields (`node.exit(context, event)`)
+  are rejected by this emitter as unsupported method calls. Binding each field
+  to a local function before calling it translates successfully.
+- Dafny 4.11.0 rejected a small conditional-function application equality:
+  given `N(entry: int -> int, exit: int -> int)` and `!b`, the assertion
+  `(if b then n.exit else n.entry)(value) == n.entry(value)` did not verify.
+  Explicit local callback types changed which obligation failed. This is
+  unexpected verifier behavior, not a confirmed unsoundness or runtime bug.
+  The model's equivalent conditional over callback results verifies.
+- The first extended defect run rejected ten edits but refused to count the
+  unaffected-ancestor mutation: its only result was a timeout. A concrete
+  sibling/reentry lifecycle witness was added alongside the general laws.
+  The driver continues to require a semantic proof failure for each edit.
 
 ### Descendant targeting root enters root without exiting it
 
@@ -152,6 +173,33 @@ user's request for frequent pushes. This checkpoint does not complete #10.
   add compound semantic defects, rerun all required checks, and publish the
   verified milestone. Final independent review remains pending.
 
+### Compound milestone
+
+- Checkpoint `8bba6df` was pushed and the remote branch was confirmed equal to
+  local HEAD. The PR remains draft.
+- All compound proofs now pass: 252 verification tasks, zero errors and no
+  warnings. The inventory includes 35 named laws and 13 generated contracts.
+- `pnpm test:machine-model`: 59 tests pass, including 500 generated flat cases
+  and 500 generated compound cases. The compound named suite has 22 cases.
+- `pnpm typecheck`: passes after the refusal fixture includes a supported
+  structural field alongside the intentionally unsupported field.
+- `pnpm test:machine-model:runtime-defects`: all three mutations fail their
+  differential assertion, including reversed compound exit order. The original
+  production source bytes were restored.
+- `pnpm verify:machine-model`: 252 verification tasks pass; all 13 model
+  defects cause semantic proof failures. Freshness, additions-only inventory,
+  unchanged generated executable bodies, and the behavior-preserving refactor
+  all pass.
+- `pnpm test:core`: 186 files passed, 3005 tests passed, 29 skipped, three todo.
+- `pnpm build`, `pnpm typecheck`, `pnpm lint`, `pnpm format:check`: pass.
+  Changed-file Markdown formatting and check also pass.
+- The exact checked changes extend the combined model, proof and manifest,
+  shared encoding adapter, compound adapter, named/generated tests, runtime
+  reproductions, verifier and runtime mutation driver. Documentation and this
+  log describe those changes. Production source remains identical to `bcd3840`.
+- All implementation outcomes are now locally verified. Final independent
+  series review and PR publication checks remain pending.
+
 ## Publication at stop or handoff
 
 **Published verified head:** `f3e9b7d`.
@@ -160,7 +208,8 @@ user's request for frequent pushes. This checkpoint does not complete #10.
 above. The checkpoint's commit is identified by its `chore(core): checkpoint`
 message and the Git history containing this log.
 
-**Remaining local work:** active implementation.
+**Remaining local work:** publish the verified compound milestone and complete
+independent series review.
 
 ## Final series review
 
@@ -172,7 +221,7 @@ message and the Git history containing this log.
 
 **Findings:** pending.
 
-**Remaining blockers:** #10 proofs and verification tooling remain incomplete.
+**Remaining blockers:** final independent review and PR publication checks.
 
 **Completed:** pending.
 
@@ -182,4 +231,6 @@ message and the Git history containing this log.
 
 **Result:** in progress.
 
-**Pre-existing unrelated failures:** not yet assessed on this XState baseline.
+**Pre-existing unrelated failures:** none found in required checks. Lint emits
+the existing Node module-type warning for `scripts/oxlint-plugin-xstate-react.ts`;
+it exits successfully.

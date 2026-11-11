@@ -285,8 +285,10 @@ export function lifecycle(
   //@ decreases path.length
   if (path.length === 0) return { context, reused: true, effects: [] };
   const node = lookupNode(nodes, path[0]);
-  const callback = exiting ? node.exit : node.entry;
-  const first = apply(context, callback(context, event));
+  const exit = node.exit;
+  const entry = node.entry;
+  const evaluation = exiting ? exit(context, event) : entry(context, event);
+  const first = apply(context, evaluation);
   const rest = lifecycle(nodes, path.slice(1), first.context, event, exiting);
   return {
     context: rest.context,
