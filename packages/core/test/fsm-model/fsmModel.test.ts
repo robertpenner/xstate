@@ -27,10 +27,14 @@ describe('the fsm model and createFSM', () => {
       assertAgrees(config, [{ type, payload: 0 }]);
   });
 
+  // The second event starts from '', an own state with no `on` table.
   it('accepts the empty string as a transition target', () => {
     assertAgrees(
       { initial: 'idle', states: { idle: { on: { go: '' } }, '': {} } },
-      [{ type: 'go', payload: 0 }]
+      [
+        { type: 'go', payload: 0 },
+        { type: 'go', payload: 0 }
+      ]
     );
   });
 
