@@ -4,7 +4,7 @@
 
 **Branch:** `machine-formalized`
 
-**Pull request:** not yet created
+**Pull request:** <https://github.com/robertpenner/xstate/pull/11> (draft, base `next`)
 
 **Started:** 2026-11-11 04:18:19 UTC
 
@@ -17,7 +17,7 @@ from confirmed defects.
 
 **Baseline:** `bcd3840` (`origin/next`, refreshed before creating the worktree).
 
-**Verified integration head:** not yet verified.
+**Verified integration head:** `f3e9b7d` (flat milestone, evidence below).
 
 ## Workflow authorization
 
@@ -28,10 +28,10 @@ worktree/lifecycle scripts do not exist in this fork. Existing `main` and
 
 ## Ticket progress
 
-| Issue | Outcome                                        | Status      | Blocker                    | Integration | Verification |
-| ----- | ---------------------------------------------- | ----------- | -------------------------- | ----------- | ------------ |
-| #9    | Flat-machine model, proofs, differential tests | in-progress | None                       | None        | Pending      |
-| #10   | Nested compound-state model and evidence       | blocked     | #9 integrated and verified | None        | Pending      |
+| Issue | Outcome                                        | Status              | Blocker                  | Integration | Verification         |
+| ----- | ---------------------------------------------- | ------------------- | ------------------------ | ----------- | -------------------- |
+| #9    | Flat-machine model, proofs, differential tests | integrated/verified | None                     | `f3e9b7d`   | Flat milestone below |
+| #10   | Nested compound-state model and evidence       | in-progress         | None; consumes `f3e9b7d` | None        | Pending              |
 
 ## Verification evidence
 
@@ -73,6 +73,20 @@ is byte-identical to `bcd3840`.
   `/Users/robertpenner/git/penner-agent-scratch/branch-xstate-machine-model/run-sXCxa90t`.
 
 ## Suspected bugs and unexpected behavior
+
+### Descendant targeting root enters root without exiting it
+
+- Revision: `bcd3840`.
+- Reproducer: `packages/core/test/machine-model/runtimeFindings.test.ts`,
+  `targeting the root from a descendant enters root without exiting it`.
+- A root with `id: 'root'`, initial child `a`, and a transition from `a`
+  with `{ target: '#root' }` invokes root entry without root exit.
+- Compound generated testing found this with seed 8912 after six cases and
+  77 shrinks. The standalone public-API reproducer preserves the minimal
+  behavior independently of the generated harness.
+- Status: suspected runtime bug, not an approved production fix. The model
+  preserves this behavior using separate exit and entry cuts for root targets.
+- The adjusted comparison passes 500 generated compound trees/traces.
 
 ### Targetless reentry runs entry without exit
 
@@ -116,11 +130,35 @@ is byte-identical to `bcd3840`.
 Fresh run. Both implementation issues are open and labeled `ready-for-agent`.
 The parent is coordination only. #10 has the native dependency on #9.
 
+The resumed run confirmed `f3e9b7d` is the published integration. The compound
+implementation and unfinished proofs are being preserved as a checkpoint at the
+user's request for frequent pushes. This checkpoint does not complete #10.
+
+### Compound checkpoint verification
+
+- Nine named compound tests and 500 generated compound cases passed before
+  the latest proof-only additions.
+- Dafny check of the expanded model: 91 verified, two errors in
+  `DeepestSelection`, three timeouts in `LifecycleConcatenation`,
+  `CompoundLifecycleMeaning`, and `ReverseLifecycleOrder`.
+- Typecheck found an inferred recursive type in the adapter's local children
+  array. An explicit type annotation fixed it; `pnpm typecheck` passes.
+- Full core regression suite is running; build, lint and final formatting
+  checks have not yet been rerun for compound changes.
+- The proof manifest and verification driver still describe the flat milestone.
+  Their inventory, additions-only validation, and mutation coverage must be
+  extended before #10 can be marked verified.
+- Next: complete the compound proofs without assumptions, update the driver,
+  add compound semantic defects, rerun all required checks, and publish the
+  verified milestone. Final independent review remains pending.
+
 ## Publication at stop or handoff
 
-**Published head:** not yet published.
+**Published verified head:** `f3e9b7d`.
 
-**Unverified checkpoint:** none.
+**Unverified checkpoint:** compound implementation and proof work; see verification
+above. The checkpoint's commit is identified by its `chore(core): checkpoint`
+message and the Git history containing this log.
 
 **Remaining local work:** active implementation.
 
@@ -134,7 +172,7 @@ The parent is coordination only. #10 has the native dependency on #9.
 
 **Findings:** pending.
 
-**Remaining blockers:** #10 awaits #9.
+**Remaining blockers:** #10 proofs and verification tooling remain incomplete.
 
 **Completed:** pending.
 

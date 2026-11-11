@@ -8,18 +8,18 @@ import {
 } from '../../src';
 import * as model from './machineModel';
 
-type Context = Record<string, unknown>;
-type Event = { type: string; [key: string]: unknown };
+export type Context = Record<string, unknown>;
+export type Event = { type: string; [key: string]: unknown };
 type Result = { target?: string; context?: Context; reenter?: boolean };
 type Enqueue = (
   action: (...args: unknown[]) => void,
   ...args: unknown[]
 ) => void;
-type Callback = (
+export type Callback = (
   args: { context: Context; event: Event },
   enq: Enqueue
 ) => Result | void;
-type Transition = Result | Callback | undefined;
+export type Transition = Result | Callback | undefined;
 type State = {
   on?: Record<string, Transition>;
   entry?: Callback;
@@ -31,7 +31,7 @@ export type Config = {
   states: Record<string, State>;
 };
 
-function plainRecord(
+export function plainRecord(
   value: unknown,
   location: string
 ): asserts value is Context {
@@ -55,7 +55,11 @@ function plainRecord(
   }
 }
 
-function fields(value: unknown, allowed: readonly string[], location: string) {
+export function fields(
+  value: unknown,
+  allowed: readonly string[],
+  location: string
+) {
   plainRecord(value, location);
   for (const key of Object.keys(value)) {
     if (!allowed.includes(key))
@@ -63,7 +67,11 @@ function fields(value: unknown, allowed: readonly string[], location: string) {
   }
 }
 
-function validateResult(value: unknown, config: Config, lifecycle: boolean) {
+export function validateResult(
+  value: unknown,
+  resolveTarget: (target: string) => string,
+  lifecycle: boolean
+) {
   if (value === undefined) return;
   fields(
     value,
@@ -71,13 +79,10 @@ function validateResult(value: unknown, config: Config, lifecycle: boolean) {
     'result'
   );
   const result = value as Result;
-  if (
-    result.target !== undefined &&
-    (typeof result.target !== 'string' ||
-      !Object.hasOwn(config.states, result.target))
-  ) {
+  if (result.target !== undefined && typeof result.target !== 'string') {
     throw new Error(`Unsupported target: ${String(result.target)}`);
   }
+  if (result.target !== undefined) resolveTarget(result.target);
   if (result.reenter !== undefined && typeof result.reenter !== 'boolean') {
     throw new Error('Unsupported result.reenter');
   }
@@ -108,18 +113,19 @@ function validateConfig(config: Config) {
     for (const [type, handler] of Object.entries(node.on)) {
       if (!type || type.includes('*'))
         throw new Error(`Unsupported event name: ${type}`);
-      if (typeof handler !== 'function') validateResult(handler, config, false);
+      if (typeof handler !== 'function')
+        validateResult(handler, (target) => flatTarget(config, target), false);
     }
   }
 }
 
-export function compareTrace(config: Config, events: readonly Event[]) {
-  validateConfig(config);
-  for (const event of events) {
-    plainRecord(event, 'event');
-    if (typeof event.type !== 'string')
-      throw new Error('Unsupported event.type');
-  }
+function flatTarget(config: Config, target: string) {
+  if (!Object.hasOwn(config.states, target))
+    throw new Error(`Unsupported target: ${target}`);
+  return target;
+}
+
+export function createEncoding() {
   const values: unknown[] = [];
   const encodeValue = (value: unknown) => {
     const found = values.findIndex((entry) => Object.is(value, entry));
@@ -144,7 +150,11 @@ export function compareTrace(config: Config, events: readonly Event[]) {
       ])
     );
   const evaluate =
-    (definition: Transition, lifecycle = false) =>
+    (
+      definition: Transition,
+      lifecycle: boolean,
+      resolveTarget: (target: string) => string
+    ) =>
     (context: Record<string, number>, event: model.Event): model.Evaluation => {
       const effects: model.Effect[] = [];
       const enqueue: Enqueue = new Proxy(
@@ -184,7 +194,7 @@ export function compareTrace(config: Config, events: readonly Event[]) {
               enqueue
             )
           : definition;
-      validateResult(result, config, lifecycle);
+      validateResult(result, resolveTarget, lifecycle);
       const normalized =
         result ??
         (typeof definition === 'function' || lifecycle ? undefined : {});
@@ -193,7 +203,10 @@ export function compareTrace(config: Config, events: readonly Event[]) {
           normalized === undefined
             ? undefined
             : {
-                target: normalized.target,
+                target:
+                  normalized.target === undefined
+                    ? undefined
+                    : resolveTarget(normalized.target),
                 reenter: normalized.reenter ?? false,
                 patch:
                   normalized.context === undefined
@@ -205,6 +218,51 @@ export function compareTrace(config: Config, events: readonly Event[]) {
         effects
       };
     };
+  const encodeEffects = (effects: readonly ExecutableEffect[]) =>
+    effects.map((effect) => {
+      if (
+        !('action' in effect) ||
+        typeof effect.action !== 'function' ||
+        !('args' in effect)
+      ) {
+        throw new Error(`Unsupported runtime effect: ${effect.type}`);
+      }
+      return {
+        action: encodeValue(effect.action),
+        args: effect.args.map(encodeValue)
+      };
+    });
+  const decodeEffects = (effects: readonly model.Effect[]) =>
+    effects.map((effect) => ({
+      action: values[effect.action],
+      args: effect.args.map((arg) => values[arg])
+    }));
+  return {
+    encodeValue,
+    encode,
+    decode,
+    evaluate,
+    encodeEffects,
+    decodeEffects
+  };
+}
+
+export function compareTrace(config: Config, events: readonly Event[]) {
+  validateConfig(config);
+  for (const event of events) {
+    plainRecord(event, 'event');
+    if (typeof event.type !== 'string')
+      throw new Error('Unsupported event.type');
+  }
+  const {
+    encodeValue,
+    encode,
+    decode,
+    evaluate,
+    encodeEffects,
+    decodeEffects
+  } = createEncoding();
+  const resolveTarget = (target: string) => flatTarget(config, target);
   const machine: model.Machine = {
     initial: config.initial,
     context: encode(config.context),
@@ -215,11 +273,11 @@ export function compareTrace(config: Config, events: readonly Event[]) {
           on: new Map(
             Object.entries(node.on ?? {}).map(([event, result]) => [
               event,
-              evaluate(result)
+              evaluate(result, false, resolveTarget)
             ])
           ),
-          entry: evaluate(node.entry, true),
-          exit: evaluate(node.exit, true)
+          entry: evaluate(node.entry, true, resolveTarget),
+          exit: evaluate(node.exit, true, resolveTarget)
         }
       ])
     )
@@ -243,27 +301,11 @@ export function compareTrace(config: Config, events: readonly Event[]) {
       actual.context === (previous?.context ?? config.context),
       expected.contextReused
     );
-    const encodedEffects = actualEffects.map((effect: ExecutableEffect) => {
-      if (
-        !('action' in effect) ||
-        typeof effect.action !== 'function' ||
-        !('args' in effect)
-      ) {
-        throw new Error(`Unsupported runtime effect: ${effect.type}`);
-      }
-      return {
-        action: encodeValue(effect.action),
-        args: effect.args.map(encodeValue)
-      };
-    });
-    assert.deepEqual(encodedEffects, expected.effects);
+    assert.deepEqual(encodeEffects(actualEffects), expected.effects);
     return {
       value: expected.snapshot.value,
       context: actual.context,
-      effects: expected.effects.map((effect) => ({
-        action: values[effect.action],
-        args: effect.args.map((arg) => values[arg])
-      })),
+      effects: decodeEffects(expected.effects),
       snapshotReused: expected.snapshotReused,
       contextReused: expected.contextReused
     };
