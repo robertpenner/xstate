@@ -65,7 +65,9 @@ The laws establish:
 - Machines with at most one parallel node start with every node on the path from
   the root through the initial descendants, entering all regions of the
   parallel node. Active nodes, and entry callbacks, follow document order.
-  Initialization and every handled step preserve validity: the root is active,
+  For a well-formed machine, initialization yields a valid configuration, and
+  every handled single-selection step from a valid configuration preserves
+  validity: the root is active,
   each active node's parent is active, an active parallel node has every region
   active, and an active compound node has exactly one active child.
 - Selection is region-first. Each active atomic node tries its own path below
@@ -84,8 +86,10 @@ The laws establish:
   descendants narrows the same way. A reentering self-transition on the
   parallel node exits and reenters it.
 - A transition from an ancestor of the parallel node into one region exits
-  every active node below the parallel node. All regions are then reentered
-  from their initial descendants, not only the targeted region.
+  every active node below the parallel node (`AncestorResetsSubtree`). All
+  regions are then reentered from their initial descendants, not only the
+  targeted region; no separate law states this half, which follows from the
+  validity law and the entry plan's definition.
 - Every active node outside the transition domain, other than a reentered
   source, remains active and does not exit.
 
@@ -103,15 +107,18 @@ The laws establish:
 - Fewer than two selections delegate to the single-transition step.
 - A multi-transition step exits the union of the kept plans' exit sets in
   reverse document order, applies every kept result in selection order, then
-  enters the union of their entry sets in document order. Each transition
-  callback observes the pre-step context, because selection evaluates it before
-  any exit. Patches merge in selection order, so a later region's value wins for
-  a shared key. Effects are returned as exits, kept transition effects in
+  enters the union of their entry sets in document order. By the definition of
+  the model's selection, each transition callback observes the pre-step
+  context, because selection evaluates it before any exit. Patches merge in
+  selection order, so, as a consequence of sequential application, a later
+  region's value wins for a shared key. Effects are returned as exits, kept transition effects in
   selection order, then entries. Dropped selections contribute neither patch
   nor effects.
 - The next active set contains every node that was active and not exited, plus
-  every entered node, in document order. When the kept plans' domains are
-  pairwise incomparable, that set remains valid: each node lies inside at most
+  every entered node, in document order. For a well-formed machine starting
+  from a valid configuration, every step accepted by `parallelStepReady`
+  remains valid. The proof relies on the kept plans' domains being pairwise
+  incomparable: each node lies inside at most
   one domain, so its membership comes from that plan's own valid result or from
   the previous active set.
 
@@ -170,18 +177,24 @@ transitions are refused. Each step is checked against the model's
 the single-selection `parallelReady` check. When several regions select, every
 selection must pass that check, sources must lie on pairwise incomparable
 paths, and the kept plans' domains must be pairwise incomparable. A step is
-also refused when a non-reentering transition targets an already active
-direct region of the parallel node. That refusal avoids a known runtime
-difference,
+also refused when a transition, with or without `reenter`, targets an already
+active direct region of the parallel node. That refusal covers the
+reproduction machine of
 [statelyai/xstate#5895](https://github.com/statelyai/xstate/issues/5895).
 Targetless `reenter: true` transitions are refused when several regions
 select, because the runtime's targetless-reentry lifecycle is a separate
 suspected bug.
 
-The comparable-domains refusal is conservative. For example, an atomic
-self-target kept alongside a transition that exits the parallel node produces
-a valid runtime result, but the model refuses that step instead of proving the
-union of overlapping domains.
+The comparable-domains refusal also covers the general #5895 pattern: two kept
+transitions with disjoint exit sets, where one exit set contains the other's
+target or an ancestor of it. That target lies strictly inside the first
+transition's domain, and the second domain is an ancestor of the target, so the
+two domains lie on one path and are comparable. This argument is informal; no
+law states it. The refusal is wider than that pattern requires. An atomic
+self-target whose domain is the atomic node itself is neither exited nor
+entered, so keeping it alongside a transition that exits the parallel node
+yields a valid runtime configuration. The model still refuses that step
+because its validity proof needs pairwise incomparable domains.
 
 Multiple parallel nodes, choices, history, completion, eventless transitions,
 raised events, timers, actors, routes, state input and persistence remain
@@ -218,7 +231,9 @@ state value, parent membership, and exactly-one-active-child condition.
 Parallel comparisons check active nodes in runtime document order, the
 hierarchical value with every region of an active parallel node, and that an
 active parallel node has every region active. The adapter also checks that its
-document order equals the runtime's node `order`.
+document order equals the runtime's node `order`. `ParallelWellFormed` requires
+`order` to list every node exactly once but does not require it to be a
+preorder of the tree, so the lifecycle-order laws hold relative to that list.
 
 The compound laws assume the normalized tree's path and initial-child
 relationships. Authored target resolution and construction of that normalized
@@ -226,12 +241,19 @@ tree remain executable adapter code covered by comparisons and refusal tests.
 The parallel model selects in region-first order: one selection per active
 atomic node below the parallel node, then the parallel node and its ancestors
 only when no region selects. SCXML instead selects, for every active atomic
-state, the first enabled transition among it and its ancestors, then removes
-duplicates. The runtime's `transitionNode` matches the model: it consults the
+state, the first enabled transition among it and its ancestors, removes
+duplicates, then removes conflicting transitions; in that last pass a
+transition whose source is a descendant of a conflicting transition's source
+replaces it (SCXML 1.0 Appendix D, `selectTransitions` and
+`removeConflictingTransitions`; the appendix is informative). The runtime's `transitionNode` matches the model: it consults the
 parallel node only when every region returns no transition. The two orders
 differ when one region declines and the parallel node or an ancestor handles
 the event while another region selects. SCXML would also select that ancestor
-transition for the declining region; the runtime and the model do not.
+transition for the declining region; the runtime and the model do not. When
+the ancestor transition's exit set overlaps the region selection's, SCXML's
+conflict removal keeps the region selection, which matches the region-first
+result. The difference is visible only when the exit sets do not overlap, for
+example with a targetless transition on the parallel node.
 Region-first selection is a model assumption checked only by the differential
 tests.
 
@@ -275,10 +297,14 @@ same four-second fail-on-interruption limit.
 [`parallelModel.test.ts`](./parallelModel.test.ts) covers root-level and nested
 parallel nodes with regions at different depths, region fallback when one
 region declines, cross-region narrowing from a region and from the parallel
-node, ancestor transitions that reset every region, reentering widening,
-parallel self-reentry, entry from outside with deep targets, fallback to the
-parallel node only when every region declines, targetless transitions, and the
-nested/multiple-parallel, array-target, and active-region refusals. Its
+node, ancestor transitions that reset every region with and without
+`reenter`, reentering widening, the parallel node as a reentering source and
+targeting itself with and without `reenter`, entry from outside with deep
+targets, fallback to the parallel node only when every region declines,
+targetless transitions, and the nested/multiple-parallel, parallel-initial,
+array-target, and active-region refusals. The active-region refusal is checked
+with and without `reenter` and on the statelyai/xstate#5895 reproduction
+machine. Its
 multi-transition cases cover independent region transitions exiting in reverse
 document order, mixed handled/declined/blocked regions, pre-step callback
 context with patches merged in region order, conflicts where the earlier
@@ -288,24 +314,37 @@ targetless-reentry and comparable-domain refusals.
 
 [`parallelModel.property.test.ts`](./parallelModel.property.test.ts) generates
 500 trees with seed 8912 and depths one through four, turning at most one
-compound node into a parallel node with two or three regions. Handlers use the
+compound node into a parallel node with two or three regions. Any node below
+the root can stop early as an atomic leaf, so regions of one parallel node can
+differ in height. Handlers use the
 same variation as the compound property test, with ID targets anywhere in the
 tree. Steps refused by `parallelStepReady` end the trace. It uses the same
-four-second fail-on-interruption limit. A statistics test at the same seed
-records 329 machines with a parallel node, 2175 compared steps, 445 steps with
-two or more selections, and 83 steps where conflict removal dropped a
-selection. Refusals ended 107 traces at an active-region target, 28 at a
-targetless reentry among several selections, and 4 at comparable domains.
+four-second fail-on-interruption limit. The test prints coverage statistics
+with `console.info` and asserts only lower bounds on them. At seed 8912 it
+reported 284 machines with a parallel node, 87 whose regions differ in
+height, 2123 compared steps in traces that ran to completion, 308 steps with
+two or more selections, and 35 steps where conflict removal dropped a
+selection. Refusals cut short 144 of the 284 traces with a parallel node: 114
+at an active-region target, 28 at a targetless reentry among several
+selections, and 2 at comparable domains. Steps compared before a refusal are
+not counted.
 
 [`runtimeFindings.test.ts`](./runtimeFindings.test.ts) contains direct public-API
-reproductions of two suspected runtime bugs:
+reproductions of four suspected runtime bugs:
 
-- Targetless reentry runs entry without exit.
+- Targetless reentry runs entry without exit (statelyai/xstate#5897).
 - A descendant targeting the root without reentry invokes root entry without
   root exit. Seed 8912 discovered this after six cases and 77 shrinks; the named
   reproduction retains the minimal root/child behavior.
+- When one region targets a sibling region and another region leaves the
+  parallel node in the same step, the runtime exits the parallel node and then
+  re-enters the sibling region without its parent, ending in `m, m.P.B, m.X`
+  (statelyai/xstate#5895).
+- A targetless reentry in one region beside a reentry of the parallel node in
+  another exits region `A` and never re-enters it, while re-entering its leaf
+  `a1`.
 
-Both assert observed output, so a runtime change requires revisiting these
+All four assert observed output, so a runtime change requires revisiting these
 characterizations and the model's exit/entry plans.
 The AFK run log records the investigation; no production fix is included.
 
