@@ -1,6 +1,6 @@
 {
   "source": "fsmModel.ts",
-  "verifiedCount": 61,
+  "verifiedCount": 81,
   "functions": {
     "sameValue": {
       "parameters": [],
@@ -68,7 +68,9 @@
     "KeepsStateWithPatch",
     "TargetDeclared",
     "TransitionTargetsDeclared",
-    "TargetsDeclared"
+    "TargetsDeclared",
+    "WitnessMachine",
+    "PatchTransition"
   ],
   "modelDeclarations": [
     "datatype Value = integer(value: int) | negativeZero | notANumber | undefinedValue | opaque_(id: int)",
@@ -111,6 +113,28 @@
     "RunConcat",
     "RunKeepsContextKeys"
   ],
+  "witnesses": {
+    "MergeValues": "MergeValuesWitness",
+    "MergeOfOwnedValuesIsIdentity": "MergeOfOwnedValuesIsIdentityWitness",
+    "MergeSettles": "MergeSettlesWitness",
+    "MergeIdempotent": "MergeIdempotentWitness",
+    "ChangedPatchCopies": "ChangedPatchCopiesWitness",
+    "PatchKeysOwnedAfterStep": "PatchKeysOwnedAfterStepWitness",
+    "DeclaredStateLookup": "DeclaredStateLookupWitness",
+    "InheritedStateHasNoTransitions": "InheritedStateHasNoTransitionsWitness",
+    "InheritedEventIsNotFound": "InheritedEventIsNotFoundWitness",
+    "MissingTransitionKeepsSnapshot": "MissingTransitionKeepsSnapshotWitness",
+    "ReuseIsExact": "ReuseIsExactWitness",
+    "UnchangedPatchKeepsSnapshot": "UnchangedPatchKeepsSnapshotWitness",
+    "EmptyConfigKeepsSnapshot": "EmptyConfigKeepsSnapshotWitness",
+    "AbsentKeyAlwaysChanges": "AbsentKeyAlwaysChangesWitness",
+    "OwnedEntryComparesWithObjectIs": "OwnedEntryComparesWithObjectIsWitness",
+    "NegativeZeroOverZeroCopies": "NegativeZeroOverZeroCopiesWitness",
+    "NotANumberOverOwnNotANumberKeepsSnapshot": "NotANumberOverOwnNotANumberKeepsSnapshotWitness",
+    "StepStaysDeclared": "StepStaysDeclaredWitness",
+    "RunStaysDeclared": "RunStaysDeclaredWitness",
+    "InitialDeclared": "InitialDeclaredWitness"
+  },
   "defects": [
     {
       "name": "a self-transition with no change copies the snapshot",

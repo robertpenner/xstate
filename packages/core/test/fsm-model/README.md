@@ -112,6 +112,18 @@ hints, such as "a reused step returns the given snapshot". The laws in
 [`formal/fsmModel.manifest.json`](./formal/fsmModel.manifest.json) lists all
 31 law names and the contract of each function.
 
+Twenty laws have preconditions, and a law whose preconditions no case meets
+would be proved without saying anything. Each of the twenty has a witness in
+`formal/fsmModel.dfy`: a lemma with no parameters or preconditions that builds
+one concrete machine, snapshot, or patch and calls the law, so Dafny must
+prove that the case meets the law's preconditions. For example,
+`ChangedPatchCopiesWitness` patches `x` from `1` to `2`,
+`InheritedStateHasNoTransitionsWitness` uses a state that `config.states`
+inherits, and `StepStaysDeclaredWitness` uses a transition function whose
+target is declared. The manifest's `witnesses` map pairs each law with its
+witness, and the verifier checks that exactly the laws with `requires` clauses
+have one and that each witness calls its law.
+
 The model of the beta.1 `createFSM`, which read state names and absent context
 keys through prototypes and compared with `===`, had laws that no longer hold
 or no longer apply. They were removed:
@@ -466,7 +478,9 @@ LEMMASCRIPT_LSC=/tmp/lemmascript/node_modules/lemmascript/tools/dist/lsc.js \
 locks LemmaScript and its dependencies.
 
 It checks that the committed `.dfy.gen` is what LemmaScript generates from
-`fsmModel.ts`, verifies the model (61 Dafny tasks), rejects the fourteen
+`fsmModel.ts`, checks that every law with preconditions has a witness,
+verifies the model, laws, and witnesses (81 Dafny tasks), rejects the
+fourteen
 defects, and checks the rewrite. The `fsm model verification` workflow runs it
 on pull requests that change `src/fsm.ts` or this directory.
 

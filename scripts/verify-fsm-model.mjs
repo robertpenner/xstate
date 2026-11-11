@@ -1,6 +1,7 @@
 // Checks the LemmaScript model of `xstate/fsm` in packages/core/test/fsm-model
 // (see its README): the committed Dafny matches what LemmaScript generates from
-// fsmModel.ts, the laws verify, every deliberate defect in the manifest makes
+// fsmModel.ts, the laws verify, every law with preconditions has a witness that
+// meets them, every deliberate defect in the manifest makes
 // verification fail, and a behavior-preserving rewrite makes the committed
 // Dafny stale but still verifies after regeneration.
 //
@@ -134,7 +135,8 @@ function assertProof(generated, proof) {
   const functions = Object.keys(manifest.functions);
   const lemmas = [
     ...functions.map((name) => `${name}_ensures`),
-    ...manifest.laws
+    ...manifest.laws,
+    ...Object.values(manifest.witnesses)
   ].sort();
   assert.ok(
     proof.startsWith(generated),
@@ -172,6 +174,29 @@ function assertProof(generated, proof) {
     lemmas,
     'Every lemma must have a proof body.'
   );
+  // A witness takes nothing and assumes nothing, so the law it calls must
+  // have preconditions that some case meets.
+  const clauses = Object.fromEntries(
+    [
+      ...appended.matchAll(/^lemma (\w+)\([^\n]*\n((?:[ \t]+[^\n]*\n)*)\{/gm)
+    ].map(([, name, header]) => [name, header])
+  );
+  assert.deepEqual(
+    manifest.laws.filter((law) => /^\s*requires\b/m.test(clauses[law] ?? '')),
+    Object.keys(manifest.witnesses),
+    'Exactly the laws with preconditions must have witnesses, in law order.'
+  );
+  for (const [law, witness] of Object.entries(manifest.witnesses)) {
+    const body = appended.match(
+      new RegExp(`^lemma ${witness}\\(\\)\\n\\{\\n([\\s\\S]*?)^\\}`, 'm')
+    );
+    assert.ok(body, `${witness} must take no parameters and have no clauses.`);
+    assert.match(
+      body[1],
+      new RegExp(`\\b${law}\\(`),
+      `${witness} must call ${law}.`
+    );
+  }
   const lines = generated.split('\n');
   for (const declaration of manifest.modelDeclarations)
     assert.ok(

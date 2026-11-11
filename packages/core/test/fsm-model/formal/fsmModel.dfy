@@ -607,3 +607,154 @@ lemma RunKeepsContextKeys(machine: Machine, snapshot: Snapshot, events: seq<FSME
     RunKeepsContextKeys(machine, transition(machine, snapshot, events[0]).snapshot, events[1..]);
   }
 }
+
+// ---- Witnesses: every law's preconditions can hold ----
+
+// A law whose preconditions no case meets is proved without saying anything.
+// Each law with preconditions has a witness: a lemma with none that builds a
+// concrete case and calls the law, so Dafny proves the case meets them.
+
+// `idle` takes `go` with the given transition, and its `on` table inherits
+// `back`. `busy` has no transitions. `config.states` inherits `away`.
+ghost function WitnessMachine(go: Transition): Machine
+{
+  Machine("idle", None,
+          map["idle" := StateNode(map["go" := go], map["back" := Transition.target("busy")]),
+              "busy" := StateNode(map[], map[])],
+          map["away" := StateNode(map["go" := Transition.target("idle")], map[])])
+}
+
+// A transition that keeps the state and applies the patch.
+ghost function PatchTransition(patch: seq<PatchEntry>): Transition
+{
+  config(TransitionConfig(None, Some(patch)))
+}
+
+lemma MergeValuesWitness()
+{
+  MergeValues(map["x" := Value.integer(1)],
+              [PatchEntry("x", Value.integer(2)), PatchEntry("y", Value.negativeZero)]);
+}
+
+lemma MergeOfOwnedValuesIsIdentityWitness()
+{
+  MergeOfOwnedValuesIsIdentity(map["x" := Value.integer(1), "n" := Value.notANumber],
+                               [PatchEntry("n", Value.notANumber)]);
+}
+
+lemma MergeSettlesWitness()
+{
+  MergeSettles(map["z" := Value.integer(0)],
+               [PatchEntry("n", Value.notANumber), PatchEntry("z", Value.negativeZero)]);
+}
+
+lemma MergeIdempotentWitness()
+{
+  MergeIdempotent(map["z" := Value.integer(0)],
+                  [PatchEntry("n", Value.notANumber), PatchEntry("z", Value.negativeZero)]);
+}
+
+// The patch changes `x` from 1 to 2.
+lemma ChangedPatchCopiesWitness()
+{
+  var entry := PatchEntry("x", Value.integer(2));
+  var machine := WitnessMachine(PatchTransition([entry]));
+  var snapshot := Snapshot("idle", map["x" := Value.integer(1)]);
+  assert entry in [entry] && !entryUnchanged(snapshot.context, entry);
+  ChangedPatchCopies(machine, snapshot, FSMEvent("go", 0));
+}
+
+lemma PatchKeysOwnedAfterStepWitness()
+{
+  var machine := WitnessMachine(PatchTransition([PatchEntry("x", Value.integer(2)), PatchEntry("y", Value.undefinedValue)]));
+  PatchKeysOwnedAfterStep(machine, Snapshot("idle", map["x" := Value.integer(1)]), FSMEvent("go", 0));
+}
+
+lemma DeclaredStateLookupWitness()
+{
+  DeclaredStateLookup(WitnessMachine(Transition.target("busy")), "idle", "go");
+}
+
+lemma InheritedStateHasNoTransitionsWitness()
+{
+  InheritedStateHasNoTransitions(WitnessMachine(Transition.target("busy")), "away", "go");
+}
+
+lemma InheritedEventIsNotFoundWitness()
+{
+  InheritedEventIsNotFound(WitnessMachine(Transition.target("busy")), "idle", "back");
+}
+
+lemma MissingTransitionKeepsSnapshotWitness()
+{
+  MissingTransitionKeepsSnapshot(WitnessMachine(Transition.target("busy")), Snapshot("idle", map[]), FSMEvent("back", 0));
+}
+
+// One step reuses the snapshot and one copies it.
+lemma ReuseIsExactWitness()
+{
+  var snapshot := Snapshot("idle", map["n" := Value.notANumber]);
+  ReuseIsExact(WitnessMachine(PatchTransition([PatchEntry("n", Value.notANumber)])), snapshot, FSMEvent("go", 0));
+  ReuseIsExact(WitnessMachine(PatchTransition([PatchEntry("n", Value.integer(0))])), snapshot, FSMEvent("go", 0));
+}
+
+lemma UnchangedPatchKeepsSnapshotWitness()
+{
+  var entry := PatchEntry("n", Value.notANumber);
+  var snapshot := Snapshot("idle", map["n" := Value.notANumber]);
+  assert forall e :: e in [entry] ==> e == entry;
+  UnchangedPatchKeepsSnapshot(WitnessMachine(PatchTransition([entry])), snapshot, FSMEvent("go", 0));
+}
+
+// A function that returns `{}`.
+lemma EmptyConfigKeepsSnapshotWitness()
+{
+  var machine := WitnessMachine(function_((c: map<string, Value>, e: FSMEvent) => Some(TransitionConfig(None, None))));
+  EmptyConfigKeepsSnapshot(machine, Snapshot("idle", map[]), FSMEvent("go", 0));
+}
+
+lemma AbsentKeyAlwaysChangesWitness()
+{
+  var machine := WitnessMachine(PatchTransition([PatchEntry("y", Value.undefinedValue)]));
+  AbsentKeyAlwaysChanges(machine, Snapshot("idle", map["x" := Value.integer(1)]), FSMEvent("go", 0), "y", Value.undefinedValue);
+}
+
+lemma OwnedEntryComparesWithObjectIsWitness()
+{
+  var machine := WitnessMachine(PatchTransition([PatchEntry("x", Value.opaque_(2))]));
+  OwnedEntryComparesWithObjectIs(machine, Snapshot("idle", map["x" := Value.opaque_(1)]), FSMEvent("go", 0), "x", Value.opaque_(2));
+}
+
+lemma NegativeZeroOverZeroCopiesWitness()
+{
+  var machine := WitnessMachine(PatchTransition([PatchEntry("z", Value.negativeZero)]));
+  NegativeZeroOverZeroCopies(machine, Snapshot("idle", map["z" := Value.integer(0)]), FSMEvent("go", 0), "z");
+}
+
+lemma NotANumberOverOwnNotANumberKeepsSnapshotWitness()
+{
+  var machine := WitnessMachine(PatchTransition([PatchEntry("n", Value.notANumber)]));
+  NotANumberOverOwnNotANumberKeepsSnapshot(machine, Snapshot("idle", map["n" := Value.notANumber]), FSMEvent("go", 0), "n");
+}
+
+// `go` is a function that targets `busy`, so every target is declared.
+lemma StepStaysDeclaredWitness()
+{
+  var machine := WitnessMachine(function_((c: map<string, Value>, e: FSMEvent) => Some(TransitionConfig(Some("busy"), None))));
+  assert machine.states["idle"].on.Values == {machine.states["idle"].on["go"]};
+  StepStaysDeclared(machine, Snapshot("idle", map[]), FSMEvent("go", 0));
+}
+
+lemma RunStaysDeclaredWitness()
+{
+  var machine := WitnessMachine(Transition.target("busy"));
+  assert machine.states["idle"].on.Values == {machine.states["idle"].on["go"]};
+  RunStaysDeclared(machine, Snapshot("idle", map[]), [FSMEvent("go", 0), FSMEvent("back", 0), FSMEvent("go", 0)]);
+}
+
+lemma InitialDeclaredWitness()
+{
+  var machine := WitnessMachine(Transition.target("busy"));
+  assert machine.states["idle"].on.Values == {machine.states["idle"].on["go"]};
+  InitialDeclared(machine);
+}
