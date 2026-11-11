@@ -1,10 +1,10 @@
 # XState machine formalization
 
-**Status:** active
+**Status:** completed
 
 **Branch:** `machine-formalized`
 
-**Pull request:** <https://github.com/robertpenner/xstate/pull/11> (draft, base `next`)
+**Pull request:** <https://github.com/robertpenner/xstate/pull/11> (base `next`)
 
 **Started:** 2026-11-11 04:18:19 UTC
 
@@ -17,7 +17,7 @@ from confirmed defects.
 
 **Baseline:** `bcd3840` (`origin/next`, refreshed before creating the worktree).
 
-**Verified integration head:** `aeb6c78` (flat and compound milestones).
+**Verified integration head:** `cf60e6b` (flat and compound models plus review fixes).
 
 ## Workflow authorization
 
@@ -202,14 +202,14 @@ user's request for frequent pushes. This checkpoint does not complete #10.
 
 ## Publication at stop or handoff
 
-**Published verified head:** `aeb6c78`.
+**Published verified implementation head:** `cf60e6b`.
 
-**Unverified checkpoint:** compound implementation and proof work; see verification
-above. The checkpoint's commit is identified by its `chore(core): checkpoint`
-message and the Git history containing this log.
+**Historical checkpoint:** `8bba6df` preserved unfinished compound work.
+The verified `aeb6c78` milestone and subsequent review fixes supersede it.
 
-**Remaining local work:** publish verified review fixes and obtain follow-up
-review and PR publication checks.
+**Remaining implementation work:** none. This final documentation commit records
+the completed local verification and independent review. The final pushed-head CI
+result is reported in the completion comment on #8 after publication.
 
 ## Final series review
 
@@ -276,8 +276,6 @@ and 3029 tests (29 skipped, three todo) in 181.29 seconds. This records a
 transient verification timeout; its cause has not been established. No test
 or timeout expectation was changed.
 
-**Remaining blockers:** final independent review and PR publication checks.
-
 The lexical correction was published as `a96252d`. Its follow-up review
 accepted the exact inline repair and requested a set-display probe: a
 column-zero `{` inside an added postcondition could be mistaken for the
@@ -291,15 +289,44 @@ exact proof before verification. Its full run passes eleven anti-weakening
 probes, 252 tasks, 13 semantic defects, freshness and regeneration. Build,
 typecheck, lint, formatting and changed-file Markdown checks pass. The full
 core suite again passes 187 files and 3029 tests (29 skipped, three todo) with
-two workers, in 181.51 seconds. Follow-up review remains pending.
+two workers, in 181.51 seconds. The repair was published as `cf60e6b`.
 
-**Completed:** pending.
+### Final review disposition
 
-**Duration:** not measured.
+The independent reviewer accepted the final correction over
+`a96252d` to `cf60e6b` and closed E1. S1 and S2 remain closed. Standards, Spec,
+and Ideas/evidence each have zero remaining material defects and zero
+unresolved evidence requests. The sole optional correction was the README's
+summary probe count, changed from nine to eleven in this final documentation
+commit.
 
-**Final verification:** pending.
+The review covered the original `bcd3840` to `aeb6c78` series and successive
+repair snapshots through `7b7103e`, `a96252d`, and `cf60e6b`. The original
+issue contracts and both refreshed briefs supplied the independent spec.
+Each reported bypass was reproduced before correction; exact failing proofs
+and complete before/after command logs were supplied for follow-up review.
 
-**Result:** in progress.
+**Completed:** 2026-11-11 06:28:27 UTC.
+
+**Duration:** 7808 seconds (2h 10m 8s), measured from `Started` to the final
+run-log commit timestamp. The commit uses this captured UTC finalization time.
+
+**Final verification:** `pnpm verify:machine-model` passed 252 tasks, eleven
+anti-weakening probes, 13 semantic defects, freshness and regeneration.
+`pnpm test:core --maxWorkers=2 --minWorkers=1` passed 3029 tests in 187 files
+(29 skipped, three todo). The 83 model tests include 500 generated flat cases
+and 500 generated compound cases. All three runtime-mutation checks passed
+after the adapter repairs; later changes affect only proof validation and
+documentation. Build, typecheck, lint, formatting and changed-file Markdown
+checks passed. The final documentation-only changes receive explicit Markdown
+formatting and check before commit.
+
+**Result:** #9 and #10 are integrated and verified under #8 in PR #11, with all
+material review findings resolved. Production source remains unchanged.
+The two suspected lifecycle bugs and translator limitations are documented
+above; no runtime fixes or excluded machine features were added. Issues stay
+open until merge. Final-head CI is checked after publishing this log and is
+reported on #8.
 
 **Pre-existing unrelated failures:** none found in required checks. Lint emits
 the existing Node module-type warning for `scripts/oxlint-plugin-xstate-react.ts`;

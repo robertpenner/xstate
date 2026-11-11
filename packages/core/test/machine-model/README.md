@@ -16,7 +16,7 @@ unmodified LemmaScript 0.6.6. Dafny 4.11.0 proves its contracts and the laws in
 contract lemmas, and 13 deliberately incorrect model edits. The complete proof
 currently checks 252 verification tasks. Function postconditions support
 composition; they are also checked against the generated bodies.
-Nine additional proof-weakening probes check that generated contracts cannot
+Eleven additional proof-weakening probes check that generated contracts cannot
 gain restrictive preconditions or lose their original postconditions.
 
 The laws establish:
