@@ -78,9 +78,10 @@ including references, `undefined`, `NaN` and signed zero. Configuration and
 callback-result fields not listed above cause explicit refusal. Unknown
 callback arguments and enqueue operations also cause explicit refusal.
 Refusals remain fatal to comparison even if an authored callback catches the
-exception. Capability inspection of the callback argument/enqueue objects
-(including enumeration and prototype inspection) is outside the supported
-domain and is refused.
+exception. Probes for unsupported capabilities, enumeration, and prototype
+inspection of callback argument/enqueue objects are refused. Direct membership
+and descriptor checks for the supported `context` and `event` arguments remain
+allowed.
 
 [`compoundAdapter.ts`](./compoundAdapter.ts) additionally accepts root handlers
 and lifecycle callbacks, nested atomic/compound states, and a root-only atomic
