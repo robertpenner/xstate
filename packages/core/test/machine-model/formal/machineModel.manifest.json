@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 400,
+  "verifiedCount": 454,
   "functions": [
     "mergePatch",
     "apply",
@@ -104,7 +104,16 @@
     "DomainStart",
     "ActiveClosed",
     "NextShape",
-    "InRegion"
+    "InRegion",
+    "Effects",
+    "Disjoint",
+    "NoDescendantSources",
+    "Greedy",
+    "Within",
+    "PlanFrom",
+    "PlansApart",
+    "Combined",
+    "PlansContext"
   ],
   "laws": [
     "LastPatchCons",
@@ -204,7 +213,44 @@
     "InitialOrder",
     "InitialEntries",
     "ParallelInitialMeaning",
-    "RegionFirstSelection"
+    "RegionFirstSelection",
+    "ParallelStepDelegates",
+    "ApplyAllSequential",
+    "ApplyAllEffects",
+    "AnyPreemptsMeaning",
+    "RemoveConflictsLength",
+    "RemoveConflictsDrawn",
+    "TwoSelectionConflicts",
+    "DisjointFilter",
+    "DisjointSnoc",
+    "RemoveConflictsDisjoint",
+    "DisjointPairs",
+    "KeptSelectionsDisjoint",
+    "FilterKeepsAll",
+    "GreedyWhenApart",
+    "DescendantWins",
+    "WithinMeaning",
+    "ComparableMeaning",
+    "WithinShared",
+    "WithinTransitive",
+    "WithinChild",
+    "PlansFromActive",
+    "PlanFromFacts",
+    "DomainsApartMeaning",
+    "CombinedOwned",
+    "CombinedUnowned",
+    "ChildrenAgree",
+    "ParentWithin",
+    "ChildWithin",
+    "CombinedOwnedNode",
+    "CombinedUnownedNode",
+    "CombinedUnownedChild",
+    "CombinedValid",
+    "MultiPlansContext",
+    "MultiStepMembers",
+    "MultiStepValid",
+    "CombinedLifecycleLists",
+    "MultiStepMeaning"
   ],
   "defects": [
     {
@@ -264,8 +310,8 @@
     },
     {
       "name": "reverses lifecycle callback effects",
-      "before": "effects: [...first.effects, ...rest.effects]",
-      "after": "effects: [...rest.effects, ...first.effects]"
+      "before": "  const rest = lifecycle(nodes, path.slice(1), first.context, event, exiting);\n  return {\n    context: rest.context,\n    reused: first.reused && rest.reused,\n    effects: [...first.effects, ...rest.effects]",
+      "after": "  const rest = lifecycle(nodes, path.slice(1), first.context, event, exiting);\n  return {\n    context: rest.context,\n    reused: first.reused && rest.reused,\n    effects: [...rest.effects, ...first.effects]"
     },
     {
       "name": "compound reentry preserves source",
@@ -291,6 +337,31 @@
       "name": "parallel exits run in document order",
       "before": "  const exits = reverse(\n    active.filter((id) => exiting(nodes, domain, reentered, id))\n  );",
       "after": "  const exits = active.filter((id) => exiting(nodes, domain, reentered, id));"
+    },
+    {
+      "name": "ancestor preempts descendant",
+      "before": ") && !below(candidate.node.path, kept.node.path)",
+      "after": ") && !below(kept.node.path, candidate.node.path)"
+    },
+    {
+      "name": "losing transition's patch and effects leak",
+      "before": "  const updated = applyAll(exited.context, kept);\n  const entered = runLifecycle(nodes, entries, updated.context, event, false);\n  return {\n    snapshot: { active: next,",
+      "after": "  const updated = applyAll(exited.context, selections);\n  const entered = runLifecycle(nodes, entries, updated.context, event, false);\n  return {\n    snapshot: { active: next,"
+    },
+    {
+      "name": "kept result applied twice",
+      "before": "removeConflicts(machine, active, rest, [...survivors, first])",
+      "after": "removeConflicts(machine, active, rest, [...survivors, first, first])"
+    },
+    {
+      "name": "kept results applied in reverse order",
+      "before": "  const first = apply(context, selections[0].evaluation);\n  const rest = applyAll(first.context, selections.slice(1));\n  return {\n    context: rest.context,\n    reused: first.reused && rest.reused,\n    effects: [...first.effects, ...rest.effects]\n  };",
+      "after": "  const rest = applyAll(context, selections.slice(1));\n  const first = apply(rest.context, selections[0].evaluation);\n  return {\n    context: first.context,\n    reused: first.reused && rest.reused,\n    effects: [...rest.effects, ...first.effects]\n  };"
+    },
+    {
+      "name": "parallel step keeps exited nodes",
+      "before": "      (active.includes(id) && !plansExit(plans, id)) || plansEnter(plans, id)\n  );\n  const exited",
+      "after": "      active.includes(id) || plansEnter(plans, id)\n  );\n  const exited"
     }
   ],
   "proofDefects": [
