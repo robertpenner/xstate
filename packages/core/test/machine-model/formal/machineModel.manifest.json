@@ -1,0 +1,214 @@
+{
+  "source": "machineModel.ts",
+  "verifiedCount": 252,
+  "functions": [
+    "mergePatch",
+    "apply",
+    "emptyEvaluation",
+    "initialTransition",
+    "transition",
+    "declaredPath",
+    "lookupNode",
+    "select",
+    "commonPrefix",
+    "initialWitness",
+    "descend",
+    "reverse",
+    "lifecycle",
+    "ready",
+    "compoundInitialTransition",
+    "compoundTransition"
+  ],
+  "contracts": [
+    "mergePatch_ensures",
+    "apply_ensures",
+    "emptyEvaluation_ensures",
+    "initialTransition_ensures",
+    "transition_ensures",
+    "declaredPath_ensures",
+    "select_ensures",
+    "commonPrefix_ensures",
+    "descend_ensures",
+    "reverse_ensures",
+    "lifecycle_ensures",
+    "compoundInitialTransition_ensures",
+    "compoundTransition_ensures"
+  ],
+  "specFunctions": [
+    "Selected",
+    "LastPatchValue",
+    "TreePath",
+    "WellFormed",
+    "ValidConfiguration",
+    "NodeEvaluation",
+    "Enabled",
+    "Target",
+    "Reenters",
+    "Kept"
+  ],
+  "laws": [
+    "LastPatchCons",
+    "MergeMeaning",
+    "PatchNeverDeletes",
+    "PatchStoresPresentUndefinedToken",
+    "ApplyPatchMeaning",
+    "EmptyPatchStillCopies",
+    "NoPatchReusesContext",
+    "InitialDeclared",
+    "InitialLifecycle",
+    "MissingEventUnhandled",
+    "DeclinedEventUnhandled",
+    "HandledIdentity",
+    "HandledNoopCopiesSnapshot",
+    "EffectOnlyHandled",
+    "SelectedTarget",
+    "StepDeclared",
+    "TargetlessLifecycle",
+    "NonReenteringSelf",
+    "LifecycleOrderAndContext",
+    "TargetlessReentryCharacterization",
+    "PathHasExactlyOneChild",
+    "CompoundInitialValid",
+    "CompoundStepValid",
+    "InitialDescendantTraversal",
+    "DeepestSelection",
+    "DecliningChildFallsBack",
+    "ExplicitBlockWins",
+    "EffectOnlyChildWins",
+    "LifecycleCons",
+    "LifecycleConcatenation",
+    "CompoundLifecycleMeaning",
+    "CompoundSelfResetsDescendants",
+    "ReverseLifecycleOrder",
+    "PreservedAncestorsAreNotExited",
+    "CompoundLifecycleWitness"
+  ],
+  "defects": [
+    {
+      "name": "ignored target",
+      "before": "const next = target ?? snapshot.value;",
+      "after": "const next = snapshot.value;"
+    },
+    {
+      "name": "dropped patch entry",
+      "before": "return mergePatch({ ...context, [first.key]: first.value }, patch.slice(1));",
+      "after": "return mergePatch(context, patch.slice(1));"
+    },
+    {
+      "name": "unhandled event copies snapshot",
+      "before": "if (selected.result === undefined && selected.effects.length === 0) {\n    return { snapshot, snapshotReused: true, contextReused: true, effects: [] };",
+      "after": "if (selected.result === undefined && selected.effects.length === 0) {\n    return { snapshot, snapshotReused: false, contextReused: true, effects: [] };"
+    },
+    {
+      "name": "reversed lifecycle effects",
+      "before": "snapshot: { value: next, context: entered.context },\n    snapshotReused: false,\n    contextReused: exited.reused && updated.reused && entered.reused,\n    effects: [...exited.effects, ...updated.effects, ...entered.effects]",
+      "after": "snapshot: { value: next, context: entered.context },\n    snapshotReused: false,\n    contextReused: exited.reused && updated.reused && entered.reused,\n    effects: [...entered.effects, ...updated.effects, ...exited.effects]"
+    },
+    {
+      "name": "empty patch incorrectly reuses context",
+      "before": "reused: patch === undefined,",
+      "after": "reused: patch === undefined ? true : patch.length === 0,"
+    },
+    {
+      "name": "entry reads pre-transition context",
+      "before": "? entry(updated.context, event)",
+      "after": "? entry(snapshot.context, event)"
+    },
+    {
+      "name": "effect-only transition declines",
+      "before": "selected.result === undefined && selected.effects.length === 0",
+      "after": "selected.result === undefined && selected.effects.length >= 0"
+    },
+    {
+      "name": "ignored self reentry",
+      "before": "const changes = target !== undefined && (next !== snapshot.value || reenter);",
+      "after": "const changes = target !== undefined && next !== snapshot.value;"
+    },
+    {
+      "name": "ancestor takes priority over child",
+      "before": "const id = path[path.length - 1];",
+      "after": "const id = path[0];"
+    },
+    {
+      "name": "missing initial descendant",
+      "before": "return descend(nodes, initial);",
+      "after": "return node.path;"
+    },
+    {
+      "name": "exits unaffected ancestors",
+      "before": "const exitKept = target === machine.root && !reenter ? 1 : kept;",
+      "after": "const exitKept = 0;"
+    },
+    {
+      "name": "reverses lifecycle callback effects",
+      "before": "effects: [...first.effects, ...rest.effects]",
+      "after": "effects: [...rest.effects, ...first.effects]"
+    },
+    {
+      "name": "compound reentry preserves source",
+      "before": "? sourcePath.length - (reenter ? 1 : 0)",
+      "after": "? sourcePath.length - (reenter ? 0 : 0)"
+    }
+  ],
+  "proofDefects": [
+    {
+      "name": "set display hides restrictive precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures\n{\n0\n} == {0}\n  requires false\n"
+    },
+    {
+      "name": "standalone set delimiter hides restrictive precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures\n{\n0\n}\n  == {0}\n  requires false\n"
+    },
+    {
+      "name": "inline restrictive precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures true requires false\n"
+    },
+    {
+      "name": "comment-delimited restrictive precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures true /* explanation */ requires false\n"
+    },
+    {
+      "name": "string comment marker before precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures \"http://\" == \"http://\" requires false\n"
+    },
+    {
+      "name": "verbatim string before precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures @\"/*\" == @\"/*\" requires false\n"
+    },
+    {
+      "name": "nested comment before precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures true /* outer /* nested */ outer */ requires false\n"
+    },
+    {
+      "name": "character literal before precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures 'r' == 'r' requires false\n"
+    },
+    {
+      "name": "vacuous generated contract",
+      "before": "lemma initialTransition_ensures(machine: Machine, event: Event)\n",
+      "after": "lemma initialTransition_ensures(machine: Machine, event: Event)\n  requires false\n"
+    },
+    {
+      "name": "restricted generated function",
+      "before": "function initialTransition(machine: Machine, event: Event): Step\n",
+      "after": "function initialTransition(machine: Machine, event: Event): Step\n  requires false\n"
+    },
+    {
+      "name": "weakened generated postcondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n    || true\n"
+    }
+  ],
+  "refactor": {
+    "before": "const next = target ?? snapshot.value;",
+    "after": "const next = target === undefined ? snapshot.value : target;"
+  }
+}
