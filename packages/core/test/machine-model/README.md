@@ -18,9 +18,9 @@ multi-transition parallel extension
 unmodified LemmaScript 0.6.6. Dafny 4.11.0 proves its contracts and the laws in
 [`formal/machineModel.dfy`](./formal/machineModel.dfy).
 [`formal/machineModel.manifest.json`](./formal/machineModel.manifest.json) lists
-135 laws (including proof helpers and a concrete lifecycle witness), 22 generated
+136 laws (including proof helpers and a concrete lifecycle witness), 22 generated
 contract lemmas, and 22 deliberately incorrect model edits. The complete proof
-currently checks 454 verification tasks. Function postconditions support
+currently checks 456 verification tasks. Function postconditions support
 composition; they are also checked against the generated bodies.
 Eleven additional proof-weakening probes check that generated contracts cannot
 gain restrictive preconditions or lose their original postconditions.
@@ -82,14 +82,18 @@ The laws establish:
 - A transition between two regions narrows its domain to the target's
   region: the source region stays active and none of its nodes exit. With
   `reenter: true` the domain widens to the parallel node, which itself neither
-  exits nor enters. A transition from the parallel node to one of its
+  exits nor enters, and every active node below the parallel node exits
+  (`ReenterWidens`). A transition from the parallel node to one of its
   descendants narrows the same way. A reentering self-transition on the
   parallel node exits and reenters it.
 - A transition from an ancestor of the parallel node into one region exits
   every active node below the parallel node (`AncestorResetsSubtree`). All
   regions are then reentered from their initial descendants, not only the
   targeted region; no separate law states this half, which follows from the
-  validity law and the entry plan's definition.
+  validity law and the entry plan's definition. With `reenter: true`, a
+  transition from the parallel node or one of its ancestors into a region has
+  the source as its domain: the source exits and reenters, and so does every
+  active node at or below the parallel node (`ReenterResetsSubtree`).
 - Every active node outside the transition domain, other than a reentered
   source, remains active and does not exit.
 
@@ -178,19 +182,28 @@ the single-selection `parallelReady` check. When several regions select, every
 selection must pass that check, sources must lie on pairwise incomparable
 paths, and the kept plans' domains must be pairwise incomparable. A step is
 also refused when a transition, with or without `reenter`, targets an already
-active direct region of the parallel node. That refusal covers the
-reproduction machine of
+active direct region of the parallel node, including in single-selection steps.
+Without `reenter`, the runtime runs the targeted region's entry actions again
+without exiting it; the open
+[statelyai/xstate#5899](https://github.com/statelyai/xstate/pull/5899) keeps
+the region active and skips that entry. Until it lands, the model makes no
+claim about these steps. That
+refusal also covers the reproduction machine of
 [statelyai/xstate#5895](https://github.com/statelyai/xstate/issues/5895).
 Targetless `reenter: true` transitions are refused when several regions
 select, because the runtime's targetless-reentry lifecycle is a separate
 suspected bug.
 
-The comparable-domains refusal also covers the general #5895 pattern: two kept
-transitions with disjoint exit sets, where one exit set contains the other's
-target or an ancestor of it. That target lies strictly inside the first
-transition's domain, and the second domain is an ancestor of the target, so the
-two domains lie on one path and are comparable. This argument is informal; no
-law states it. The refusal is wider than that pattern requires. An atomic
+On kept selections, the comparable-domains refusal coincides with the general
+#5895 pattern: two kept transitions with disjoint exit sets, where one exit set
+contains the other's target or an ancestor of it. If the pattern holds, that
+target lies inside or at the first transition's domain (a reentering source can
+be its own domain), and the second domain is an ancestor-or-self of the target,
+so the two domains lie on one path and are comparable. Conversely, when two
+kept domains are comparable, the inner domain is active and lies below the
+outer one, so it is in the outer transition's exit set, and it is an
+ancestor-or-self of its own target. This argument is informal; no law states
+it. The pattern includes instances the runtime handles correctly. An atomic
 self-target whose domain is the atomic node itself is neither exited nor
 entered, so keeping it alongside a transition that exits the parallel node
 yields a valid runtime configuration. The model still refuses that step
