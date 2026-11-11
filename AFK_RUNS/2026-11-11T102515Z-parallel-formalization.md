@@ -18,7 +18,7 @@ distinguish observations from suspected defects.
 **Baseline:** `47cfafb` (`origin/machine-formalized`, carrying upstream `next`
 at `da64b0a`).
 
-**Verified integration head:** `d3968eb` (#15).
+**Verified integration head:** `5ec20b1` (#16).
 
 ## Workflow authorization
 
@@ -35,7 +35,7 @@ touched.
 | Issue | Outcome                                                      | Status              | Blocker | Integration | Verification     |
 | ----- | ------------------------------------------------------------ | ------------------- | ------- | ----------- | ---------------- |
 | #15   | Parallel configurations and single-transition steps          | integrated/verified | None    | `d3968eb`   | see #15 evidence |
-| #16   | Multi-transition selection, conflict removal and composition | in progress         | None    | none        | none             |
+| #16   | Multi-transition selection, conflict removal and composition | integrated/verified | None    | `5ec20b1`   | see #16 evidence |
 
 ## Verification evidence
 
@@ -79,6 +79,43 @@ These results re-verify the existing flat and compound suites against runtime
   rejected, including the two new parallel mutations; production source
   restored.
 
+### #16 proof and differential evidence (`636d804`..`5ec20b1`)
+
+- `dafny verify --verification-time-limit 15 --cores 4 formal/machineModel.dfy`
+  (no `--allow-warnings`): 454 verified, 0 errors.
+- Each new seeded defect was first applied to the `.dfy` directly. Four failed
+  with postcondition or assertion errors. "Parallel step keeps exited nodes"
+  timed out in `MultiStepMembers`; that lemma now hides every definition
+  except `parallelStep`, `Combined` and `ParallelWellFormed`, and fails under
+  the defect with "assertion might not hold".
+- First driver run: the baseline proved, but Dafny warned about the
+  indentation of an `exists` in `Greedy`, and the driver does not allow
+  warnings. Parenthesized.
+- Second driver run: the existing defect "reverses lifecycle callback
+  effects" was ambiguous because `applyAll` (added in `636d804`) repeats its
+  `effects: [...first.effects, ...rest.effects]` anchor. The anchor now
+  includes the preceding `lifecycle(...)` line.
+- Third driver run: "ancestor preempts descendant" produced a LemmaScript
+  three-way merge conflict, which the driver counts as a tool failure. The
+  line-based merge aligned the mutated `preempts` line with the
+  `ChildrenActive` body inside the #15 proof block, which sat between the #15
+  and #16 generated declarations. The #15 proof block now follows the #16
+  generated code, so all generated declarations form one contiguous prefix.
+  All 22 defects then regenerated without conflicts in temporary copies.
+- `pnpm verify:machine-model` (final): 454 verified, 0 errors; all 11 proof
+  weakenings and all 22 seeded defects rejected; freshness, additions-only
+  inventory and refactor checks passed.
+- `pnpm test:machine-model:runtime-defects`: all seven runtime mutations
+  rejected, including "a later conflicting transition preempts an earlier
+  one" and "kept transition patches merge in reverse order"; production source
+  restored and `packages/core/src` clean.
+- `pnpm test:machine-model`: 8 files, 112 tests passed.
+- Parallel property statistics (seed 8912, 500 runs): 329 machines with a
+  parallel node, 2175 compared steps, 445 steps with two or more selections,
+  83 steps where conflict removal dropped a selection; refusals 107 active
+  region target, 28 targetless reentry, 4 comparable domains.
+- `pnpm typecheck`, `pnpm lint`, `pnpm format:check`: passed.
+
 ## Behavior log
 
 Entries record runtime behavior observed at `da64b0a` that looks unintended or
@@ -118,6 +155,18 @@ that contradicts a ticket. Each entry gives a classification and evidence.
    (statelyai/xstate#5897), and nothing re-enters `A`. The #16 model refuses a
    targetless reentry in any multi-selection step.
 
+5. **Comparable-domain refusal is conservative (model limitation, not a
+   runtime finding).** An atomic self-target in one region kept alongside a
+   region transition that exits the parallel node has comparable domains,
+   so the model refuses it. The runtime produces a valid configuration for
+   that step. The validity proof needs pairwise incomparable domains; a
+   later extension could prove the union case.
+6. **LemmaScript regen merge can misalign short generated bodies (tooling).**
+   When proof text separates two generated sections, `lsc regen`'s
+   three-way merge can match a changed one-line body against unrelated proof
+   lines with the same surrounding braces and report a conflict. Keeping
+   generated declarations contiguous avoids it. Not reported upstream.
+
 ## Commits
 
 - `0b40291` chore(machine-model): start parallel formalization run log
@@ -127,3 +176,10 @@ that contradicts a ticket. Each entry gives a classification and evidence.
 - `9fda475` test(machine-model): add parallel runtime mutations and
   array-target refusal
 - `d3968eb` docs(machine-model): document the single-parallel model
+- `cc9d371` chore(machine-model): record #15 integration in run log
+- `0d878d3` chore(machine-model): record #16 brief and runtime findings
+- `636d804` chore(machine-model): checkpoint multi-transition parallel steps
+  (unverified checkpoint; verified by the commits below)
+- `e9042e7` feat(machine-model): prove multi-transition parallel laws
+- `452bc52` test(machine-model): add multi-transition runtime mutations
+- `5ec20b1` docs(machine-model): document multi-transition parallel steps
