@@ -47,6 +47,22 @@ const defects = [
         (a, b) => b.order - a.order`,
     testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
     test: 'enters every region of a root-level parallel machine in document order'
+  },
+  {
+    name: 'a later conflicting transition preempts an earlier one',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'if (isDescendant(t1.source, t2.source)) {',
+    after: 'if (t1 !== t2) {',
+    testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
+    test: 'keeps the earlier of two regions that both leave the parallel node'
+  },
+  {
+    name: 'kept transition patches merge in reverse order',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'for (const t of filteredTransitions) {',
+    after: 'for (const t of [...filteredTransitions].reverse()) {',
+    testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
+    test: 'merges patches in region order'
   }
 ];
 for (const defect of defects) {
