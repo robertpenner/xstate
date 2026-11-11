@@ -4,7 +4,7 @@
 
 **Branch:** `machine-formalization-parallel`
 
-**Pull request:** not yet opened (base `machine-formalized`)
+**Pull request:** robertpenner/xstate#17 (draft, base `machine-formalized`)
 
 **Started:** 2026-11-11 10:25:15 UTC
 
@@ -18,7 +18,7 @@ distinguish observations from suspected defects.
 **Baseline:** `47cfafb` (`origin/machine-formalized`, carrying upstream `next`
 at `da64b0a`).
 
-**Verified integration head:** `47cfafb` (baseline only).
+**Verified integration head:** `d3968eb` (#15).
 
 ## Workflow authorization
 
@@ -32,10 +32,10 @@ touched.
 
 ## Ticket progress
 
-| Issue | Outcome                                                      | Status      | Blocker                | Integration | Verification |
-| ----- | ------------------------------------------------------------ | ----------- | ---------------------- | ----------- | ------------ |
-| #15   | Parallel configurations and single-transition steps          | in progress | None                   | none        | none         |
-| #16   | Multi-transition selection, conflict removal and composition | blocked     | #15 not yet integrated | none        | none         |
+| Issue | Outcome                                                      | Status              | Blocker | Integration | Verification     |
+| ----- | ------------------------------------------------------------ | ------------------- | ------- | ----------- | ---------------- |
+| #15   | Parallel configurations and single-transition steps          | integrated/verified | None    | `d3968eb`   | see #15 evidence |
+| #16   | Multi-transition selection, conflict removal and composition | ready               | None    | none        | none             |
 
 ## Verification evidence
 
@@ -57,6 +57,26 @@ These results re-verify the existing flat and compound suites against runtime
 ## Briefs
 
 - #15: <https://github.com/robertpenner/xstate/issues/15#issuecomment-6793589017>
+
+### #15 proof and differential evidence (`eeed21f`..`d3968eb`)
+
+- `dafny verify --verification-time-limit 15 --cores 2 formal/machineModel.dfy`:
+  388 verified, 0 errors.
+- `pnpm test:machine-model`: 8 files, 99 tests passed.
+- `pnpm typecheck`, `pnpm lint`, `pnpm format:check`: passed.
+- First driver runs: the baseline proved, but the seeded defect "cross-region
+  transition exits the source region" produced only timeouts in `DomainActive`
+  and `CrossDomain`, which the driver treats as a tool failure. `CrossDomain`
+  now hides every definition except `transitionDomain` and `narrow`; under
+  that defect it fails with "a postcondition could not be proved". The
+  `DomainActive` timeout remains under that defect, but it does not affect
+  the baseline, where `DomainActive` takes about 1 s.
+- `pnpm verify:machine-model` (after that change): 388 verified, 0 errors;
+  all 11 proof weakenings and all 17 seeded defects rejected; freshness and
+  refactor checks passed.
+- `pnpm test:machine-model:runtime-defects`: all five runtime mutations
+  rejected, including the two new parallel mutations; production source
+  restored.
 
 ## Behavior log
 
@@ -83,4 +103,10 @@ that contradicts a ticket. Each entry gives a classification and evidence.
 
 ## Commits
 
-None yet.
+- `0b40291` chore(machine-model): start parallel formalization run log
+- `c0aad13` chore(machine-model): checkpoint parallel model and adapter
+  (unverified checkpoint; superseded by the commits below)
+- `eeed21f` feat(machine-model): prove single-parallel machine laws
+- `9fda475` test(machine-model): add parallel runtime mutations and
+  array-target refusal
+- `d3968eb` docs(machine-model): document the single-parallel model
