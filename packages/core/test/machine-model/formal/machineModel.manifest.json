@@ -150,6 +150,23 @@
       "after": "? sourcePath.length - (reenter ? 0 : 0)"
     }
   ],
+  "proofDefects": [
+    {
+      "name": "vacuous generated contract",
+      "before": "lemma initialTransition_ensures(machine: Machine, event: Event)\n",
+      "after": "lemma initialTransition_ensures(machine: Machine, event: Event)\n  requires false\n"
+    },
+    {
+      "name": "restricted generated function",
+      "before": "function initialTransition(machine: Machine, event: Event): Step\n",
+      "after": "function initialTransition(machine: Machine, event: Event): Step\n  requires false\n"
+    },
+    {
+      "name": "weakened generated postcondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n    || true\n"
+    }
+  ],
   "refactor": {
     "before": "const next = target ?? snapshot.value;",
     "after": "const next = target === undefined ? snapshot.value : target;"

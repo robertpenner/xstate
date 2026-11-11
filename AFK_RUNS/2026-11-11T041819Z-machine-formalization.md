@@ -239,15 +239,18 @@ fixed refs, issue contracts, runtime source, proof artifacts, and command logs.
   `initialTransition_ensures`: the complete driver still reported 252 verified
   tasks, all 13 model defects rejected, and successful regeneration. This
   confirmed a protection gap, not an unsound proof in the submitted model.
-  Header-preservation checks and three anti-weakening probes are being verified
-  in a separate follow-up. The updated checker already rejects the isolated
-  false-precondition proof.
+  Header-preservation checks now reject changed generated preconditions,
+  termination clauses and existing postconditions. The complete verifier
+  passes three anti-weakening probes, all 252 verification tasks, all 13 model
+  defect checks, freshness and the behavior-preserving refactor. The updated
+  command rejects the isolated false-precondition proof before verification.
 
 The adapter repairs pass 24 new regression cases and the complete 83-test
 model suite. Build, typecheck, lint, and formatting pass. The full core suite
 passes 187 files and 3029 tests (29 skipped, three todo). All three runtime
 mutations still fail differential assertions and production source is restored.
-Final proof-driver checks are still running.
+Adapter fixes were committed and pushed as `9446441`. Final proof-driver checks
+pass; follow-up independent review and publication remain pending.
 
 **Remaining blockers:** final independent review and PR publication checks.
 

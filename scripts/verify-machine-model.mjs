@@ -58,6 +58,50 @@ function checkInventory(gen, proven) {
     /\{:\s*(?:induction false|isolate_assertions)\s*\}/g,
     ''
   );
+  const declarations = (text) =>
+    new Map(
+      [...text.matchAll(/^((?:function|lemma) (\w+)[\s\S]*?)^\{/gm)].map(
+        ([, header, name]) => {
+          const clauses = [
+            ...header.matchAll(
+              /^\s*(requires|ensures|decreases|reads|modifies)\b/gm
+            )
+          ];
+          return [
+            name,
+            {
+              signature: header.slice(0, clauses[0]?.index).trim(),
+              clauses: clauses.map((clause, index) => ({
+                kind: clause[1],
+                text: header
+                  .slice(clause.index, clauses[index + 1]?.index)
+                  .trim()
+              }))
+            }
+          ];
+        }
+      )
+    );
+  const retainedDeclarations = declarations(code);
+  for (const [name, original] of declarations(strip(gen))) {
+    const retainedDeclaration = retainedDeclarations.get(name);
+    const message = `Generated declaration contract must remain unchanged: ${name}`;
+    assert.ok(retainedDeclaration, message);
+    assert.equal(retainedDeclaration.signature, original.signature, message);
+    assert.deepEqual(
+      retainedDeclaration.clauses.filter(({ kind }) => kind !== 'ensures'),
+      original.clauses.filter(({ kind }) => kind !== 'ensures'),
+      message
+    );
+    for (const clause of original.clauses.filter(
+      ({ kind }) => kind === 'ensures'
+    )) {
+      assert.ok(
+        retainedDeclaration.clauses.some(({ text }) => text === clause.text),
+        message
+      );
+    }
+  }
   const bodies = (text) =>
     [...text.matchAll(/^function (\w+)[\s\S]*?^\{([\s\S]*?)^\}/gm)].map(
       ([, name, body]) => [
@@ -152,6 +196,14 @@ const translator = run(process.execPath, [lsc, 'version'], root);
 assert.equal(translator.status, 0, translator.output);
 assert.equal(translator.output.trim(), '0.6.6');
 checkInventory(generated, proof);
+for (const defect of manifest.proofDefects) {
+  assert.throws(
+    () => checkInventory(generated, replaceOnce(proof, defect)),
+    /Generated declaration contract must remain unchanged/,
+    `Accepted proof weakening: ${defect.name}`
+  );
+  console.log(`Rejected proof weakening: ${defect.name}`);
+}
 const scratch = mkdtempSync(
   path.join(process.env.TMPDIR ?? tmpdir(), 'xstate-machine-proof-')
 );

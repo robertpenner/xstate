@@ -16,6 +16,8 @@ unmodified LemmaScript 0.6.6. Dafny 4.11.0 proves its contracts and the laws in
 contract lemmas, and 13 deliberately incorrect model edits. The complete proof
 currently checks 252 verification tasks. Function postconditions support
 composition; they are also checked against the generated bodies.
+Three additional proof-weakening probes check that generated contracts cannot
+gain restrictive preconditions or lose their original postconditions.
 
 The laws establish:
 
@@ -207,6 +209,10 @@ The proof driver regenerates into temporary directories, checks exact freshness,
 requires every generated line to remain in order, and checks the declaration
 inventory. Generated executable bodies may only gain checked assertions.
 Proof additions include function postconditions and ghost declarations.
+Generated preconditions, termination clauses and existing postconditions must
+remain unchanged. The driver tests attempts to add `requires false` to a
+generated function or contract lemma and to weaken an existing postcondition
+with `|| true`; all are rejected before verification.
 The driver rejects assumptions and proof-disabling attributes; only
 `induction false` and `isolate_assertions` are allowed to control proof search.
 It requires every seeded edit to

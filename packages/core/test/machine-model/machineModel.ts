@@ -1,4 +1,4 @@
-// Values are interned by Object.is in the adapter. Encoded keys start with ":".
+// Values are interned by Object.is in the adapter. User keys start with ":".
 export type PatchEntry = { key: string; value: number };
 export type Event = { type: string; value: number };
 export type Effect = { action: number; args: readonly number[] };
