@@ -68,6 +68,43 @@ describe('the fsm model and createFSM', () => {
     return run(machine, initialState(machine), events(...types)).value;
   };
 
+  it('passes the current context to transition functions', () => {
+    const config: JsConfig = {
+      initial: 'idle',
+      context: { count: 1 },
+      states: {
+        idle: {
+          on: {
+            increment: ({ context }) => ({
+              context: { count: (context.count as number) + 1 }
+            })
+          }
+        }
+      }
+    };
+    const { machine, decodeContext } = toModel(config);
+    const end = run(
+      machine,
+      initialState(machine),
+      events('increment', 'increment')
+    );
+    expect(decodeContext(end.context)).toEqual({ count: 3 });
+    assertAgrees(config, events('increment', 'increment'));
+  });
+
+  it('copies when only a later patch key changes', () => {
+    const config: JsConfig = {
+      initial: 'idle',
+      context: { x: 1, y: 1 },
+      states: { idle: { on: { go: { context: { x: 1, y: 2 } } } } }
+    };
+    const { machine } = toModel(config);
+    expect(
+      transition(machine, initialState(machine), events('go')[0]).reused
+    ).toBe(false);
+    assertAgrees(config, events('go', 'go'));
+  });
+
   it('gives a state that config.states inherits through Object.create no transitions', () => {
     const base = { busy: { on: { back: 'idle' } } };
     const deeper = Object.create(base) as JsConfig['states'];
