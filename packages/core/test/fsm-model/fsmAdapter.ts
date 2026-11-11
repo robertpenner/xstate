@@ -235,7 +235,7 @@ export function toModel(config: JsConfig) {
   return { machine, decodeContext };
 }
 
-type JsSnapshot = { value: string; context: JsContext };
+export type JsSnapshot = { value: string; context: JsContext };
 type ModelSnapshot = { value: string; context: Record<string, Value> };
 
 function assertSurface(
@@ -272,7 +272,12 @@ function assertSameSnapshot(
     );
 }
 
-export function assertAgrees(config: JsConfig, events: readonly FSMEvent[]) {
+// `onStep` sees each createFSM snapshot and the event it is about to receive.
+export function assertAgrees(
+  config: JsConfig,
+  events: readonly FSMEvent[],
+  onStep?: (snapshot: JsSnapshot, event: FSMEvent) => void
+) {
   const fsm = createFSM<JsContext, FSMEvent>(config);
   const { machine, decodeContext } = toModel(config);
   let actual = fsm.initialState;
@@ -287,6 +292,7 @@ export function assertAgrees(config: JsConfig, events: readonly FSMEvent[]) {
   expect(initialEffects, 'initialTransition effects').toEqual([]);
   expect(fsm.getInitialSnapshot(), 'getInitialSnapshot').toBe(actual);
   for (const [index, event] of events.entries()) {
+    onStep?.(actual, event);
     const [next, effects] = fsm.transition(actual, event);
     const step = transition(machine, expected, event);
     const label = `event ${index} (${event.type})`;
