@@ -252,6 +252,30 @@ mutations still fail differential assertions and production source is restored.
 Adapter fixes were committed and pushed as `9446441`. Final proof-driver checks
 pass; follow-up independent review and publication remain pending.
 
+The follow-up review accepted S1 and S2. It identified a remaining E1 spelling:
+`ensures true requires false` on one line. The line-oriented scanner accepted
+that addition in a new regression. Clause detection now recognizes keywords
+independently of line breaks while preserving quoted literals and handling
+line/block comments, including nested block comments. Six additional probes
+cover inline clauses, comments, strings and a character literal. The complete
+verifier passes all nine anti-weakening probes, 252 verification tasks, all
+13 semantic model defects, freshness and behavior-preserving regeneration.
+Build, typecheck, lint, formatting and changed-file Markdown checks pass.
+
+The complete published verifier also accepted the isolated inline-precondition
+proof: 252 tasks, all 13 model defects, freshness and refactor still passed.
+The lexical checker rejects that exact proof before verification.
+
+One concurrent core verification run hit a 60-second `beforeAll` timeout in
+`declarations.test.ts`'s `narrowed-context` fixture and a Vitest `onTaskUpdate`
+RPC timeout. It reported 3027 passing tests, 31 skipped and three todo.
+The declaration test and production source are unchanged from `bcd3840`.
+Earlier complete runs passed 3029 tests. After both proof-verification jobs
+finished, `pnpm test:core --maxWorkers=2 --minWorkers=1` passed all 187 files
+and 3029 tests (29 skipped, three todo) in 181.29 seconds. This records a
+transient verification timeout; its cause has not been established. No test
+or timeout expectation was changed.
+
 **Remaining blockers:** final independent review and PR publication checks.
 
 **Completed:** pending.

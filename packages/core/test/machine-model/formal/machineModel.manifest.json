@@ -152,6 +152,36 @@
   ],
   "proofDefects": [
     {
+      "name": "inline restrictive precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures true requires false\n"
+    },
+    {
+      "name": "comment-delimited restrictive precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures true /* explanation */ requires false\n"
+    },
+    {
+      "name": "string comment marker before precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures \"http://\" == \"http://\" requires false\n"
+    },
+    {
+      "name": "verbatim string before precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures @\"/*\" == @\"/*\" requires false\n"
+    },
+    {
+      "name": "nested comment before precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures true /* outer /* nested */ outer */ requires false\n"
+    },
+    {
+      "name": "character literal before precondition",
+      "before": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n",
+      "after": "  ensures (initialTransition(machine, event).snapshot.value == machine.initial)\n  ensures 'r' == 'r' requires false\n"
+    },
+    {
       "name": "vacuous generated contract",
       "before": "lemma initialTransition_ensures(machine: Machine, event: Event)\n",
       "after": "lemma initialTransition_ensures(machine: Machine, event: Event)\n  requires false\n"

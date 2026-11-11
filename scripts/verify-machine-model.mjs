@@ -42,6 +42,55 @@ function names(text, pattern) {
   return [...text.matchAll(pattern)].map((match) => match[1]).sort();
 }
 
+function proofCode(text) {
+  const token =
+    /@"(?:[^"]|"")*"|"(?:\\[\s\S]|[^"\\])*"|'(?:\\(?:u[0-9a-fA-F]{4}|U\{[0-9a-fA-F]+\}|[^\r\n])|[^'\\\r\n])'|[\p{ID_Start}_][\p{ID_Continue}'?]*/uy;
+  const parts = [];
+  let index = 0;
+  while (index < text.length) {
+    if (text.startsWith('//', index)) {
+      const newline = text.slice(index).search(/[\r\n]/);
+      const end = newline < 0 ? text.length : index + newline;
+      parts.push(' '.repeat(end - index));
+      index = end;
+    } else if (text.startsWith('/*', index)) {
+      let end = index + 2;
+      let depth = 1;
+      while (end < text.length && depth > 0) {
+        if (text.startsWith('/*', end)) {
+          depth++;
+          end += 2;
+        } else if (text.startsWith('*/', end)) {
+          depth--;
+          end += 2;
+        } else {
+          end++;
+        }
+      }
+      assert.equal(depth, 0, 'Unterminated proof comment');
+      parts.push(text.slice(index, end).replace(/[^\r\n]/g, ' '));
+      index = end;
+    } else {
+      token.lastIndex = index;
+      const match = token.exec(text);
+      if (match) {
+        const value = match[0];
+        parts.push(
+          value.startsWith('"') ||
+            value.startsWith('@"') ||
+            value.startsWith("'")
+            ? `__literal_${Buffer.from(value).toString('hex')}__`
+            : value
+        );
+        index += value.length;
+      } else {
+        parts.push(text[index++]);
+      }
+    }
+  }
+  return parts.join('');
+}
+
 function checkInventory(gen, proven) {
   const generatedLines = gen.trimEnd().split('\n');
   let retained = 0;
@@ -53,8 +102,7 @@ function checkInventory(gen, proven) {
     generatedLines.length,
     'Proof must retain every generated line in order'
   );
-  const strip = (text) => text.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, '');
-  const code = strip(proven).replace(
+  const code = proofCode(proven).replace(
     /\{:\s*(?:induction false|isolate_assertions)\s*\}/g,
     ''
   );
@@ -64,7 +112,7 @@ function checkInventory(gen, proven) {
         ([, header, name]) => {
           const clauses = [
             ...header.matchAll(
-              /^\s*(requires|ensures|decreases|reads|modifies)\b/gm
+              /(?<![\p{ID_Continue}'?])(requires|ensures|decreases|reads|modifies)(?![\p{ID_Continue}'?])/gu
             )
           ];
           return [
@@ -83,7 +131,7 @@ function checkInventory(gen, proven) {
       )
     );
   const retainedDeclarations = declarations(code);
-  for (const [name, original] of declarations(strip(gen))) {
+  for (const [name, original] of declarations(proofCode(gen))) {
     const retainedDeclaration = retainedDeclarations.get(name);
     const message = `Generated declaration contract must remain unchanged: ${name}`;
     assert.ok(retainedDeclaration, message);
@@ -110,8 +158,8 @@ function checkInventory(gen, proven) {
       ]
     );
   assert.deepEqual(
-    bodies(strip(proven)),
-    bodies(strip(gen)),
+    bodies(proofCode(proven)),
+    bodies(proofCode(gen)),
     'Generated executable bodies may only gain checked assertions'
   );
   assert.doesNotMatch(
@@ -124,7 +172,7 @@ function checkInventory(gen, proven) {
       /\b(datatype|type|class|trait|module|newtype|codatatype)\s+\w+/g
     ),
     names(
-      strip(gen),
+      proofCode(gen),
       /\b(datatype|type|class|trait|module|newtype|codatatype)\s+\w+/g
     )
   );
