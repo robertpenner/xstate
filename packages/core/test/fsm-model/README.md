@@ -202,7 +202,8 @@ entry, so some refused accessors would never run, but the adapter does not
 try to tell which.
 
 [`fsmModel.test.ts`](./fsmModel.test.ts) runs named cases: inherited event
-types, the empty-string target, functions that return `undefined` or `{}`, an
+types, the empty-string target, functions that return `undefined` or `{}`, a
+function that reads the context, a patch whose second key alone changes, an
 undeclared snapshot value, states inherited through `Object.create` (two
 levels deep) and through a literal `__proto__: { ... }` that find no
 transitions, an own state beside an inherited state of the same name, an event
@@ -231,23 +232,93 @@ including `toString`, `__proto__`, and one symbol; and values from `-2` to
 and fresh objects. Contexts have no prototype entries, because a transition
 function in the model reads a decoded copy without the context's prototype.
 
-Four edits to `fsm.ts` that undo parts of `757b605` and `c70dd85` each fail
-named cases:
+A machine that starts in, or moves to, a state it does not own takes no
+transitions for the rest of its events, so the generator steers away from
+that without ruling it out. Every `states` table owns at least two states and
+every `on` table at least one entry. Two in three initial states are own
+states, and two in three events use a type that an own state defines with a
+value other than `undefined`. Values draw `0`, `-0`, or `NaN` twice as often as
+any other group, because `Object.is` and `===` disagree only on those, and a
+patch shows the difference only when it meets a context holding the same key.
 
-- reading `config.states[value]?.on` through the prototype fails the cases for
-  states inherited through `Object.create` and a literal `__proto__`, the
-  inherited `away` state, and the polluted `Object.prototype`;
-- comparing `patch[key] !== context[key]` fails the `undefined`, `-0`,
-  `NaN`, and inherited `toString` patches, the absent `__proto__` patch, and
-  the symbol keys;
-- dropping only the own-key check fails the `undefined` and inherited
-  `toString` patches, the absent `__proto__` patch, and the symbol keys;
-- comparing own keys with `!==` fails the `-0` over `0` and `NaN` over `NaN`
-  cases.
+The test labels each step by the path `createFSM` takes and fails when a
+label falls below its minimum. The minimums are about a quarter to a third of
+the lowest count from seeds 1 to 8, so a run that the time limit cuts short
+still passes, while a generator change that loses a case fails. Removing the
+weighting of `0`, `-0`, and `NaN` makes seed 3 fail on `NaN` over own `NaN`.
 
-The generated comparison fails for the first, second, and fourth edit. For
-the third, it found a counterexample in four of five runs, after 164 to 896
-configurations.
+| Label                                | Minimum | Lowest of seeds 1 to 8 | Exercises                                                 |
+| ------------------------------------ | ------: | ---------------------: | --------------------------------------------------------- |
+| every step                           |   2,000 |                  4,665 | most of the 1,000 runs                                    |
+| transition missing                   |   1,000 |                  3,242 | no own state, no own event entry, or an `undefined` entry |
+| string transition                    |     100 |                    369 | a target-only transition                                  |
+| function transition                  |     150 |                    498 | a function that reads the context                         |
+| object transition                    |     150 |                    478 | a transition config object                                |
+| snapshot value is an inherited state |     100 |                    451 | the own-key guard on `config.states`                      |
+| patch changes nothing                |      25 |                     78 | snapshot reuse after a patch                              |
+| patch's first key changes            |     100 |                    322 | copying the context                                       |
+| only a later patch key changes       |       1 |                      4 | checking every key after an unchanged one                 |
+| patch entry for an absent key        |     100 |                    328 | the own-key check before comparing                        |
+| `NaN` over own `NaN`                 |       5 |                     15 | `Object.is` treating `NaN` as unchanged                   |
+| `-0` over `0`, or `0` over `-0`      |       2 |                      6 | `Object.is` treating signed zeros as changed              |
+| opaque patch value                   |      20 |                     66 | strings and references compared by identity               |
+
+`FSM_MODEL_REPORT=1` prints the counts, and `FSM_MODEL_SEED` fixes the seed.
+
+### Mutation testing
+
+[`scripts/fsm-model-mutants.mjs`](../../../../scripts/fsm-model-mutants.mjs)
+rewrites one expression in `fsm.ts` at a time, runs both test files with
+`FSM_MODEL_SEED=1`, and restores `fsm.ts`. It refuses to start when `fsm.ts`
+has uncommitted changes, and it exits 1 when a mutant survives that is not
+listed as expected to survive, or when a listed one is caught. With seeds 1,
+2, and 3, the named cases and the generated comparison each catch all 21
+mutants that change behavior the model covers:
+
+| Mutant | Edit to `transition` or `initialState`                           |
+| ------ | ---------------------------------------------------------------- |
+| M01    | compare patch values with `!==` instead of `Object.is`           |
+| M02    | drop the own-key check before comparing a patch value            |
+| M03    | iterate the patch with `for...in` instead of its own keys        |
+| M04    | look up the state without the `Object.hasOwn` guard              |
+| M05    | look up the event with `in` instead of `Object.hasOwn`           |
+| M06    | reuse the snapshot without checking the target                   |
+| M08    | reuse the snapshot without checking the context                  |
+| M09    | reuse the snapshot when either the target or the context matches |
+| M10    | let the old context override the patch                           |
+| M11    | replace the context with the patch                               |
+| M12    | copy the context without applying the patch                      |
+| M13    | iterate string keys only, skipping symbol keys                   |
+| M16    | default a missing target to the initial state                    |
+| M17    | pass an empty context to transition functions                    |
+| M18    | copy when a patch value is unchanged instead of changed          |
+| M19    | copy only when the key is absent and the value changed           |
+| M20    | start from an empty context instead of `config.context`          |
+| M21    | look up the state with `in` instead of `Object.hasOwn`           |
+| M22    | treat an empty-string target as no target                        |
+| M24    | check only the first patch key                                   |
+| M25    | compare with `!==` and no own-key check, as before `c70dd85`     |
+
+M04 undoes `757b605`, and M25 undoes `c70dd85`.
+
+Before the cases for a function that reads the context and for a later patch
+key were added, only the generated comparison caught M17 and M24. Before the
+generator changes above, seed 3 found no step where M01 changed the result.
+
+Four mutants pass every test:
+
+- M07 replaces `|| {}` with `?? {}` after resolving the transition. The two
+  differ only for `false`, `0`, `NaN`, `0n`, and `''`, and destructuring any of
+  them gives an undefined target and patch, as `{}` does.
+- M15 adds `break` after the context is copied. After the copy, every own data
+  key of the patch holds the same value in the new context, so no later key
+  copies again.
+- M23 replaces `config.context ?? {}` with `config.context || {}`. A context is
+  an object or `undefined`, and the two differ only for other falsy values.
+- M14 iterates `Reflect.ownKeys(patch ?? {})` instead of a spread copy. For a
+  patch with a non-enumerable own key, the mutant copies the context and
+  `createFSM` does not. That patch is outside the model, and the adapter
+  refuses it.
 
 Both test files run in `pnpm test`.
 
@@ -296,6 +367,14 @@ It checks that the committed `.dfy.gen` is what LemmaScript generates from
 `fsmModel.ts`, verifies the model (61 Dafny tasks), rejects the fourteen
 defects, and checks the rewrite. The `fsm model verification` workflow runs it
 on pull requests that change `src/fsm.ts` or this directory.
+
+The mutant runner needs only the workspace's dependencies. It takes about two
+minutes from the repository root:
+
+```sh
+node scripts/fsm-model-mutants.mjs
+node scripts/fsm-model-mutants.mjs --seed 3 --only M01,M24
+```
 
 After editing `fsmModel.ts`, run `node "$LEMMASCRIPT_LSC" regen
 --backend=dafny fsmModel.ts` in this directory, review the generated changes
