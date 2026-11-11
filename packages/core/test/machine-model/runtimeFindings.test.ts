@@ -1,6 +1,6 @@
 import { createMachine, initialTransition, transition } from '../../src';
 
-describe('recorded runtime findings at bcd3840', () => {
+describe('recorded runtime findings at da64b0a', () => {
   it('targeting the root from a descendant enters root without exiting it', () => {
     const record = vi.fn();
     const machine = createMachine({
