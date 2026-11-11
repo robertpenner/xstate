@@ -1,0 +1,80 @@
+{
+  "source": "machineModel.ts",
+  "verifiedCount": 39,
+  "functions": [
+    "mergePatch",
+    "apply",
+    "emptyEvaluation",
+    "initialTransition",
+    "transition"
+  ],
+  "specFunctions": ["Selected", "LastPatchValue"],
+  "laws": [
+    "LastPatchCons",
+    "MergeMeaning",
+    "PatchNeverDeletes",
+    "PatchStoresPresentUndefinedToken",
+    "ApplyPatchMeaning",
+    "EmptyPatchStillCopies",
+    "NoPatchReusesContext",
+    "InitialDeclared",
+    "InitialLifecycle",
+    "MissingEventUnhandled",
+    "DeclinedEventUnhandled",
+    "HandledIdentity",
+    "HandledNoopCopiesSnapshot",
+    "EffectOnlyHandled",
+    "SelectedTarget",
+    "StepDeclared",
+    "TargetlessLifecycle",
+    "NonReenteringSelf",
+    "LifecycleOrderAndContext",
+    "TargetlessReentryCharacterization"
+  ],
+  "defects": [
+    {
+      "name": "ignored target",
+      "before": "const next = target ?? snapshot.value;",
+      "after": "const next = snapshot.value;"
+    },
+    {
+      "name": "dropped patch entry",
+      "before": "return mergePatch({ ...context, [first.key]: first.value }, patch.slice(1));",
+      "after": "return mergePatch(context, patch.slice(1));"
+    },
+    {
+      "name": "unhandled event copies snapshot",
+      "before": "return { snapshot, snapshotReused: true, contextReused: true, effects: [] };",
+      "after": "return { snapshot, snapshotReused: false, contextReused: true, effects: [] };"
+    },
+    {
+      "name": "reversed lifecycle effects",
+      "before": "effects: [...exited.effects, ...updated.effects, ...entered.effects]",
+      "after": "effects: [...entered.effects, ...updated.effects, ...exited.effects]"
+    },
+    {
+      "name": "empty patch incorrectly reuses context",
+      "before": "reused: patch === undefined,",
+      "after": "reused: patch === undefined ? true : patch.length === 0,"
+    },
+    {
+      "name": "entry reads pre-transition context",
+      "before": "? entry(updated.context, event)",
+      "after": "? entry(snapshot.context, event)"
+    },
+    {
+      "name": "effect-only transition declines",
+      "before": "selected.result === undefined && selected.effects.length === 0",
+      "after": "selected.result === undefined && selected.effects.length >= 0"
+    },
+    {
+      "name": "ignored self reentry",
+      "before": "const changes = target !== undefined && (next !== snapshot.value || reenter);",
+      "after": "const changes = target !== undefined && next !== snapshot.value;"
+    }
+  ],
+  "refactor": {
+    "before": "const next = target ?? snapshot.value;",
+    "after": "const next = target === undefined ? snapshot.value : target;"
+  }
+}
