@@ -14,6 +14,7 @@ it('compares generated single-parallel trees, targets and event traces', () => {
     steps: 0,
     multiSteps: 0,
     conflictSteps: 0,
+    mixedRegions: 0,
     reasons: {} as Record<string, number>
   };
   fc.assert(
@@ -30,6 +31,14 @@ it('compares generated single-parallel trees, targets and event traces', () => {
       (depth, numbers, events) => {
         const all: State[] = [];
         let parallel = false;
+        let regionHeights: number[] = [];
+        const height = (node: State): number =>
+          Math.max(
+            0,
+            ...Object.values(node.states ?? {}).map(
+              (child) => 1 + height(child!)
+            )
+          );
         function tree(level: number): State {
           const index = all.length;
           const node: State = {
@@ -44,12 +53,17 @@ it('compares generated single-parallel trees, targets and event traces', () => {
             }
           };
           all.push(node);
-          if (level < depth) {
+          const stopsEarly =
+            level > 0 && numbers[(7 * index + 3) % numbers.length] % 4 === 0;
+          if (level < depth && !stopsEarly) {
             if (!parallel && numbers[index] % 3 === 0) {
               parallel = true;
               node.type = 'parallel';
               node.states = { x: tree(level + 1), y: tree(level + 1) };
               if (numbers[index + 1] % 2) node.states.z = tree(level + 1);
+              regionHeights = Object.values(node.states).map((region) =>
+                height(region!)
+              );
             } else {
               node.initial = 'x';
               node.states = { x: tree(level + 1) };
@@ -86,6 +100,7 @@ it('compares generated single-parallel trees, targets and event traces', () => {
         }
         stats.runs++;
         if (parallel) stats.parallel++;
+        if (new Set(regionHeights).size > 1) stats.mixedRegions++;
         try {
           const trace = compareParallelTrace(
             config,
@@ -120,4 +135,5 @@ it('compares generated single-parallel trees, targets and event traces', () => {
   expect(stats.steps).toBeGreaterThan(stats.runs);
   expect(stats.multiSteps).toBeGreaterThan(0);
   expect(stats.conflictSteps).toBeGreaterThan(0);
+  expect(stats.mixedRegions).toBeGreaterThan(0);
 });

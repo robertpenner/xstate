@@ -167,6 +167,94 @@ describe('single parallel subtree model', () => {
     ]);
   });
 
+  it('resets every region when a reentering compound ancestor targets one region', () => {
+    const trace = compareParallelTrace(
+      {
+        id: 'root',
+        context: {},
+        initial: 'w',
+        states: {
+          w: logged('w', {
+            initial: 'p',
+            on: { jump: { target: '#root.w.p.b.b2', reenter: true } },
+            states: {
+              p: logged('p', {
+                type: 'parallel',
+                states: {
+                  a: logged('a', {
+                    initial: 'a1',
+                    states: {
+                      a1: logged('a1', { on: { next: { target: 'a2' } } }),
+                      a2: logged('a2')
+                    }
+                  }),
+                  b: logged('b', {
+                    initial: 'b1',
+                    states: { b1: logged('b1'), b2: logged('b2') }
+                  })
+                }
+              })
+            }
+          })
+        }
+      },
+      [{ type: 'next' }, { type: 'jump' }]
+    );
+    expect(trace[2].value).toEqual({ w: { p: { a: 'a1', b: 'b2' } } });
+    expect(labels(trace[2])).toEqual([
+      'exit b1',
+      'exit b',
+      'exit a2',
+      'exit a',
+      'exit p',
+      'exit w',
+      'enter w',
+      'enter p',
+      'enter a',
+      'enter a1',
+      'enter b',
+      'enter b2'
+    ]);
+  });
+
+  it('resets every region below the parallel node when it targets itself without reentry', () => {
+    const trace = compareParallelTrace(
+      lights({ jump: { target: '#root.p' } }),
+      [{ type: 'next' }, { type: 'jump' }]
+    );
+    expect(trace[2].value).toEqual({ p: { a: 'a1', b: 'b1' } });
+    expect(labels(trace[2])).toEqual([
+      'exit b1',
+      'exit b',
+      'exit a2',
+      'exit a',
+      'enter a',
+      'enter a1',
+      'enter b',
+      'enter b1'
+    ]);
+  });
+
+  it('exits and reenters every region when the parallel node reenters itself', () => {
+    const trace = compareParallelTrace(
+      lights({ jump: { target: '#root.p', reenter: true } }),
+      [{ type: 'next' }, { type: 'jump' }]
+    );
+    expect(trace[2].value).toEqual({ p: { a: 'a1', b: 'b1' } });
+    expect(labels(trace[2])).toEqual([
+      'exit b1',
+      'exit b',
+      'exit a2',
+      'exit a',
+      'exit p',
+      'enter p',
+      'enter a',
+      'enter a1',
+      'enter b',
+      'enter b1'
+    ]);
+  });
+
   it('widens a reentering cross-region transition to every region but not the parallel node', () => {
     const config = lights();
     config.states!.p.states!.a.states!.a2.on = {
@@ -273,7 +361,7 @@ describe('single parallel subtree model', () => {
     expect(trace[1].value).toEqual({ p: { a: 'a1', b: 'b1' } });
   });
 
-  it('refuses nested or multiple parallel nodes before running', () => {
+  it('refuses nested or multiple parallel nodes and parallel initial before running', () => {
     expect(() =>
       compareParallelTrace(
         {
@@ -286,7 +374,7 @@ describe('single parallel subtree model', () => {
         },
         []
       )
-    ).toThrow(/Unsupported/);
+    ).toThrow(/Unsupported second parallel state/);
     expect(() =>
       compareParallelTrace(
         {
@@ -299,13 +387,13 @@ describe('single parallel subtree model', () => {
         },
         []
       )
-    ).toThrow(/Unsupported/);
+    ).toThrow(/Unsupported second parallel state/);
     expect(() =>
       compareParallelTrace(
         { context: {}, type: 'parallel', initial: 'a', states: { a: {} } },
         []
       )
-    ).toThrow(/Unsupported/);
+    ).toThrow(/Unsupported parallel initial/);
   });
 
   it('refuses array targets before running', () => {
@@ -317,12 +405,46 @@ describe('single parallel subtree model', () => {
     ).toThrow(/Unsupported target/);
   });
 
-  it('refuses a non-reentering target of an already active region', () => {
+  it('refuses a target of an already active region with or without reentry', () => {
     expect(() =>
       compareParallelTrace(lights({ jump: { target: '.b' } }), [
         { type: 'jump' }
       ])
-    ).toThrow(/Unsupported step/);
+    ).toThrow(/Unsupported step: jump \(active region target\)/);
+    expect(() =>
+      compareParallelTrace(lights({ jump: { target: '.b', reenter: true } }), [
+        { type: 'jump' }
+      ])
+    ).toThrow(/Unsupported step: jump \(active region target\)/);
+  });
+
+  it('refuses the statelyai/xstate#5895 machine at its active-region target', () => {
+    expect(() =>
+      compareParallelTrace(
+        {
+          id: 'm',
+          context: {},
+          initial: 'P',
+          states: {
+            P: logged('P', {
+              type: 'parallel',
+              states: {
+                A: logged('A', {
+                  initial: 'a1',
+                  states: {
+                    a1: logged('a1', { on: { E: { target: '#m.P.B' } } }),
+                    a2: logged('a2')
+                  }
+                }),
+                B: logged('B', { on: { E: { target: '#m.X' } } })
+              }
+            }),
+            X: logged('X')
+          }
+        },
+        [{ type: 'E' }]
+      )
+    ).toThrow(/Unsupported step: E \(active region target\)/);
   });
 });
 

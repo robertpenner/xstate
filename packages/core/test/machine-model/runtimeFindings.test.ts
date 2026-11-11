@@ -89,30 +89,53 @@ describe('recorded runtime findings at da64b0a', () => {
 
   it('targetless reentry beside a parallel-node reentry leaves a leaf without its region (suspected bug)', () => {
     const record = vi.fn();
+    const log = (name: string) => ({
+      entry: (_: unknown, enq: (fn: typeof record, arg: string) => void) => {
+        enq(record, `enter ${name}`);
+      },
+      exit: (_: unknown, enq: (fn: typeof record, arg: string) => void) => {
+        enq(record, `exit ${name}`);
+      }
+    });
     const machine = createMachine({
       id: 'm',
       initial: 'P',
       states: {
         P: {
+          ...log('P'),
           type: 'parallel',
           states: {
             A: {
+              ...log('A'),
               initial: 'a1',
-              states: { a1: { on: { E: { reenter: true } } }, a2: {} }
+              states: {
+                a1: { ...log('a1'), on: { E: { reenter: true } } },
+                a2: {}
+              }
             },
-            B: { on: { E: { target: '#m.P', reenter: true } } }
+            B: { ...log('B'), on: { E: { target: '#m.P', reenter: true } } }
           }
         }
       }
     });
     const [initial] = initialTransition(machine);
-    const [next] = transition(machine, initial, { type: 'E' });
+    const [next, effects] = transition(machine, initial, { type: 'E' });
+    expect(
+      effects.map((effect) => ('args' in effect ? effect.args[0] : undefined))
+    ).toEqual([
+      'exit B',
+      'exit a1',
+      'exit A',
+      'exit P',
+      'enter P',
+      'enter a1',
+      'enter B'
+    ]);
     expect(next.nodes.map((node) => node.id)).toEqual([
       'm',
       'm.P',
       'm.P.A.a1',
       'm.P.B'
     ]);
-    expect(record).not.toHaveBeenCalled();
   });
 });
