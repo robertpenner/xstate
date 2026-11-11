@@ -202,7 +202,8 @@ entry, so some refused accessors would never run, but the adapter does not
 try to tell which.
 
 [`fsmModel.test.ts`](./fsmModel.test.ts) runs named cases: inherited event
-types, the empty-string target, functions that return `undefined` or `{}`, a
+types, the empty-string target and an event from that state, which has no
+`on` table, functions that return `undefined` or `{}`, a
 function that reads the context, a patch whose second key alone changes, an
 undeclared snapshot value, states inherited through `Object.create` (two
 levels deep) and through a literal `__proto__: { ... }` that find no
@@ -322,6 +323,107 @@ Four mutants pass every test:
 
 Both test files run in `pnpm test`.
 
+## Requirement map
+
+This section maps the runtime lines of `createFSM` in `src/fsm.ts` at
+`da64b0a`, the `next` commit this branch last merged, to the model, the laws,
+and the tests. `src/fsm.ts` has not changed since `c70dd85`, so the line
+numbers hold for both. "Mutants" are named as in the mutation testing
+section, and "defects" are the model edits that Dafny must reject. Every step of every
+named case and generated run goes through `assertAgrees`, which compares the
+value, the context, and both reuse flags, so each line below is also covered
+by that comparison.
+
+- **429–436**, `createSnapshot`, builds `{ status: 'active', value, context,
+  output: undefined, error: undefined }`. The model's `Snapshot` keeps only
+  `value` and `context`, so no law covers the other three keys. The adapter
+  checks them after every step.
+- **437–440**, the initial snapshot, `config.context ?? {}`. Model:
+  `initialState`. Laws: `initialState_ensures`, `InitialContext`,
+  `InitialDeclared`. Tests: every comparison starts here, and the adapter
+  checks that `initialTransition` and `getInitialSnapshot` return it.
+  Mutants: M20, and M23, which no test can catch. Defect: the initial
+  snapshot drops the configured context.
+- **446–448**, `initialTransition`, `getInitialSnapshot`, and
+  `getPersistedSnapshot`. No model or law. The adapter checks each.
+- **450**, `let { value, context } = snapshot`. The model's `transition` reads
+  `snapshot.value` and `snapshot.context`, so every law about `transition`
+  covers it.
+- **451–455**, the own-state lookup and `?.on`. Model: `lookupState` and the
+  first half of `lookupTransition`; the adapter gives an own state with no
+  `on` an empty table. Laws: `lookupState_ensures`,
+  `lookupTransition_ensures`, `DeclaredStateLookup`,
+  `InheritedStateHasNoTransitions`, `InheritedStatesIgnored`. Named cases:
+  the undeclared snapshot value, states inherited through `Object.create` and
+  through `__proto__`, an own state beside an inherited one of the same name,
+  the snapshot values `toString`, `constructor`, `hasOwnProperty`, and
+  `__proto__`, the non-enumerable own state, the inherited state named `on`,
+  the polluted `Object.prototype`, and the empty-string target, whose second
+  event starts from a state with no `on`. Label: snapshot value is an
+  inherited state. Mutants: M04, M21. Defects: every value uses the initial
+  state's transitions; state lookup reads inherited states.
+- **456–458**, the own-event lookup, `Object.hasOwn(transitions || {}, ...)`.
+  Model: the second half of `lookupTransition`; the adapter leaves out an own
+  entry whose value is `undefined`, which `createFSM` treats as no
+  transition. Laws: `DeclaredStateLookup`, `InheritedEventIsNotFound`,
+  `MissingTransitionKeepsSnapshot`. Named cases: inherited object keys as
+  event types, an event that a state's `on` table inherits, the
+  non-enumerable own transition. Label: transition missing. Mutant: M05.
+  Defect: event lookup reads inherited events.
+- **459–464**, resolving the transition and defaulting the target. Model:
+  `resolveTransition`, and the `target` default in `transition`. Laws:
+  `resolveTransition_ensures`, `StringTargetIsConfigTarget`,
+  `EmptyConfigKeepsSnapshot`, `TransitionMeaning`. Named cases: the
+  empty-string target, functions that return `undefined` or `{}`, a function
+  that reads the context. Labels: string, function, and object transitions.
+  Mutants: M16, M17, M22, and M07, which no test can catch. Defects: the
+  configured target is ignored; a string transition loses its target.
+- **469**, iterating `Reflect.ownKeys({ ...patch })`. Model: `patchChanges`
+  checks every entry; the adapter lists the patch's own string and symbol
+  keys. Laws: `patchChanges_ensures`, `PatchUnchangedIffOwned`. Named cases:
+  a patch whose later key alone changes, symbol keys. Label: only a later
+  patch key changes. Mutants: M03, M13, M24, and M14 and M15, which no test
+  can catch.
+- **470–473**, the own-key check and `Object.is`. Model: `entryUnchanged`
+  and `sameValue`. Laws: `sameValue_ensures`, `entryUnchanged_ensures`,
+  `PatchUnchangedIffOwned`, `AbsentKeyAlwaysChanges`,
+  `OwnedEntryComparesWithObjectIs`, `NegativeZeroOverZeroCopies`,
+  `NotANumberOverOwnNotANumberKeepsSnapshot`. Named cases: the keep-or-copy
+  table, `NaN` over `NaN` and `0` over `-0`, own and absent `__proto__` keys,
+  the null-prototype context. Labels: patch entry for an absent key, `NaN`
+  over own `NaN`, `-0` over `0` or `0` over `-0`, opaque patch value.
+  Mutants: M01, M02, M18, M19, M25. Defects: a patch for a key the context
+  does not own counts as unchanged; a key the context does not own compares
+  as `undefined`; `-0` equals `0` and `NaN` differs from `NaN`.
+- **474**, `context = { ...context, ...patch }`. Model: `mergePatch`. Laws:
+  `mergePatch_ensures`, `MergeKeys`, `MergeValues`,
+  `MergeOfOwnedValuesIsIdentity`, `ChangedPatchCopies`, `ContextIsFullMerge`,
+  `PatchKeysOwnedAfterStep`, `MergeSettles`, `MergeIdempotent`,
+  `ContextKeysKept`, `RunKeepsContextKeys`. Named cases: the keep-or-copy
+  table, which checks every patched value after a copy. Label: patch's first
+  key changes. Mutants: M10, M11, M12. Defects: the merge drops patched
+  values; the copy applies only the first changed entry; the copy drops the
+  first patch entry.
+- **478–481**, returning the same snapshot or a new one. Model: the `reused`
+  flag of `transition`. Laws: `transition_ensures`, `ReuseIsExact`,
+  `UnchangedPatchKeepsSnapshot`, `MissingTransitionKeepsSnapshot`,
+  `EmptyConfigKeepsSnapshot`. Tests: the adapter compares snapshot and
+  context reuse after every step. Label: patch changes nothing. Mutants: M06,
+  M08, M09. Defect: a self-transition with no change copies the snapshot.
+- **482**, the empty effects list. No model or law. The adapter checks it.
+
+`run` has no line in `fsm.ts`. It stands for calling `transition` once per
+event, as `assertAgrees` does, and `RunSingleEvent`, `RunConcat`,
+`StepStaysDeclared`, and `RunStaysDeclared` describe it. Defect: `run` skips
+each event's transition.
+
+Every line has a test. The lines with no law are 429–436 for `status`,
+`output`, and `error`, 446–448, and 482, all outside the model. Three edits
+to covered lines change nothing a test can observe: `?? {}` for `|| {}` on
+line 464 (M07), `config.context || {}` on line 439 (M23), and `break` after
+line 474 (M15). M14 on line 469 changes behavior only for a patch with a
+non-enumerable own key, which is outside the model.
+
 ## Trust base and limits
 
 - Nobody proves that LemmaScript preserves the meaning of `fsmModel.ts`.
@@ -386,7 +488,8 @@ The model last followed `fsm.ts` at `c70dd85`. To find later changes, run
 `git log c70dd85..HEAD -- packages/core/src/fsm.ts` and read each commit it
 lists. A change that alters what `transition` or `initialState` returns
 needs the model, its laws, and the named cases updated together; update the
-commit named here when the model catches up.
+commit named here and the line numbers and commit in the requirement map
+when the model catches up.
 
 ## LemmaScript 0.6.6 notes
 
