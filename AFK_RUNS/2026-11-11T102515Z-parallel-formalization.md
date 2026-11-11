@@ -35,7 +35,7 @@ touched.
 | Issue | Outcome                                                      | Status              | Blocker | Integration | Verification     |
 | ----- | ------------------------------------------------------------ | ------------------- | ------- | ----------- | ---------------- |
 | #15   | Parallel configurations and single-transition steps          | integrated/verified | None    | `d3968eb`   | see #15 evidence |
-| #16   | Multi-transition selection, conflict removal and composition | ready               | None    | none        | none             |
+| #16   | Multi-transition selection, conflict removal and composition | in progress         | None    | none        | none             |
 
 ## Verification evidence
 
@@ -57,6 +57,7 @@ These results re-verify the existing flat and compound suites against runtime
 ## Briefs
 
 - #15: <https://github.com/robertpenner/xstate/issues/15#issuecomment-6793589017>
+- #16: <https://github.com/robertpenner/xstate/issues/16#issuecomment-6795766891>
 
 ### #15 proof and differential evidence (`eeed21f`..`d3968eb`)
 
@@ -100,6 +101,22 @@ that contradicts a ticket. Each entry gives a classification and evidence.
    resolves conflicts. With one parallel node, two selected transitions
    always come from different regions, so neither source is an ancestor of
    the other. #16's "descendant source wins" rule cannot fire in that domain.
+3. **Callbacks of losing transitions run (observation).** Every selected
+   transition's callback runs during selection against the pre-step context,
+   before conflict removal. A transition that later loses has already run its
+   callback; only its returned patch and effects are discarded. Two regions
+   patching `count` to 10 and 20 from `count: 0` both saw `0`, and the step
+   ended with `count: 20`.
+4. **Targetless reentry plus a parallel-node reentry leaves an orphaned leaf
+   (suspected runtime bug).** Region `A` sits in `a2`, which handles `go`
+   with a targetless `reenter: true`; region `B` handles `go` with
+   `{ target: '#m.P', reenter: true }`. The exit sets do not overlap (the
+   targetless one is empty), so both are kept. The runtime logged
+   `exit B, exit a2, exit A, exit P, enter P, enter a2, enter B` and ended with
+   active ids `m, m.P, m.P.A.a2, m.P.B`: `a2` is active while its region `A`
+   is not. The targetless reentry adds `a2` to the entry set without an exit
+   (statelyai/xstate#5897), and nothing re-enters `A`. The #16 model refuses a
+   targetless reentry in any multi-selection step.
 
 ## Commits
 
