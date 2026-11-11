@@ -3,6 +3,21 @@
 
 datatype Option<T> = None | Some(value: T)
 
+function SeqFilter<T(!new)>(p: T -> bool, xs: seq<T>): seq<T>
+  ensures |SeqFilter(p, xs)| <= |xs|
+  ensures forall x :: x in SeqFilter(p, xs) <==> x in xs && p(x)
+  decreases |xs|
+{
+  if |xs| == 0 then []
+  else (if p(xs[0]) then [xs[0]] else []) + SeqFilter(p, xs[1..])
+}
+
+predicate SeqAll<T>(xs: seq<T>, p: T -> bool)
+  decreases |xs|
+{
+  |xs| == 0 || (p(xs[0]) && SeqAll(xs[1..], p))
+}
+
 datatype PatchEntry = PatchEntry(key: string, value: int)
 
 datatype Event = Event(type_: string, value: int)
@@ -32,6 +47,14 @@ datatype CompoundSnapshot = CompoundSnapshot(path: seq<string>, context: map<str
 datatype Selection = Selection(id: string, node: CompoundNode, evaluation: Evaluation)
 
 datatype CompoundStep = CompoundStep(snapshot: CompoundSnapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>)
+
+datatype ParallelMachine = ParallelMachine(root: string, context: map<string, int>, nodes: map<string, CompoundNode>, order: seq<string>, parallel: Option<string>)
+
+datatype ParallelSnapshot = ParallelSnapshot(active: seq<string>, context: map<string, int>)
+
+datatype ParallelStep = ParallelStep(snapshot: ParallelSnapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>)
+
+datatype ParallelPlan = ParallelPlan(domain: seq<string>, reentered: Option<string>, extra: Option<string>, exits: seq<string>, entries: seq<string>, active: seq<string>)
 
 function mergePatch(context: map<string, int>, patch: seq<PatchEntry>): map<string, int>
   decreases |patch|
@@ -931,4 +954,2441 @@ lemma {:induction false} {:isolate_assertions} CompoundLifecycleWitness(reenter:
     assert compoundTransition(machine, snapshot, Event("reset", 0)).effects ==
       [Effect(4, []), Effect(3, [])];
   }
+}
+
+function below(path: seq<string>, prefix: seq<string>): bool
+{
+  ((|path| > |prefix|) && (commonPrefix(path, prefix) == |prefix|))
+}
+
+lemma below_ensures(path: seq<string>, prefix: seq<string>)
+  ensures (below(path, prefix) ==> (|path| > |prefix|))
+{
+}
+
+function samePath(a: seq<string>, b: seq<string>): bool
+{
+  ((|a| == |b|) && (commonPrefix(a, b) == |a|))
+}
+
+lemma samePath_ensures(a: seq<string>, b: seq<string>)
+  ensures (samePath(a, b) ==> (|a| == |b|))
+{
+}
+
+function completes(nodes: map<string, CompoundNode>, parallel: Option<string>, target: seq<string>, path: seq<string>): bool
+  decreases |path|
+{
+  ((|path| < 2) || (var id := path[0]; (if !((id in nodes)) then false else (var node := lookupNode(nodes, id); (var child := path[1]; (var allowed := ((match parallel { case Some(i_value) => (i_value == id) case None => false }) || (if below(target, node.path) then (child == target[|node.path|]) else (match node.initial { case Some(i_value) => (i_value == child) case None => false }))); (allowed && completes(nodes, parallel, target, path[1..]))))))))
+}
+
+lemma completes_ensures(nodes: map<string, CompoundNode>, parallel: Option<string>, target: seq<string>, path: seq<string>)
+  ensures ((|path| < 2) ==> completes(nodes, parallel, target, path))
+{
+}
+
+function entering(nodes: map<string, CompoundNode>, parallel: Option<string>, target: seq<string>, domain: seq<string>, extra: Option<string>, id: string): bool
+{
+  if !((id in nodes)) then
+    false
+  else
+    ((match extra { case Some(i_value) => (i_value == id) case None => false }) || (var path := lookupNode(nodes, id).path; (below(path, domain) && completes(nodes, parallel, target, path[(if (|domain| == 0) then 0 else (|domain| - 1))..]))))
+}
+
+function exiting(nodes: map<string, CompoundNode>, domain: seq<string>, reentered: Option<string>, id: string): bool
+{
+  if !((id in nodes)) then
+    false
+  else
+    ((match reentered { case Some(i_value) => (i_value == id) case None => false }) || below(lookupNode(nodes, id).path, domain))
+}
+
+function narrow(parallel: Option<string>, target: seq<string>, domain: seq<string>): seq<string>
+{
+  if ((|domain| == 0) || !(below(target, domain))) then
+    domain
+  else
+    if (match parallel { case Some(i_value) => (i_value != domain[(|domain| - 1)]) case None => true }) then
+      domain
+    else
+      target[0..(|domain| + 1)]
+}
+
+function transitionDomain(parallel: Option<string>, source: seq<string>, target: seq<string>, reenter: bool): seq<string>
+{
+  if (commonPrefix(source, target) == |source|) then
+    if reenter then
+      source
+    else
+      narrow(parallel, target, source)
+  else
+    if (|target| == 0) then
+      []
+    else
+      var ancestors := target[0..(|target| - 1)];
+      var lca := commonPrefix(source, ancestors);
+      if reenter then
+        source[0..lca]
+      else
+        narrow(parallel, target, (if (lca == 0) then target[0..1] else source[0..lca]))
+}
+
+function runLifecycle(nodes: map<string, CompoundNode>, path: seq<string>, context: map<string, int>, event: Event, exiting: bool): Applied
+{
+  if !(declaredPath(nodes, path)) then
+    Applied(context, true, [])
+  else
+    lifecycle(nodes, path, context, event, exiting)
+}
+
+function leafSelection(nodes: map<string, CompoundNode>, id: string, base: int, context: map<string, int>, event: Event): Option<Selection>
+{
+  if !((id in nodes)) then
+    None
+  else
+    var node := lookupNode(nodes, id);
+    if (((|node.children| > 0) || (base < 0)) || (base > |node.path|)) then
+      None
+    else
+      var path := node.path[base..];
+      if !(declaredPath(nodes, path)) then
+        None
+      else
+        select(nodes, path, context, event)
+}
+
+function regionSelections(nodes: map<string, CompoundNode>, active: seq<string>, base: int, context: map<string, int>, event: Event): seq<Selection>
+  decreases |active|
+{
+  if (|active| == 0) then
+    []
+  else
+    var first := leafSelection(nodes, active[0], base, context, event);
+    var rest := regionSelections(nodes, active[1..], base, context, event);
+    match first {
+      case Some(i_first_val) =>
+        ([i_first_val] + rest)
+      case None =>
+        rest
+    }
+}
+
+lemma regionSelections_ensures(nodes: map<string, CompoundNode>, active: seq<string>, base: int, context: map<string, int>, event: Event)
+  ensures ((|active| == 0) ==> (|regionSelections(nodes, active, base, context, event)| == 0))
+{
+}
+
+function activeParallel(machine: ParallelMachine, active: seq<string>): seq<string>
+{
+  var parallel := machine.parallel;
+  match parallel {
+    case Some(i_parallel_val) =>
+      if (!((i_parallel_val in active)) || !((i_parallel_val in machine.nodes))) then
+        []
+      else
+        lookupNode(machine.nodes, i_parallel_val).path
+    case None =>
+      []
+  }
+}
+
+function parallelSelections(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): seq<Selection>
+{
+  var parallelPath := activeParallel(machine, snapshot.active);
+  var regions := regionSelections(machine.nodes, snapshot.active, |parallelPath|, snapshot.context, event);
+  if ((|regions| > 0) || !(declaredPath(machine.nodes, parallelPath))) then
+    regions
+  else
+    var fallback := select(machine.nodes, parallelPath, snapshot.context, event);
+    match fallback {
+      case Some(i_fallback_val) =>
+        [i_fallback_val]
+      case None =>
+        []
+    }
+}
+
+function parallelReady(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): bool
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  ((|selections| == 0) || (if (|selections| > 1) then false else (var result := selections[0].evaluation.result; (match result { case Some(i_result_val) => (var target := i_result_val.target; (match target { case Some(i_target_val) => (if !((i_target_val in machine.nodes)) then false else (var targetPath := lookupNode(machine.nodes, i_target_val).path; ((|targetPath| < 2) || !(((match machine.parallel { case Some(i_value) => (i_value == targetPath[(|targetPath| - 2)]) case None => false }) && (i_target_val in snapshot.active)))))) case None => true })) case None => true }))))
+}
+
+function parallelInitialTransition(machine: ParallelMachine, event: Event): ParallelStep
+{
+  var nodes := machine.nodes;
+  var parallel := machine.parallel;
+  var target := (if (machine.root in nodes) then lookupNode(nodes, machine.root).path else []);
+  var entries := SeqFilter((id: string) => entering(nodes, parallel, target, [], None, id), machine.order);
+  var entered := runLifecycle(nodes, entries, machine.context, event, false);
+  ParallelStep(ParallelSnapshot(entries, entered.context), false, entered.reused, entered.effects)
+}
+
+lemma parallelInitialTransition_ensures(machine: ParallelMachine, event: Event)
+  ensures !(parallelInitialTransition(machine, event).snapshotReused)
+{
+}
+
+function parallelPlan(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool): ParallelPlan
+{
+  var nodes := machine.nodes;
+  var parallel := machine.parallel;
+  var sourcePath := (if (source in nodes) then lookupNode(nodes, source).path else []);
+  var targetPath := (if (target in nodes) then lookupNode(nodes, target).path else []);
+  var domain := transitionDomain(parallel, sourcePath, targetPath, reenter);
+  var reentered := (if (reenter && samePath(domain, sourcePath)) then Option.Some(source) else Option.None);
+  var extra := (match reentered { case Some(i_reentered_val) => Option.Some(i_reentered_val) case None => (if (samePath(domain, targetPath) && (target != source)) then Option.Some(target) else Option.None) });
+  var exits := reverse(SeqFilter((id: string) => exiting(nodes, domain, reentered, id), active));
+  var entries := SeqFilter((id: string) => entering(nodes, parallel, targetPath, domain, extra, id), machine.order);
+  var next := SeqFilter((id: string) => (((id in active) && !(exiting(nodes, domain, reentered, id))) || entering(nodes, parallel, targetPath, domain, extra, id)), machine.order);
+  ParallelPlan(domain, reentered, extra, exits, entries, next)
+}
+
+function parallelTransition(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): ParallelStep
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  if (|selections| == 0) then
+    ParallelStep(snapshot, true, true, [])
+  else
+    var selected := selections[0];
+    var nodes := machine.nodes;
+    var result := selected.evaluation.result;
+    var target := (match result { case Some(i_result_val) => i_result_val.target case None => Option.None });
+    var reenter := (match result { case Some(i_result_val) => i_result_val.reenter case None => false });
+    match target {
+      case Some(i_target_val) =>
+        if !((i_target_val in nodes)) then
+          var updated := apply(snapshot.context, selected.evaluation);
+          var entered := runLifecycle(nodes, (if reenter then [selected.id] else []), updated.context, event, false);
+          ParallelStep(ParallelSnapshot(snapshot.active, entered.context), false, (updated.reused && entered.reused), (updated.effects + entered.effects))
+        else
+          var plan := parallelPlan(machine, snapshot.active, selected.id, i_target_val, reenter);
+          var exited := runLifecycle(nodes, plan.exits, snapshot.context, event, true);
+          var updated := apply(exited.context, selected.evaluation);
+          var entered := runLifecycle(nodes, plan.entries, updated.context, event, false);
+          ParallelStep(ParallelSnapshot(plan.active, entered.context), false, ((exited.reused && updated.reused) && entered.reused), ((exited.effects + updated.effects) + entered.effects))
+      case None =>
+        var updated := apply(snapshot.context, selected.evaluation);
+        var entered := runLifecycle(nodes, (if reenter then [selected.id] else []), updated.context, event, false);
+        ParallelStep(ParallelSnapshot(snapshot.active, entered.context), false, (updated.reused && entered.reused), (updated.effects + entered.effects))
+    }
+}
+
+lemma parallelTransition_ensures(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  ensures (parallelTransition(machine, snapshot, event).snapshotReused ==> (parallelTransition(machine, snapshot, event).snapshot == snapshot))
+{
+}
+
+function selectionPlan(machine: ParallelMachine, active: seq<string>, selection: Selection): Option<ParallelPlan>
+{
+  var result := selection.evaluation.result;
+  match result {
+    case Some(i_result_val) =>
+      var target := i_result_val.target;
+      match target {
+        case Some(i_target_val) =>
+          if !((i_target_val in machine.nodes)) then
+            None
+          else
+            Some(parallelPlan(machine, active, selection.id, i_target_val, i_result_val.reenter))
+        case None =>
+          None
+      }
+    case None =>
+      None
+  }
+}
+
+function conflictExits(machine: ParallelMachine, active: seq<string>, selection: Selection): seq<string>
+{
+  var plan := selectionPlan(machine, active, selection);
+  match plan {
+    case Some(i_plan_val) =>
+      i_plan_val.exits
+    case None =>
+      []
+  }
+}
+
+function overlaps(a: seq<string>, b: seq<string>): bool
+{
+  (exists id :: id in a && (id in b))
+}
+
+function preempts(machine: ParallelMachine, active: seq<string>, candidate: Selection, kept: Selection): bool
+{
+  (overlaps(conflictExits(machine, active, candidate), conflictExits(machine, active, kept)) && !(below(candidate.node.path, kept.node.path)))
+}
+
+function anyPreempts(machine: ParallelMachine, active: seq<string>, candidate: Selection, kept: seq<Selection>): bool
+  decreases |kept|
+{
+  if (|kept| == 0) then
+    false
+  else
+    (preempts(machine, active, candidate, kept[0]) || anyPreempts(machine, active, candidate, kept[1..]))
+}
+
+function removeConflicts(machine: ParallelMachine, active: seq<string>, pending: seq<Selection>, kept: seq<Selection>): seq<Selection>
+  decreases |pending|
+{
+  if (|pending| == 0) then
+    kept
+  else
+    var first := pending[0];
+    var rest := pending[1..];
+    if anyPreempts(machine, active, first, kept) then
+      removeConflicts(machine, active, rest, kept)
+    else
+      var exits := conflictExits(machine, active, first);
+      var survivors := SeqFilter((other: Selection) => !(overlaps(exits, conflictExits(machine, active, other))), kept);
+      removeConflicts(machine, active, rest, (survivors + [first]))
+}
+
+function selectionPlans(machine: ParallelMachine, active: seq<string>, selections: seq<Selection>): seq<ParallelPlan>
+  decreases |selections|
+{
+  if (|selections| == 0) then
+    []
+  else
+    var plan := selectionPlan(machine, active, selections[0]);
+    var rest := selectionPlans(machine, active, selections[1..]);
+    match plan {
+      case Some(i_plan_val) =>
+        ([i_plan_val] + rest)
+      case None =>
+        rest
+    }
+}
+
+lemma selectionPlans_ensures(machine: ParallelMachine, active: seq<string>, selections: seq<Selection>)
+  ensures (|selectionPlans(machine, active, selections)| <= |selections|)
+{
+}
+
+function plansExit(plans: seq<ParallelPlan>, id: string): bool
+{
+  (exists plan :: plan in plans && (id in plan.exits))
+}
+
+function plansEnter(plans: seq<ParallelPlan>, id: string): bool
+{
+  (exists plan :: plan in plans && (id in plan.entries))
+}
+
+function applyAll(context: map<string, int>, selections: seq<Selection>): Applied
+  decreases |selections|
+{
+  if (|selections| == 0) then
+    Applied(context, true, [])
+  else
+    var first := apply(context, selections[0].evaluation);
+    var rest := applyAll(first.context, selections[1..]);
+    Applied(rest.context, (first.reused && rest.reused), (first.effects + rest.effects))
+}
+
+lemma applyAll_ensures(context: map<string, int>, selections: seq<Selection>)
+  ensures ((|selections| == 0) ==> (applyAll(context, selections).context == context))
+{
+}
+
+function selectionReady(machine: ParallelMachine, active: seq<string>, selection: Selection): bool
+{
+  var result := selection.evaluation.result;
+  match result {
+    case Some(i_result_val) =>
+      var target := i_result_val.target;
+      match target {
+        case Some(i_target_val) =>
+          if !((i_target_val in machine.nodes)) then
+            false
+          else
+            var targetPath := lookupNode(machine.nodes, i_target_val).path;
+            ((|targetPath| < 2) || !(((match machine.parallel { case Some(i_value) => (i_value == targetPath[(|targetPath| - 2)]) case None => false }) && (i_target_val in active))))
+        case None =>
+          !(i_result_val.reenter)
+      }
+    case None =>
+      true
+  }
+}
+
+function comparable(a: seq<string>, b: seq<string>): bool
+{
+  var shared := commonPrefix(a, b);
+  ((shared == |a|) || (shared == |b|))
+}
+
+function sourceApart(path: seq<string>, selections: seq<Selection>): bool
+  decreases |selections|
+{
+  ((|selections| == 0) || (!(comparable(path, selections[0].node.path)) && sourceApart(path, selections[1..])))
+}
+
+function sourcesApart(selections: seq<Selection>): bool
+  decreases |selections|
+{
+  ((|selections| == 0) || (var first := selections[0]; (var rest := selections[1..]; (sourceApart(first.node.path, rest) && sourcesApart(rest)))))
+}
+
+function domainsApart(plans: seq<ParallelPlan>): bool
+  decreases |plans|
+{
+  ((|plans| == 0) || (var first := plans[0]; (var rest := plans[1..]; (!((exists other :: other in rest && comparable(first.domain, other.domain))) && domainsApart(rest)))))
+}
+
+function multiReady(machine: ParallelMachine, active: seq<string>, selections: seq<Selection>): bool
+{
+  var kept := removeConflicts(machine, active, selections, []);
+  ((SeqAll(selections, (selection: Selection) => selectionReady(machine, active, selection)) && sourcesApart(selections)) && domainsApart(selectionPlans(machine, active, kept)))
+}
+
+function parallelStepReady(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): bool
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  if (|selections| < 2) then
+    parallelReady(machine, snapshot, event)
+  else
+    multiReady(machine, snapshot.active, selections)
+}
+
+function parallelStep(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): ParallelStep
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  if (|selections| < 2) then
+    parallelTransition(machine, snapshot, event)
+  else
+    var nodes := machine.nodes;
+    var active := snapshot.active;
+    var kept := removeConflicts(machine, active, selections, []);
+    var plans := selectionPlans(machine, active, kept);
+    var exits := reverse(SeqFilter((id: string) => plansExit(plans, id), active));
+    var entries := SeqFilter((id: string) => plansEnter(plans, id), machine.order);
+    var next := SeqFilter((id: string) => (((id in active) && !(plansExit(plans, id))) || plansEnter(plans, id)), machine.order);
+    var exited := runLifecycle(nodes, exits, snapshot.context, event, true);
+    var updated := applyAll(exited.context, kept);
+    var entered := runLifecycle(nodes, entries, updated.context, event, false);
+    ParallelStep(ParallelSnapshot(next, entered.context), false, ((exited.reused && updated.reused) && entered.reused), ((exited.effects + updated.effects) + entered.effects))
+}
+
+lemma parallelStep_ensures(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  ensures (parallelStep(machine, snapshot, event).snapshotReused ==> (parallelStep(machine, snapshot, event).snapshot == snapshot))
+{
+}
+
+ghost predicate ParallelNodeShape(machine: ParallelMachine, id: string)
+  requires id in machine.nodes
+{
+  var node := machine.nodes[id];
+  var path := node.path;
+  |path| > 0 && path[0] == machine.root && path[|path| - 1] == id &&
+  (|path| > 1 ==>
+    path[|path| - 2] in machine.nodes &&
+    machine.nodes[path[|path| - 2]].path == path[..|path| - 1] &&
+    id in machine.nodes[path[|path| - 2]].children) &&
+  (forall child :: child in node.children ==>
+    child in machine.nodes && machine.nodes[child].path == path + [child]) &&
+  (if machine.parallel == Some(id) then node.initial == None && |node.children| > 0
+   else (node.initial == None <==> |node.children| == 0) &&
+        (node.initial.Some? ==> node.initial.value in node.children))
+}
+
+ghost predicate ParallelWellFormed(machine: ParallelMachine)
+{
+  machine.root in machine.nodes && machine.nodes[machine.root].path == [machine.root] &&
+  (forall id :: id in machine.nodes ==> ParallelNodeShape(machine, id)) &&
+  (machine.parallel.Some? ==> machine.parallel.value in machine.nodes) &&
+  (forall i, j :: 0 <= i < j < |machine.order| ==> machine.order[i] != machine.order[j]) &&
+  (forall id :: id in machine.order <==> id in machine.nodes)
+}
+
+ghost predicate Subseq(a: seq<string>, b: seq<string>)
+  decreases |b|
+{
+  |a| == 0 || (|b| > 0 && ((a[0] == b[0] && Subseq(a[1..], b[1..])) || Subseq(a, b[1..])))
+}
+
+ghost predicate ChildrenActive(machine: ParallelMachine, active: seq<string>, id: string)
+  requires id in machine.nodes
+{
+  var children := machine.nodes[id].children;
+  if machine.parallel == Some(id) then (forall child :: child in children ==> child in active)
+  else (|children| == 0 ||
+    exists child :: child in children && child in active &&
+      forall other :: other in children && other in active ==> other == child)
+}
+
+ghost predicate ParallelValid(machine: ParallelMachine, active: seq<string>)
+{
+  Subseq(active, machine.order) && machine.root in active &&
+  forall id :: id in active ==>
+    id in machine.nodes &&
+    (|machine.nodes[id].path| > 1 ==>
+      machine.nodes[id].path[|machine.nodes[id].path| - 2] in active) &&
+    ChildrenActive(machine, active, id)
+}
+
+ghost predicate ActiveNodePath(machine: ParallelMachine, active: seq<string>, path: seq<string>)
+{
+  |path| == 0 ||
+  (path[|path| - 1] in machine.nodes && machine.nodes[path[|path| - 1]].path == path &&
+   path[|path| - 1] in active)
+}
+
+ghost predicate Allowed(nodes: map<string, CompoundNode>, parallel: Option<string>,
+                        target: seq<string>, id: string, child: string)
+  requires id in nodes
+{
+  parallel == Some(id) ||
+  (if below(target, nodes[id].path) then child == target[|nodes[id].path|]
+   else nodes[id].initial == Some(child))
+}
+
+lemma {:induction false} FilterSubseq(p: string -> bool, xs: seq<string>)
+  ensures Subseq(SeqFilter(p, xs), xs)
+  decreases |xs|
+{
+  if |xs| > 0 {
+    FilterSubseq(p, xs[1..]);
+    var rest := SeqFilter(p, xs[1..]);
+    if p(xs[0]) {
+      assert SeqFilter(p, xs) == [xs[0]] + rest;
+      assert ([xs[0]] + rest)[1..] == rest;
+    } else {
+      assert SeqFilter(p, xs) == rest;
+    }
+  }
+}
+
+lemma FiltersAreSubsequences(xs: seq<string>)
+  ensures forall p: string -> bool :: Subseq(SeqFilter(p, xs), xs)
+{
+  forall p: string -> bool
+    ensures Subseq(SeqFilter(p, xs), xs)
+  {
+    FilterSubseq(p, xs);
+  }
+}
+
+lemma {:induction false} SubseqTransitive(a: seq<string>, b: seq<string>, c: seq<string>)
+  requires Subseq(a, b) && Subseq(b, c)
+  ensures Subseq(a, c)
+  decreases |c|
+{
+  if |a| > 0 {
+    if b[0] == c[0] && Subseq(b[1..], c[1..]) {
+      if a[0] == b[0] && Subseq(a[1..], b[1..]) {
+        SubseqTransitive(a[1..], b[1..], c[1..]);
+      } else {
+        SubseqTransitive(a, b[1..], c[1..]);
+      }
+    } else {
+      SubseqTransitive(a, b, c[1..]);
+    }
+  }
+}
+
+lemma {:induction false} ReverseSnoc(path: seq<string>, last: string)
+  ensures reverse(path + [last]) == [last] + reverse(path)
+  decreases |path|
+{
+  if |path| == 0 {
+    assert reverse([last]) == reverse([last][1..]) + [last];
+    assert [last][1..] == [];
+  } else {
+    assert (path + [last])[0] == path[0];
+    assert (path + [last])[1..] == path[1..] + [last];
+    ReverseSnoc(path[1..], last);
+  }
+}
+
+lemma {:induction false} ReverseInvolution(path: seq<string>)
+  ensures reverse(reverse(path)) == path
+  decreases |path|
+{
+  if |path| > 0 {
+    ReverseSnoc(reverse(path[1..]), path[0]);
+    ReverseInvolution(path[1..]);
+    assert path == [path[0]] + path[1..];
+  }
+}
+
+lemma {:induction false} ReverseMembers(path: seq<string>)
+  ensures forall x :: x in reverse(path) <==> x in path
+  decreases |path|
+{
+  if |path| > 0 {
+    ReverseMembers(path[1..]);
+    assert path == [path[0]] + path[1..];
+  }
+}
+
+lemma {:induction false} DeclaredMembers(nodes: map<string, CompoundNode>, path: seq<string>)
+  ensures declaredPath(nodes, path) <==> forall x :: x in path ==> x in nodes
+  decreases |path|
+{
+  if |path| > 0 {
+    DeclaredMembers(nodes, path[1..]);
+    assert path == [path[0]] + path[1..];
+  }
+}
+
+lemma {:induction false} CommonPrefixMeaning(a: seq<string>, b: seq<string>)
+  ensures var n := commonPrefix(a, b);
+    0 <= n <= |a| && n <= |b| && a[..n] == b[..n] && (n == |a| || n == |b| || a[n] != b[n])
+  decreases |a|
+{
+  if |a| > 0 && |b| > 0 && a[0] == b[0] {
+    CommonPrefixMeaning(a[1..], b[1..]);
+    var m := commonPrefix(a[1..], b[1..]);
+    assert a[..m + 1] == [a[0]] + a[1..][..m];
+    assert b[..m + 1] == [b[0]] + b[1..][..m];
+  }
+}
+
+lemma CommonPrefixExact(a: seq<string>, b: seq<string>, k: int)
+  requires 0 <= k <= |a| && k <= |b| && a[..k] == b[..k]
+  requires k == |a| || k == |b| || a[k] != b[k]
+  ensures commonPrefix(a, b) == k
+{
+  CommonPrefixMeaning(a, b);
+  var n := commonPrefix(a, b);
+  if n < k {
+    assert a[n] == a[..k][n] && b[n] == b[..k][n];
+  }
+  if n > k {
+    assert a[k] == a[..n][k] && b[k] == b[..n][k];
+  }
+}
+
+lemma BelowMeaning(path: seq<string>, prefix: seq<string>)
+  ensures below(path, prefix) <==> |path| > |prefix| && path[..|prefix|] == prefix
+{
+  CommonPrefixMeaning(path, prefix);
+  if |path| > |prefix| && path[..|prefix|] == prefix {
+    CommonPrefixExact(path, prefix, |prefix|);
+  }
+}
+
+lemma SamePathMeaning(a: seq<string>, b: seq<string>)
+  ensures samePath(a, b) <==> a == b
+{
+  CommonPrefixMeaning(a, b);
+  if a == b {
+    CommonPrefixExact(a, b, |a|);
+  }
+}
+
+lemma BelowChild(parent: seq<string>, child: string, domain: seq<string>)
+  ensures below(parent + [child], domain) <==> below(parent, domain) || parent == domain
+{
+  BelowMeaning(parent + [child], domain);
+  BelowMeaning(parent, domain);
+  if |parent| >= |domain| {
+    assert (parent + [child])[..|domain|] == parent[..|domain|];
+  }
+}
+
+lemma {:induction false} CompletesSnoc(nodes: map<string, CompoundNode>, parallel: Option<string>,
+                                       target: seq<string>, path: seq<string>, child: string)
+  requires |path| > 0
+  ensures completes(nodes, parallel, target, path + [child]) <==>
+    completes(nodes, parallel, target, path) && path[|path| - 1] in nodes &&
+    Allowed(nodes, parallel, target, path[|path| - 1], child)
+  decreases |path|
+{
+  if |path| == 1 {
+    assert (path + [child])[1..] == [child];
+  } else {
+    assert (path + [child])[1..] == path[1..] + [child];
+    CompletesSnoc(nodes, parallel, target, path[1..], child);
+    assert path[1..][|path| - 2] == path[|path| - 1];
+  }
+}
+
+lemma {:induction false} PathPrefixes(machine: ParallelMachine, id: string, i: int)
+  requires ParallelWellFormed(machine) && id in machine.nodes
+  requires 0 < i <= |machine.nodes[id].path|
+  ensures machine.nodes[id].path[i - 1] in machine.nodes
+  ensures machine.nodes[machine.nodes[id].path[i - 1]].path == machine.nodes[id].path[..i]
+  decreases |machine.nodes[id].path|
+{
+  var path := machine.nodes[id].path;
+  assert ParallelNodeShape(machine, id);
+  if i < |path| {
+    var parent := path[|path| - 2];
+    PathPrefixes(machine, parent, i);
+    assert machine.nodes[parent].path[i - 1] == path[i - 1];
+    assert machine.nodes[parent].path[..i] == path[..i];
+  } else {
+    assert path[..i] == path;
+  }
+}
+
+lemma {:induction false} AncestorsActive(machine: ParallelMachine, active: seq<string>, id: string, i: int)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active) && id in active
+  requires 0 <= i < |machine.nodes[id].path|
+  ensures machine.nodes[id].path[i] in active
+  decreases |machine.nodes[id].path|
+{
+  var path := machine.nodes[id].path;
+  assert ParallelNodeShape(machine, id);
+  if i < |path| - 1 {
+    var parent := path[|path| - 2];
+    AncestorsActive(machine, active, parent, i);
+  }
+}
+
+lemma {:induction false} SelectSource(nodes: map<string, CompoundNode>, path: seq<string>,
+                                      context: map<string, int>, event: Event)
+  requires declaredPath(nodes, path)
+  ensures var selected := select(nodes, path, context, event);
+    selected.Some? ==> selected.value.id in path
+  decreases |path|
+{
+  if |path| > 0 {
+    DeclaredMembers(nodes, path);
+    DeclaredMembers(nodes, path[..|path| - 1]);
+    SelectSource(nodes, path[..|path| - 1], context, event);
+  }
+}
+
+lemma {:induction false} RegionSourcesActive(machine: ParallelMachine, active: seq<string>, ids: seq<string>,
+                                             base: int, context: map<string, int>, event: Event)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires forall id :: id in ids ==> id in active
+  ensures forall selected :: selected in regionSelections(machine.nodes, ids, base, context, event) ==>
+    selected.id in active
+  decreases |ids|
+{
+  if |ids| > 0 {
+    RegionSourcesActive(machine, active, ids[1..], base, context, event);
+    var id := ids[0];
+    var node := machine.nodes[id];
+    if |node.children| == 0 && 0 <= base <= |node.path| {
+      var path := node.path[base..];
+      if declaredPath(machine.nodes, path) {
+        SelectSource(machine.nodes, path, context, event);
+        var selected := select(machine.nodes, path, context, event);
+        if selected.Some? {
+          var j :| 0 <= j < |path| && path[j] == selected.value.id;
+          AncestorsActive(machine, active, id, base + j);
+        }
+      }
+    }
+  }
+}
+
+lemma SelectionSourcesActive(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, snapshot.active)
+  ensures forall selected :: selected in parallelSelections(machine, snapshot, event) ==>
+    selected.id in snapshot.active
+{
+  var parallelPath := activeParallel(machine, snapshot.active);
+  RegionSourcesActive(machine, snapshot.active, snapshot.active, |parallelPath|, snapshot.context, event);
+  if machine.parallel.Some? && machine.parallel.value in snapshot.active && declaredPath(machine.nodes, parallelPath) {
+    SelectSource(machine.nodes, parallelPath, snapshot.context, event);
+    var fallback := select(machine.nodes, parallelPath, snapshot.context, event);
+    if fallback.Some? {
+      var j :| 0 <= j < |parallelPath| && parallelPath[j] == fallback.value.id;
+      AncestorsActive(machine, snapshot.active, machine.parallel.value, j);
+    }
+  }
+}
+
+lemma NarrowActive(machine: ParallelMachine, active: seq<string>, target: string, domain: seq<string>)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active) && target in machine.nodes
+  requires ActiveNodePath(machine, active, domain)
+  ensures ActiveNodePath(machine, active, narrow(machine.parallel, machine.nodes[target].path, domain))
+{
+  var path := machine.nodes[target].path;
+  if |domain| > 0 && below(path, domain) && machine.parallel == Some(domain[|domain| - 1]) {
+    var k := |domain|;
+    var parallel := domain[k - 1];
+    BelowMeaning(path, domain);
+    PathPrefixes(machine, target, k + 1);
+    var region := path[k];
+    assert ParallelNodeShape(machine, region);
+    assert machine.nodes[region].path == path[..k + 1];
+    assert path[..k + 1][k - 1] == domain[k - 1];
+    assert region in machine.nodes[parallel].children;
+    assert ChildrenActive(machine, active, parallel);
+    assert path[0..k + 1] == path[..k + 1];
+  }
+}
+
+lemma DomainActive(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source in active && target in machine.nodes
+  ensures ActiveNodePath(machine, active,
+    transitionDomain(machine.parallel, machine.nodes[source].path, machine.nodes[target].path, reenter))
+{
+  var sourcePath := machine.nodes[source].path;
+  var targetPath := machine.nodes[target].path;
+  assert ParallelNodeShape(machine, source);
+  assert ParallelNodeShape(machine, target);
+  assert ParallelNodeShape(machine, machine.root);
+  assert ActiveNodePath(machine, active, sourcePath);
+  var domain := transitionDomain(machine.parallel, sourcePath, targetPath, reenter);
+  if commonPrefix(sourcePath, targetPath) == |sourcePath| {
+    if !reenter {
+      assert domain == narrow(machine.parallel, targetPath, sourcePath);
+      NarrowActive(machine, active, target, sourcePath);
+    }
+  } else {
+    var ancestors := targetPath[0..|targetPath| - 1];
+    var lca := commonPrefix(sourcePath, ancestors);
+    CommonPrefixMeaning(sourcePath, ancestors);
+    if lca > 0 {
+      PathPrefixes(machine, source, lca);
+      AncestorsActive(machine, active, source, lca - 1);
+      assert sourcePath[0..lca] == sourcePath[..lca];
+      assert ActiveNodePath(machine, active, sourcePath[0..lca]);
+      if !reenter {
+        assert domain == narrow(machine.parallel, targetPath, sourcePath[0..lca]);
+        NarrowActive(machine, active, target, sourcePath[0..lca]);
+      }
+    } else if !reenter {
+      assert targetPath[0..1] == [machine.root];
+      assert ActiveNodePath(machine, active, [machine.root]);
+      assert domain == narrow(machine.parallel, targetPath, targetPath[0..1]);
+      NarrowActive(machine, active, target, targetPath[0..1]);
+    }
+  }
+}
+
+lemma KnownSource(machine: ParallelMachine, active: seq<string>, source: string)
+  requires ParallelValid(machine, active) && source in active
+  ensures source in machine.nodes
+{
+}
+
+ghost predicate PlanDomainFacts(machine: ParallelMachine, active: seq<string>, source: string, target: string,
+                                reenter: bool, plan: ParallelPlan)
+  requires source in machine.nodes && target in machine.nodes
+{
+  var nodes := machine.nodes;
+  plan.domain == transitionDomain(machine.parallel, nodes[source].path, nodes[target].path, reenter) &&
+  ActiveNodePath(machine, active, plan.domain) &&
+  (plan.reentered.Some? ==> plan.reentered.value == source && nodes[source].path == plan.domain) &&
+  (plan.reentered.Some? ==> plan.extra == plan.reentered) &&
+  (!reenter ==> plan.reentered.None?) &&
+  (plan.extra.Some? ==>
+    (plan.extra.value in nodes && plan.extra.value in active && nodes[plan.extra.value].path == plan.domain))
+}
+
+ghost predicate PlanMemberFacts(machine: ParallelMachine, active: seq<string>, target: string, plan: ParallelPlan)
+  requires target in machine.nodes
+{
+  var nodes := machine.nodes;
+  var targetPath := nodes[target].path;
+  (forall id :: id in plan.active <==>
+    (id in nodes &&
+     ((id in active && !exiting(nodes, plan.domain, plan.reentered, id)) ||
+      entering(nodes, machine.parallel, targetPath, plan.domain, plan.extra, id)))) &&
+  (forall id :: id in plan.exits <==> id in active && exiting(nodes, plan.domain, plan.reentered, id)) &&
+  (forall id :: id in plan.entries <==>
+    entering(nodes, machine.parallel, targetPath, plan.domain, plan.extra, id))
+}
+
+ghost predicate PlanOrderFacts(machine: ParallelMachine, active: seq<string>, plan: ParallelPlan)
+{
+  Subseq(plan.active, machine.order) && Subseq(plan.entries, machine.order) &&
+  Subseq(reverse(plan.exits), active)
+}
+
+lemma PlanDomain(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source in active && target in machine.nodes
+  ensures PlanDomainFacts(machine, active, source, target, reenter,
+    parallelPlan(machine, active, source, target, reenter))
+{
+  var plan := parallelPlan(machine, active, source, target, reenter);
+  DomainActive(machine, active, source, target, reenter);
+  SamePathMeaning(plan.domain, machine.nodes[source].path);
+  SamePathMeaning(plan.domain, machine.nodes[target].path);
+  assert ParallelNodeShape(machine, source);
+  assert ParallelNodeShape(machine, target);
+}
+
+lemma PlanMembers(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source in active && target in machine.nodes
+  ensures PlanMemberFacts(machine, active, target, parallelPlan(machine, active, source, target, reenter))
+{
+  var nodes := machine.nodes;
+  var plan := parallelPlan(machine, active, source, target, reenter);
+  var kept := SeqFilter((id: string) => exiting(nodes, plan.domain, plan.reentered, id), active);
+  assert plan.exits == reverse(kept);
+}
+
+lemma PlanNextOrder(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
+  ensures Subseq(parallelPlan(machine, active, source, target, reenter).active, machine.order)
+{
+  FiltersAreSubsequences(machine.order);
+}
+
+lemma PlanEntryOrder(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
+  ensures Subseq(parallelPlan(machine, active, source, target, reenter).entries, machine.order)
+{
+  FiltersAreSubsequences(machine.order);
+}
+
+lemma PlanExitOrder(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
+  ensures Subseq(reverse(parallelPlan(machine, active, source, target, reenter).exits), active)
+{
+  var plan := parallelPlan(machine, active, source, target, reenter);
+  var kept := SeqFilter((id: string) => exiting(machine.nodes, plan.domain, plan.reentered, id), active);
+  assert plan.exits == reverse(kept);
+  ReverseInvolution(kept);
+  FilterSubseq((id: string) => exiting(machine.nodes, plan.domain, plan.reentered, id), active);
+}
+
+lemma PlanOrders(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
+  ensures PlanOrderFacts(machine, active, parallelPlan(machine, active, source, target, reenter))
+{
+  PlanNextOrder(machine, active, source, target, reenter);
+  PlanEntryOrder(machine, active, source, target, reenter);
+  PlanExitOrder(machine, active, source, target, reenter);
+}
+
+ghost predicate PlanFacts(machine: ParallelMachine, active: seq<string>, source: string, target: string,
+                          reenter: bool, plan: ParallelPlan)
+  requires source in machine.nodes && target in machine.nodes
+{
+  PlanDomainFacts(machine, active, source, target, reenter, plan) &&
+  PlanMemberFacts(machine, active, target, plan) && PlanOrderFacts(machine, active, plan)
+}
+
+lemma PlanContext(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source in active && target in machine.nodes
+  ensures PlanFacts(machine, active, source, target, reenter,
+    parallelPlan(machine, active, source, target, reenter))
+{
+  PlanDomain(machine, active, source, target, reenter);
+  PlanMembers(machine, active, source, target, reenter);
+  PlanOrders(machine, active, source, target, reenter);
+}
+
+ghost function DomainStart(domain: seq<string>): int
+{
+  if |domain| == 0 then 0 else |domain| - 1
+}
+
+ghost predicate ActiveClosed(machine: ParallelMachine, active: seq<string>)
+{
+  forall id :: id in active ==>
+    id in machine.nodes &&
+    (|machine.nodes[id].path| > 1 ==>
+      machine.nodes[id].path[|machine.nodes[id].path| - 2] in active) &&
+    ChildrenActive(machine, active, id)
+}
+
+ghost predicate NextShape(machine: ParallelMachine, active: seq<string>, next: seq<string>,
+                          target: string, domain: seq<string>)
+  requires target in machine.nodes
+{
+  var nodes := machine.nodes;
+  var targetPath := nodes[target].path;
+  ActiveNodePath(machine, active, domain) &&
+  (forall id :: id in next ==> id in nodes) &&
+  (forall id :: id in nodes && below(nodes[id].path, domain) ==>
+    (id in next <==> completes(nodes, machine.parallel, targetPath, nodes[id].path[DomainStart(domain)..]))) &&
+  (forall id :: id in nodes && nodes[id].path == domain ==> id in next) &&
+  (forall id :: id in nodes && !below(nodes[id].path, domain) && nodes[id].path != domain ==>
+    (id in next <==> id in active))
+}
+
+lemma PathEnds(machine: ParallelMachine, id: string)
+  requires ParallelWellFormed(machine) && id in machine.nodes
+  ensures |machine.nodes[id].path| > 0 && machine.nodes[id].path[|machine.nodes[id].path| - 1] == id
+{
+  assert ParallelNodeShape(machine, id);
+}
+
+lemma PlanShape(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source in active && target in machine.nodes
+  ensures NextShape(machine, active, parallelPlan(machine, active, source, target, reenter).active,
+    target, parallelPlan(machine, active, source, target, reenter).domain)
+{
+  hide *;
+  reveal PlanFacts(), PlanDomainFacts(), PlanMemberFacts(), NextShape(), ActiveNodePath(), exiting(), entering();
+  reveal DomainStart(), below();
+  var nodes := machine.nodes;
+  var plan := parallelPlan(machine, active, source, target, reenter);
+  var domain := plan.domain;
+  var targetPath := nodes[target].path;
+  KnownSource(machine, active, source);
+  PlanContext(machine, active, source, target, reenter);
+  forall id | id in nodes && nodes[id].path == domain
+    ensures id in plan.active
+  {
+    PathEnds(machine, id);
+    BelowMeaning(nodes[id].path, domain);
+    if plan.reentered.Some? {
+      PathEnds(machine, source);
+      assert entering(nodes, machine.parallel, targetPath, domain, plan.extra, id);
+    } else {
+      assert !exiting(nodes, domain, plan.reentered, id);
+    }
+  }
+  forall id | id in nodes && below(nodes[id].path, domain)
+    ensures id in plan.active <==>
+      completes(nodes, machine.parallel, targetPath, nodes[id].path[DomainStart(domain)..])
+  {
+    BelowMeaning(nodes[id].path, domain);
+    assert exiting(nodes, domain, plan.reentered, id);
+    assert plan.extra != Some(id);
+  }
+  forall id | id in nodes && !below(nodes[id].path, domain) && nodes[id].path != domain
+    ensures id in plan.active <==> id in active
+  {
+    assert plan.reentered != Some(id);
+    assert plan.extra != Some(id);
+    assert !exiting(nodes, domain, plan.reentered, id);
+    assert !entering(nodes, machine.parallel, targetPath, domain, plan.extra, id);
+  }
+}
+
+lemma InitialShape(machine: ParallelMachine, event: Event)
+  requires ParallelWellFormed(machine)
+  ensures NextShape(machine, [], parallelInitialTransition(machine, event).snapshot.active, machine.root, [])
+{
+  var nodes := machine.nodes;
+  var entries := parallelInitialTransition(machine, event).snapshot.active;
+  forall id | id in nodes
+    ensures id in entries <==> completes(nodes, machine.parallel, [machine.root], nodes[id].path)
+  {
+    assert ParallelNodeShape(machine, id);
+    BelowMeaning(nodes[id].path, []);
+    assert nodes[id].path[0..] == nodes[id].path;
+  }
+  forall id | id in nodes ensures below(nodes[id].path, [])
+  {
+    assert ParallelNodeShape(machine, id);
+    BelowMeaning(nodes[id].path, []);
+  }
+}
+
+lemma AllowedChildren(machine: ParallelMachine, next: seq<string>, target: string, id: string)
+  requires ParallelWellFormed(machine) && target in machine.nodes && id in machine.nodes
+  requires forall child :: child in machine.nodes[id].children ==>
+    (child in next <==> Allowed(machine.nodes, machine.parallel, machine.nodes[target].path, id, child))
+  ensures ChildrenActive(machine, next, id)
+{
+  var nodes := machine.nodes;
+  var path := nodes[id].path;
+  var targetPath := nodes[target].path;
+  var children := nodes[id].children;
+  assert ParallelNodeShape(machine, id);
+  if machine.parallel != Some(id) && |children| > 0 {
+    var chosen;
+    if below(targetPath, path) {
+      BelowMeaning(targetPath, path);
+      PathPrefixes(machine, target, |path| + 1);
+      chosen := targetPath[|path|];
+      assert ParallelNodeShape(machine, chosen);
+      assert nodes[chosen].path == targetPath[..|path| + 1];
+      assert targetPath[..|path| + 1][|path| - 1] == path[|path| - 1];
+      assert chosen in children;
+    } else {
+      chosen := nodes[id].initial.value;
+    }
+    assert chosen in next;
+    assert forall other :: other in children && other in next ==> other == chosen;
+  }
+}
+
+lemma ShapeAt(machine: ParallelMachine, active: seq<string>, next: seq<string>,
+               target: string, domain: seq<string>, id: string)
+  requires target in machine.nodes && id in machine.nodes
+  requires NextShape(machine, active, next, target, domain)
+  ensures below(machine.nodes[id].path, domain) ==>
+    (id in next <==> completes(machine.nodes, machine.parallel, machine.nodes[target].path,
+      machine.nodes[id].path[DomainStart(domain)..]))
+  ensures machine.nodes[id].path == domain ==> id in next
+  ensures !below(machine.nodes[id].path, domain) && machine.nodes[id].path != domain ==>
+    (id in next <==> id in active)
+{
+}
+
+lemma ShapeChildrenInside(machine: ParallelMachine, active: seq<string>, next: seq<string>,
+                          target: string, domain: seq<string>, id: string)
+  requires ParallelWellFormed(machine) && target in machine.nodes && id in machine.nodes
+  requires NextShape(machine, active, next, target, domain) && id in next
+  requires below(machine.nodes[id].path, domain) || machine.nodes[id].path == domain
+  ensures ChildrenActive(machine, next, id)
+{
+  var nodes := machine.nodes;
+  var path := nodes[id].path;
+  var targetPath := nodes[target].path;
+  var children := nodes[id].children;
+  assert ParallelNodeShape(machine, id);
+  BelowMeaning(path, domain);
+  ShapeAt(machine, active, next, target, domain, id);
+  var start := DomainStart(domain);
+  var tail := path[start..];
+  assert |tail| > 0 && tail[|tail| - 1] == id;
+  if path == domain {
+    completes_ensures(nodes, machine.parallel, targetPath, tail);
+  }
+  assert completes(nodes, machine.parallel, targetPath, tail);
+  forall child | child in children
+    ensures child in next <==> Allowed(nodes, machine.parallel, targetPath, id, child)
+  {
+    BelowChild(path, child, domain);
+    assert child in nodes && nodes[child].path == path + [child];
+    ShapeAt(machine, active, next, target, domain, child);
+    assert (path + [child])[start..] == tail + [child];
+    CompletesSnoc(nodes, machine.parallel, targetPath, tail, child);
+  }
+  AllowedChildren(machine, next, target, id);
+}
+
+lemma ShapeChildrenOutside(machine: ParallelMachine, active: seq<string>, next: seq<string>,
+                           target: string, domain: seq<string>, id: string)
+  requires ParallelWellFormed(machine) && target in machine.nodes && id in machine.nodes
+  requires NextShape(machine, active, next, target, domain)
+  requires id in active && ChildrenActive(machine, active, id)
+  requires !below(machine.nodes[id].path, domain) && machine.nodes[id].path != domain
+  ensures ChildrenActive(machine, next, id)
+{
+  var nodes := machine.nodes;
+  var path := nodes[id].path;
+  var children := nodes[id].children;
+  assert ParallelNodeShape(machine, id);
+  forall child | child in children
+    ensures child in next <==> child in active
+  {
+    BelowChild(path, child, domain);
+    assert child in nodes && nodes[child].path == path + [child];
+    ShapeAt(machine, active, next, target, domain, child);
+    if path + [child] == domain {
+      assert domain[|domain| - 1] == child;
+    }
+  }
+  if machine.parallel != Some(id) && |children| > 0 {
+    var chosen :| chosen in children && chosen in active &&
+      forall other :: other in children && other in active ==> other == chosen;
+    assert chosen in next;
+  }
+}
+
+lemma ShapeChildren(machine: ParallelMachine, active: seq<string>, next: seq<string>,
+                    target: string, domain: seq<string>, id: string)
+  requires ParallelWellFormed(machine) && ActiveClosed(machine, active) && target in machine.nodes
+  requires NextShape(machine, active, next, target, domain) && id in next
+  ensures ChildrenActive(machine, next, id)
+{
+  var path := machine.nodes[id].path;
+  if below(path, domain) || path == domain {
+    ShapeChildrenInside(machine, active, next, target, domain, id);
+  } else {
+    ShapeAt(machine, active, next, target, domain, id);
+    ShapeChildrenOutside(machine, active, next, target, domain, id);
+  }
+}
+
+lemma ShapeParentInside(machine: ParallelMachine, active: seq<string>, next: seq<string>,
+                        target: string, domain: seq<string>, id: string)
+  requires ParallelWellFormed(machine) && target in machine.nodes && id in machine.nodes
+  requires NextShape(machine, active, next, target, domain) && id in next
+  requires |machine.nodes[id].path| > 1 && below(machine.nodes[id].path, domain)
+  ensures machine.nodes[id].path[|machine.nodes[id].path| - 2] in next
+{
+  var nodes := machine.nodes;
+  var path := nodes[id].path;
+  var targetPath := nodes[target].path;
+  assert ParallelNodeShape(machine, id);
+  var parent := path[|path| - 2];
+  var parentPath := path[..|path| - 1];
+  assert parent in nodes && nodes[parent].path == parentPath;
+  assert path == parentPath + [id];
+  BelowChild(parentPath, id, domain);
+  ShapeAt(machine, active, next, target, domain, id);
+  ShapeAt(machine, active, next, target, domain, parent);
+  if below(parentPath, domain) {
+    BelowMeaning(parentPath, domain);
+    var start := DomainStart(domain);
+    assert path[start..] == parentPath[start..] + [id];
+    CompletesSnoc(nodes, machine.parallel, targetPath, parentPath[start..], id);
+  }
+}
+
+lemma ShapeParentOutside(machine: ParallelMachine, active: seq<string>, next: seq<string>,
+                         target: string, domain: seq<string>, id: string)
+  requires ParallelWellFormed(machine) && target in machine.nodes && id in machine.nodes
+  requires NextShape(machine, active, next, target, domain)
+  requires |machine.nodes[id].path| > 1 && !below(machine.nodes[id].path, domain)
+  requires machine.nodes[id].path[|machine.nodes[id].path| - 2] in active
+  ensures machine.nodes[id].path[|machine.nodes[id].path| - 2] in next
+{
+  var nodes := machine.nodes;
+  var path := nodes[id].path;
+  assert ParallelNodeShape(machine, id);
+  var parent := path[|path| - 2];
+  var parentPath := path[..|path| - 1];
+  assert parent in nodes && nodes[parent].path == parentPath;
+  assert path == parentPath + [id];
+  BelowChild(parentPath, id, domain);
+  ShapeAt(machine, active, next, target, domain, parent);
+}
+
+lemma ShapeParent(machine: ParallelMachine, active: seq<string>, next: seq<string>,
+                  target: string, domain: seq<string>, id: string)
+  requires ParallelWellFormed(machine) && ActiveClosed(machine, active) && target in machine.nodes
+  requires NextShape(machine, active, next, target, domain) && id in next
+  requires |machine.nodes[id].path| > 1
+  ensures machine.nodes[id].path[|machine.nodes[id].path| - 2] in next
+{
+  var path := machine.nodes[id].path;
+  if below(path, domain) {
+    ShapeParentInside(machine, active, next, target, domain, id);
+  } else {
+    ShapeAt(machine, active, next, target, domain, id);
+    if path == domain {
+      assert ParallelNodeShape(machine, id);
+      assert domain[|domain| - 1] == id;
+    }
+    assert id in active;
+    ShapeParentOutside(machine, active, next, target, domain, id);
+  }
+}
+
+lemma ShapeRoot(machine: ParallelMachine, active: seq<string>, next: seq<string>,
+                target: string, domain: seq<string>)
+  requires ParallelWellFormed(machine) && target in machine.nodes
+  requires NextShape(machine, active, next, target, domain)
+  requires machine.root in active || domain == []
+  ensures machine.root in next
+{
+  var nodes := machine.nodes;
+  BelowMeaning([machine.root], domain);
+  if below([machine.root], domain) {
+    completes_ensures(nodes, machine.parallel, nodes[target].path, [machine.root][DomainStart(domain)..]);
+  }
+}
+
+lemma ShapeValid(machine: ParallelMachine, active: seq<string>, next: seq<string>,
+                 target: string, domain: seq<string>)
+  requires ParallelWellFormed(machine) && ActiveClosed(machine, active) && target in machine.nodes
+  requires NextShape(machine, active, next, target, domain)
+  requires machine.root in active || domain == []
+  requires Subseq(next, machine.order)
+  ensures ParallelValid(machine, next)
+{
+  ShapeRoot(machine, active, next, target, domain);
+  forall id | id in next
+    ensures id in machine.nodes &&
+      (|machine.nodes[id].path| > 1 ==> machine.nodes[id].path[|machine.nodes[id].path| - 2] in next) &&
+      ChildrenActive(machine, next, id)
+  {
+    ShapeChildren(machine, active, next, target, domain, id);
+    if |machine.nodes[id].path| > 1 {
+      ShapeParent(machine, active, next, target, domain, id);
+    }
+  }
+}
+
+lemma ParallelInitialValid(machine: ParallelMachine, event: Event)
+  requires ParallelWellFormed(machine)
+  ensures ParallelValid(machine, parallelInitialTransition(machine, event).snapshot.active)
+{
+  InitialShape(machine, event);
+  FiltersAreSubsequences(machine.order);
+  ShapeValid(machine, [], parallelInitialTransition(machine, event).snapshot.active, machine.root, []);
+}
+
+lemma PlanValid(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source in active && target in machine.nodes
+  ensures ParallelValid(machine, parallelPlan(machine, active, source, target, reenter).active)
+{
+  var plan := parallelPlan(machine, active, source, target, reenter);
+  PlanShape(machine, active, source, target, reenter);
+  PlanNextOrder(machine, active, source, target, reenter);
+  ShapeValid(machine, active, plan.active, target, plan.domain);
+}
+
+lemma ParallelStepValid(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, snapshot.active)
+  ensures ParallelValid(machine, parallelTransition(machine, snapshot, event).snapshot.active)
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  if |selections| > 0 {
+    SelectionSourcesActive(machine, snapshot, event);
+    var selected := selections[0];
+    var result := selected.evaluation.result;
+    if result.Some? && result.value.target.Some? && result.value.target.value in machine.nodes {
+      PlanValid(machine, snapshot.active, selected.id, result.value.target.value, result.value.reenter);
+    }
+  }
+}
+
+lemma ParallelLifecycleOrder(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  ensures Subseq(parallelPlan(machine, active, source, target, reenter).entries, machine.order)
+  ensures Subseq(reverse(parallelPlan(machine, active, source, target, reenter).exits), machine.order)
+{
+  var plan := parallelPlan(machine, active, source, target, reenter);
+  PlanEntryOrder(machine, active, source, target, reenter);
+  PlanExitOrder(machine, active, source, target, reenter);
+  SubseqTransitive(reverse(plan.exits), active, machine.order);
+}
+
+lemma PlanPreservesOutsideDomain(machine: ParallelMachine, active: seq<string>, source: string, target: string,
+                                 reenter: bool, id: string)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source in active && target in machine.nodes && id in active
+  requires !below(machine.nodes[id].path, parallelPlan(machine, active, source, target, reenter).domain)
+  requires parallelPlan(machine, active, source, target, reenter).reentered != Some(id)
+  ensures id in parallelPlan(machine, active, source, target, reenter).active
+  ensures id !in parallelPlan(machine, active, source, target, reenter).exits
+{
+  var plan := parallelPlan(machine, active, source, target, reenter);
+  PlanContext(machine, active, source, target, reenter);
+  assert PlanMemberFacts(machine, active, target, plan);
+  assert !exiting(machine.nodes, plan.domain, plan.reentered, id);
+}
+
+ghost predicate InRegion(path: seq<string>, region: seq<string>)
+{
+  |path| >= |region| && path[..|region|] == region
+}
+
+lemma CrossRegionDomain(parallelPath: seq<string>, sourcePath: seq<string>, targetPath: seq<string>)
+  requires |parallelPath| > 0
+  requires below(sourcePath, parallelPath) && below(targetPath, parallelPath)
+  requires sourcePath[|parallelPath|] != targetPath[|parallelPath|]
+  ensures commonPrefix(sourcePath, targetPath) != |sourcePath|
+  ensures commonPrefix(sourcePath, targetPath[0..|targetPath| - 1]) == |parallelPath|
+{
+  var k := |parallelPath|;
+  BelowMeaning(sourcePath, parallelPath);
+  BelowMeaning(targetPath, parallelPath);
+  CommonPrefixExact(sourcePath, targetPath, k);
+  var ancestors := targetPath[0..|targetPath| - 1];
+  assert ancestors[..k] == parallelPath;
+  CommonPrefixExact(sourcePath, ancestors, k);
+}
+
+lemma CrossDomain(machine: ParallelMachine, source: string, target: string, parallel: string)
+  requires ParallelWellFormed(machine) && source in machine.nodes && target in machine.nodes
+  requires machine.parallel == Some(parallel)
+  requires below(machine.nodes[source].path, machine.nodes[parallel].path)
+  requires below(machine.nodes[target].path, machine.nodes[parallel].path)
+  requires machine.nodes[source].path[|machine.nodes[parallel].path|] !=
+    machine.nodes[target].path[|machine.nodes[parallel].path|]
+  ensures transitionDomain(machine.parallel, machine.nodes[source].path, machine.nodes[target].path, false) ==
+    machine.nodes[target].path[..|machine.nodes[parallel].path| + 1]
+  ensures transitionDomain(machine.parallel, machine.nodes[source].path, machine.nodes[target].path, true) ==
+    machine.nodes[parallel].path
+{
+  hide *;
+  reveal transitionDomain, narrow;
+  assert parallel in machine.nodes by { reveal ParallelWellFormed; }
+  var parallelPath := machine.nodes[parallel].path;
+  var sourcePath := machine.nodes[source].path;
+  var targetPath := machine.nodes[target].path;
+  var depth := |parallelPath|;
+  PathEnds(machine, parallel);
+  BelowMeaning(sourcePath, parallelPath);
+  BelowMeaning(targetPath, parallelPath);
+  CrossRegionDomain(parallelPath, sourcePath, targetPath);
+  assert sourcePath[0..depth] == parallelPath;
+  assert narrow(machine.parallel, targetPath, parallelPath) == targetPath[0..depth + 1];
+}
+
+lemma KnownNodes(machine: ParallelMachine, active: seq<string>, source: string, parallel: string)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source in active && machine.parallel == Some(parallel)
+  ensures source in machine.nodes && parallel in machine.nodes
+{
+}
+
+lemma CrossRegionNarrows(machine: ParallelMachine, active: seq<string>, source: string, target: string, parallel: string)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source in active && target in machine.nodes
+  requires machine.parallel == Some(parallel)
+  requires below(machine.nodes[source].path, machine.nodes[parallel].path)
+  requires below(machine.nodes[target].path, machine.nodes[parallel].path)
+  requires machine.nodes[source].path[|machine.nodes[parallel].path|] !=
+    machine.nodes[target].path[|machine.nodes[parallel].path|]
+  ensures var plan := parallelPlan(machine, active, source, target, false);
+    var regionDepth := |machine.nodes[parallel].path| + 1;
+    plan.domain == machine.nodes[target].path[..regionDepth] &&
+    forall id ::
+      (id in active && id in machine.nodes &&
+       InRegion(machine.nodes[id].path, machine.nodes[source].path[..regionDepth])) ==>
+        id in plan.active && id !in plan.exits
+{
+  hide *;
+  reveal InRegion(), PlanDomainFacts(), below();
+  KnownNodes(machine, active, source, parallel);
+  var nodes := machine.nodes;
+  var depth := |nodes[parallel].path|;
+  var sourcePath := nodes[source].path;
+  var plan := parallelPlan(machine, active, source, target, false);
+  CrossDomain(machine, source, target, parallel);
+  PlanDomain(machine, active, source, target, false);
+  assert plan.domain == nodes[target].path[..depth + 1];
+  forall id | id in active && id in nodes && InRegion(nodes[id].path, sourcePath[..depth + 1])
+    ensures id in plan.active && id !in plan.exits
+  {
+    BelowMeaning(nodes[id].path, plan.domain);
+    assert nodes[id].path[depth] == sourcePath[depth];
+    PlanPreservesOutsideDomain(machine, active, source, target, false, id);
+  }
+}
+
+lemma ParallelSourceNarrows(machine: ParallelMachine, active: seq<string>, target: string, parallel: string)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires parallel in active && target in machine.nodes
+  requires machine.parallel == Some(parallel)
+  requires below(machine.nodes[target].path, machine.nodes[parallel].path)
+  ensures parallelPlan(machine, active, parallel, target, false).domain ==
+    machine.nodes[target].path[..|machine.nodes[parallel].path| + 1]
+{
+  var parallelPath := machine.nodes[parallel].path;
+  var targetPath := machine.nodes[target].path;
+  assert ParallelNodeShape(machine, parallel);
+  BelowMeaning(targetPath, parallelPath);
+  CommonPrefixExact(parallelPath, targetPath, |parallelPath|);
+}
+
+lemma AncestorDomain(machine: ParallelMachine, source: string, target: string, parallel: string)
+  requires ParallelWellFormed(machine) && source in machine.nodes && target in machine.nodes
+  requires machine.parallel == Some(parallel)
+  requires below(machine.nodes[parallel].path, machine.nodes[source].path)
+  requires below(machine.nodes[target].path, machine.nodes[parallel].path)
+  ensures transitionDomain(machine.parallel, machine.nodes[source].path, machine.nodes[target].path, false) ==
+    machine.nodes[source].path
+{
+  var parallelPath := machine.nodes[parallel].path;
+  var sourcePath := machine.nodes[source].path;
+  var targetPath := machine.nodes[target].path;
+  assert ParallelNodeShape(machine, parallel);
+  assert ParallelNodeShape(machine, source);
+  BelowMeaning(parallelPath, sourcePath);
+  BelowMeaning(targetPath, parallelPath);
+  assert targetPath[..|sourcePath|] == sourcePath;
+  CommonPrefixExact(sourcePath, targetPath, |sourcePath|);
+  assert sourcePath[|sourcePath| - 1] != parallel;
+}
+
+lemma AncestorResetsSubtree(machine: ParallelMachine, active: seq<string>, source: string, target: string, parallel: string)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source in active && target in machine.nodes
+  requires machine.parallel == Some(parallel)
+  requires below(machine.nodes[parallel].path, machine.nodes[source].path)
+  requires below(machine.nodes[target].path, machine.nodes[parallel].path)
+  ensures var plan := parallelPlan(machine, active, source, target, false);
+    plan.domain == machine.nodes[source].path &&
+    forall id ::
+      (id in active && id in machine.nodes && InRegion(machine.nodes[id].path, machine.nodes[parallel].path)) ==>
+        id in plan.exits
+{
+  hide *;
+  reveal InRegion(), PlanFacts(), PlanDomainFacts(), PlanMemberFacts(), exiting(), below();
+  KnownNodes(machine, active, source, parallel);
+  var nodes := machine.nodes;
+  var parallelPath := nodes[parallel].path;
+  var sourcePath := nodes[source].path;
+  var plan := parallelPlan(machine, active, source, target, false);
+  AncestorDomain(machine, source, target, parallel);
+  PlanContext(machine, active, source, target, false);
+  BelowMeaning(parallelPath, sourcePath);
+  forall id | id in active && id in nodes && InRegion(nodes[id].path, parallelPath)
+    ensures id in plan.exits
+  {
+    BelowMeaning(nodes[id].path, sourcePath);
+    assert nodes[id].path[..|sourcePath|] == parallelPath[..|sourcePath|];
+    assert below(nodes[id].path, plan.domain);
+    assert exiting(nodes, plan.domain, plan.reentered, id);
+  }
+}
+
+lemma ReenterWidens(machine: ParallelMachine, active: seq<string>, source: string, target: string, parallel: string)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source in active && target in machine.nodes
+  requires machine.parallel == Some(parallel)
+  requires below(machine.nodes[source].path, machine.nodes[parallel].path)
+  requires below(machine.nodes[target].path, machine.nodes[parallel].path)
+  requires machine.nodes[source].path[|machine.nodes[parallel].path|] !=
+    machine.nodes[target].path[|machine.nodes[parallel].path|]
+  ensures var plan := parallelPlan(machine, active, source, target, true);
+    plan.domain == machine.nodes[parallel].path && parallel !in plan.exits && parallel !in plan.entries &&
+    forall id ::
+      (id in active && id in machine.nodes && below(machine.nodes[id].path, machine.nodes[parallel].path)) ==>
+        id in plan.exits
+{
+  var nodes := machine.nodes;
+  var parallelPath := nodes[parallel].path;
+  var sourcePath := nodes[source].path;
+  var targetPath := nodes[target].path;
+  var plan := parallelPlan(machine, active, source, target, true);
+  assert ParallelNodeShape(machine, parallel);
+  CrossRegionDomain(parallelPath, sourcePath, targetPath);
+  BelowMeaning(sourcePath, parallelPath);
+  assert sourcePath[0..|parallelPath|] == parallelPath;
+  assert plan.domain == parallelPath;
+  PlanContext(machine, active, source, target, true);
+  assert PlanDomainFacts(machine, active, source, target, true, plan);
+  assert PlanMemberFacts(machine, active, target, plan);
+  BelowMeaning(parallelPath, parallelPath);
+  BelowMeaning(targetPath, parallelPath);
+  assert plan.reentered == None;
+  assert plan.extra == None;
+  assert !exiting(nodes, plan.domain, plan.reentered, parallel);
+  assert !entering(nodes, machine.parallel, targetPath, plan.domain, plan.extra, parallel);
+  forall id | id in active && id in nodes && below(nodes[id].path, parallelPath)
+    ensures id in plan.exits
+  {
+    assert exiting(nodes, plan.domain, plan.reentered, id);
+  }
+}
+
+lemma ReenterResetsSubtree(machine: ParallelMachine, active: seq<string>, source: string, target: string, parallel: string)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source in active && target in machine.nodes
+  requires machine.parallel == Some(parallel)
+  requires source == parallel || below(machine.nodes[parallel].path, machine.nodes[source].path)
+  requires below(machine.nodes[target].path, machine.nodes[parallel].path)
+  ensures var plan := parallelPlan(machine, active, source, target, true);
+    plan.domain == machine.nodes[source].path && plan.reentered == Some(source) &&
+    source in plan.exits && source in plan.entries &&
+    forall id ::
+      (id in active && id in machine.nodes && InRegion(machine.nodes[id].path, machine.nodes[parallel].path)) ==>
+        id in plan.exits
+{
+  hide *;
+  reveal InRegion(), PlanFacts(), PlanDomainFacts(), PlanMemberFacts(), exiting(), entering(), below(),
+    parallelPlan(), transitionDomain(), ParallelWellFormed(), ParallelNodeShape();
+  KnownNodes(machine, active, source, parallel);
+  var nodes := machine.nodes;
+  var parallelPath := nodes[parallel].path;
+  var sourcePath := nodes[source].path;
+  var targetPath := nodes[target].path;
+  assert ParallelNodeShape(machine, parallel);
+  assert ParallelNodeShape(machine, source);
+  BelowMeaning(targetPath, parallelPath);
+  if source != parallel {
+    BelowMeaning(parallelPath, sourcePath);
+  }
+  assert |parallelPath| >= |sourcePath| && parallelPath[..|sourcePath|] == sourcePath;
+  assert targetPath[..|sourcePath|] == sourcePath;
+  CommonPrefixExact(sourcePath, targetPath, |sourcePath|);
+  assert transitionDomain(machine.parallel, sourcePath, targetPath, true) == sourcePath;
+  SamePathMeaning(sourcePath, sourcePath);
+  var plan := parallelPlan(machine, active, source, target, true);
+  assert plan.domain == sourcePath;
+  assert plan.reentered == Some(source);
+  PlanContext(machine, active, source, target, true);
+  assert exiting(nodes, plan.domain, plan.reentered, source);
+  assert entering(nodes, machine.parallel, targetPath, plan.domain, plan.extra, source);
+  forall id | id in active && id in nodes && InRegion(nodes[id].path, parallelPath)
+    ensures id in plan.exits
+  {
+    var path := nodes[id].path;
+    assert ParallelNodeShape(machine, id);
+    assert path[..|sourcePath|] == sourcePath;
+    if |path| == |sourcePath| {
+      assert path == sourcePath;
+      assert id == source;
+    } else {
+      BelowMeaning(path, sourcePath);
+    }
+    assert exiting(nodes, plan.domain, plan.reentered, id);
+  }
+}
+
+lemma ParallelSelfReenter(machine: ParallelMachine, active: seq<string>, parallel: string)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires parallel in active && machine.parallel == Some(parallel)
+  ensures var plan := parallelPlan(machine, active, parallel, parallel, true);
+    plan.domain == machine.nodes[parallel].path && plan.reentered == Some(parallel) &&
+    parallel in plan.exits && parallel in plan.entries && parallel in plan.active
+{
+  var plan := parallelPlan(machine, active, parallel, parallel, true);
+  var parallelPath := machine.nodes[parallel].path;
+  CommonPrefixExact(parallelPath, parallelPath, |parallelPath|);
+  SamePathMeaning(parallelPath, parallelPath);
+  PlanContext(machine, active, parallel, parallel, true);
+  assert PlanMemberFacts(machine, active, parallel, plan);
+  assert exiting(machine.nodes, plan.domain, plan.reentered, parallel);
+  assert entering(machine.nodes, machine.parallel, parallelPath, plan.domain, plan.extra, parallel);
+}
+
+lemma PlanDeclared(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source in active && target in machine.nodes
+  ensures declaredPath(machine.nodes, parallelPlan(machine, active, source, target, reenter).exits)
+  ensures declaredPath(machine.nodes, parallelPlan(machine, active, source, target, reenter).entries)
+{
+  var plan := parallelPlan(machine, active, source, target, reenter);
+  PlanContext(machine, active, source, target, reenter);
+  assert PlanMemberFacts(machine, active, target, plan);
+  DeclaredMembers(machine.nodes, plan.exits);
+  DeclaredMembers(machine.nodes, plan.entries);
+}
+
+lemma ParallelStepMeaning(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, snapshot.active)
+  requires |parallelSelections(machine, snapshot, event)| > 0
+  requires var selected := parallelSelections(machine, snapshot, event)[0];
+    selected.evaluation.result.Some? && selected.evaluation.result.value.target.Some? &&
+    selected.evaluation.result.value.target.value in machine.nodes
+  ensures var selected := parallelSelections(machine, snapshot, event)[0];
+    var result := selected.evaluation.result.value;
+    var plan := parallelPlan(machine, snapshot.active, selected.id, result.target.value, result.reenter);
+    var exited := lifecycle(machine.nodes, plan.exits, snapshot.context, event, true);
+    var updated := apply(exited.context, selected.evaluation);
+    var entered := lifecycle(machine.nodes, plan.entries, updated.context, event, false);
+    parallelTransition(machine, snapshot, event) ==
+      ParallelStep(ParallelSnapshot(plan.active, entered.context), false,
+        exited.reused && updated.reused && entered.reused,
+        exited.effects + selected.evaluation.effects + entered.effects)
+{
+  var selected := parallelSelections(machine, snapshot, event)[0];
+  var result := selected.evaluation.result.value;
+  SelectionSourcesActive(machine, snapshot, event);
+  PlanDeclared(machine, snapshot.active, selected.id, result.target.value, result.reenter);
+}
+
+lemma ParallelTargetlessKeepsActive(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  requires |parallelSelections(machine, snapshot, event)| > 0
+  requires var selected := parallelSelections(machine, snapshot, event)[0];
+    selected.evaluation.result.None? || selected.evaluation.result.value.target.None?
+  ensures parallelTransition(machine, snapshot, event).snapshot.active == snapshot.active
+  ensures !parallelTransition(machine, snapshot, event).snapshotReused
+{
+}
+
+lemma RootPath(machine: ParallelMachine)
+  requires ParallelWellFormed(machine)
+  ensures machine.root in machine.nodes && machine.nodes[machine.root].path == [machine.root]
+{
+}
+
+lemma InitialOrder(machine: ParallelMachine, event: Event)
+  ensures Subseq(parallelInitialTransition(machine, event).snapshot.active, machine.order)
+{
+  FiltersAreSubsequences(machine.order);
+}
+
+lemma InitialEntries(machine: ParallelMachine, event: Event)
+  requires ParallelWellFormed(machine)
+  ensures var entries := parallelInitialTransition(machine, event).snapshot.active;
+    Subseq(entries, machine.order) &&
+    forall id :: id in entries <==>
+      (id in machine.nodes && completes(machine.nodes, machine.parallel, [machine.root], machine.nodes[id].path))
+{
+  hide *;
+  reveal NextShape(), DomainStart();
+  var entries := parallelInitialTransition(machine, event).snapshot.active;
+  InitialShape(machine, event);
+  InitialOrder(machine, event);
+  RootPath(machine);
+  forall id | id in machine.nodes
+    ensures id in entries <==> completes(machine.nodes, machine.parallel, [machine.root], machine.nodes[id].path)
+  {
+    PathEnds(machine, id);
+    BelowMeaning(machine.nodes[id].path, []);
+    assert machine.nodes[id].path[0..] == machine.nodes[id].path;
+  }
+}
+
+lemma ParallelInitialMeaning(machine: ParallelMachine, event: Event)
+  requires ParallelWellFormed(machine)
+  ensures var step := parallelInitialTransition(machine, event);
+    var entered := lifecycle(machine.nodes, step.snapshot.active, machine.context, event, false);
+    Subseq(step.snapshot.active, machine.order) &&
+    (forall id :: id in step.snapshot.active <==>
+      id in machine.nodes && completes(machine.nodes, machine.parallel, [machine.root], machine.nodes[id].path)) &&
+    step == ParallelStep(ParallelSnapshot(step.snapshot.active, entered.context), false, entered.reused, entered.effects)
+{
+  InitialEntries(machine, event);
+  DeclaredMembers(machine.nodes, parallelInitialTransition(machine, event).snapshot.active);
+}
+
+lemma RegionFirstSelection(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  ensures var parallelPath := activeParallel(machine, snapshot.active);
+    var regions := regionSelections(machine.nodes, snapshot.active, |parallelPath|, snapshot.context, event);
+    |regions| > 0 ==> parallelSelections(machine, snapshot, event) == regions
+  ensures |parallelSelections(machine, snapshot, event)| == 0 ==>
+    parallelTransition(machine, snapshot, event) == ParallelStep(snapshot, true, true, [])
+{
+}
+
+lemma ParallelStepDelegates(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  requires |parallelSelections(machine, snapshot, event)| < 2
+  ensures parallelStep(machine, snapshot, event) == parallelTransition(machine, snapshot, event)
+  ensures parallelStepReady(machine, snapshot, event) == parallelReady(machine, snapshot, event)
+{
+}
+
+ghost function Effects(selections: seq<Selection>): seq<Effect>
+  decreases |selections|
+{
+  if |selections| == 0 then [] else selections[0].evaluation.effects + Effects(selections[1..])
+}
+
+lemma {:induction false} ApplyAllSequential(context: map<string, int>, xs: seq<Selection>, ys: seq<Selection>)
+  ensures var first := applyAll(context, xs);
+    var second := applyAll(first.context, ys);
+    applyAll(context, xs + ys) == Applied(second.context, first.reused && second.reused, first.effects + second.effects)
+  decreases |xs|
+{
+  if |xs| == 0 {
+    assert xs + ys == ys;
+  } else {
+    assert (xs + ys)[0] == xs[0];
+    assert (xs + ys)[1..] == xs[1..] + ys;
+    var head := apply(context, xs[0].evaluation);
+    ApplyAllSequential(head.context, xs[1..], ys);
+    var rest := applyAll(head.context, xs[1..]);
+    var second := applyAll(rest.context, ys);
+    assert head.effects + (rest.effects + second.effects) == (head.effects + rest.effects) + second.effects;
+  }
+}
+
+lemma {:induction false} ApplyAllEffects(context: map<string, int>, selections: seq<Selection>)
+  ensures applyAll(context, selections).effects == Effects(selections)
+  decreases |selections|
+{
+  if |selections| > 0 {
+    ApplyAllEffects(apply(context, selections[0].evaluation).context, selections[1..]);
+  }
+}
+
+lemma {:induction false} AnyPreemptsMeaning(machine: ParallelMachine, active: seq<string>, candidate: Selection,
+                                            kept: seq<Selection>)
+  ensures anyPreempts(machine, active, candidate, kept) <==>
+    exists other :: other in kept && preempts(machine, active, candidate, other)
+  decreases |kept|
+{
+  if |kept| > 0 {
+    AnyPreemptsMeaning(machine, active, candidate, kept[1..]);
+    assert kept == [kept[0]] + kept[1..];
+  }
+}
+
+lemma {:induction false} RemoveConflictsLength(machine: ParallelMachine, active: seq<string>,
+                                               pending: seq<Selection>, kept: seq<Selection>)
+  ensures |removeConflicts(machine, active, pending, kept)| <= |kept| + |pending|
+  decreases |pending|
+{
+  if |pending| > 0 {
+    var first := pending[0];
+    if anyPreempts(machine, active, first, kept) {
+      RemoveConflictsLength(machine, active, pending[1..], kept);
+    } else {
+      var exits := conflictExits(machine, active, first);
+      var survivors := SeqFilter((other: Selection) => !overlaps(exits, conflictExits(machine, active, other)), kept);
+      RemoveConflictsLength(machine, active, pending[1..], survivors + [first]);
+    }
+  }
+}
+
+lemma {:induction false} RemoveConflictsDrawn(machine: ParallelMachine, active: seq<string>,
+                                              pending: seq<Selection>, kept: seq<Selection>)
+  ensures forall selection :: selection in removeConflicts(machine, active, pending, kept) ==>
+    selection in pending || selection in kept
+  decreases |pending|
+{
+  if |pending| > 0 {
+    var first := pending[0];
+    if anyPreempts(machine, active, first, kept) {
+      RemoveConflictsDrawn(machine, active, pending[1..], kept);
+    } else {
+      var exits := conflictExits(machine, active, first);
+      var survivors := SeqFilter((other: Selection) => !overlaps(exits, conflictExits(machine, active, other)), kept);
+      RemoveConflictsDrawn(machine, active, pending[1..], survivors + [first]);
+    }
+  }
+}
+
+lemma TwoSelectionConflicts(machine: ParallelMachine, active: seq<string>, x: Selection, y: Selection)
+  ensures var exitsX := conflictExits(machine, active, x);
+    var exitsY := conflictExits(machine, active, y);
+    removeConflicts(machine, active, [x, y], []) ==
+      if !overlaps(exitsY, exitsX) then [x, y]
+      else if below(y.node.path, x.node.path) then [y]
+      else [x]
+{
+  var exitsX := conflictExits(machine, active, x);
+  var exitsY := conflictExits(machine, active, y);
+  assert [x, y][0] == x && [x, y][1..] == [y];
+  assert [y][0] == y && [y][1..] == [];
+  assert !anyPreempts(machine, active, x, []);
+  var none := SeqFilter((other: Selection) => !overlaps(exitsX, conflictExits(machine, active, other)), []);
+  assert |none| == 0;
+  assert none + [x] == [x];
+  assert removeConflicts(machine, active, [x, y], []) == removeConflicts(machine, active, [x, y][1..], none + [x]);
+  assert removeConflicts(machine, active, [x, y], []) == removeConflicts(machine, active, [y], [x]);
+  assert [x][1..] == [];
+  assert anyPreempts(machine, active, y, [x]) == preempts(machine, active, y, x);
+  var survivors := SeqFilter((other: Selection) => !overlaps(exitsY, conflictExits(machine, active, other)), [x]);
+  assert survivors == if overlaps(exitsY, exitsX) then [] else [x];
+  if !anyPreempts(machine, active, y, [x]) {
+    assert removeConflicts(machine, active, [y], [x]) == removeConflicts(machine, active, [], survivors + [y]);
+  }
+}
+
+ghost predicate Disjoint(machine: ParallelMachine, active: seq<string>, selections: seq<Selection>)
+  decreases |selections|
+{
+  |selections| == 0 ||
+  ((forall other :: other in selections[1..] ==>
+     !overlaps(conflictExits(machine, active, selections[0]), conflictExits(machine, active, other))) &&
+   Disjoint(machine, active, selections[1..]))
+}
+
+lemma {:induction false} DisjointFilter(machine: ParallelMachine, active: seq<string>, p: Selection -> bool,
+                                        selections: seq<Selection>)
+  requires Disjoint(machine, active, selections)
+  ensures Disjoint(machine, active, SeqFilter(p, selections))
+  decreases |selections|
+{
+  if |selections| > 0 {
+    DisjointFilter(machine, active, p, selections[1..]);
+    var rest := SeqFilter(p, selections[1..]);
+    if p(selections[0]) {
+      assert SeqFilter(p, selections) == [selections[0]] + rest;
+      assert ([selections[0]] + rest)[1..] == rest;
+    } else {
+      assert SeqFilter(p, selections) == rest;
+    }
+  }
+}
+
+lemma {:induction false} DisjointSnoc(machine: ParallelMachine, active: seq<string>, selections: seq<Selection>,
+                                      last: Selection)
+  requires Disjoint(machine, active, selections)
+  requires forall other :: other in selections ==>
+    !overlaps(conflictExits(machine, active, other), conflictExits(machine, active, last))
+  ensures Disjoint(machine, active, selections + [last])
+  decreases |selections|
+{
+  if |selections| == 0 {
+    assert ([] + [last])[1..] == [];
+  } else {
+    assert (selections + [last])[0] == selections[0];
+    assert (selections + [last])[1..] == selections[1..] + [last];
+    DisjointSnoc(machine, active, selections[1..], last);
+  }
+}
+
+lemma {:induction false} RemoveConflictsDisjoint(machine: ParallelMachine, active: seq<string>,
+                                                 pending: seq<Selection>, kept: seq<Selection>)
+  requires Disjoint(machine, active, kept)
+  ensures Disjoint(machine, active, removeConflicts(machine, active, pending, kept))
+  decreases |pending|
+{
+  if |pending| > 0 {
+    var first := pending[0];
+    if anyPreempts(machine, active, first, kept) {
+      RemoveConflictsDisjoint(machine, active, pending[1..], kept);
+    } else {
+      var exits := conflictExits(machine, active, first);
+      var p := (other: Selection) => !overlaps(exits, conflictExits(machine, active, other));
+      var survivors := SeqFilter(p, kept);
+      DisjointFilter(machine, active, p, kept);
+      DisjointSnoc(machine, active, survivors, first);
+      RemoveConflictsDisjoint(machine, active, pending[1..], survivors + [first]);
+    }
+  }
+}
+
+lemma {:induction false} DisjointPairs(machine: ParallelMachine, active: seq<string>, selections: seq<Selection>)
+  requires Disjoint(machine, active, selections)
+  ensures forall i, j :: 0 <= i < j < |selections| ==>
+    !overlaps(conflictExits(machine, active, selections[i]), conflictExits(machine, active, selections[j]))
+  decreases |selections|
+{
+  if |selections| > 0 {
+    DisjointPairs(machine, active, selections[1..]);
+    forall i, j | 0 <= i < j < |selections|
+      ensures !overlaps(conflictExits(machine, active, selections[i]), conflictExits(machine, active, selections[j]))
+    {
+      if i == 0 {
+        assert selections[j] in selections[1..];
+      } else {
+        assert selections[i] == selections[1..][i - 1] && selections[j] == selections[1..][j - 1];
+      }
+    }
+  }
+}
+
+lemma KeptSelectionsDisjoint(machine: ParallelMachine, active: seq<string>, selections: seq<Selection>)
+  ensures var kept := removeConflicts(machine, active, selections, []);
+    forall i, j :: 0 <= i < j < |kept| ==>
+      !overlaps(conflictExits(machine, active, kept[i]), conflictExits(machine, active, kept[j]))
+{
+  RemoveConflictsDisjoint(machine, active, selections, []);
+  DisjointPairs(machine, active, removeConflicts(machine, active, selections, []));
+}
+
+lemma {:induction false} FilterKeepsAll(p: Selection -> bool, selections: seq<Selection>)
+  requires forall selection :: selection in selections ==> p(selection)
+  ensures SeqFilter(p, selections) == selections
+  decreases |selections|
+{
+  if |selections| > 0 {
+    FilterKeepsAll(p, selections[1..]);
+    assert selections == [selections[0]] + selections[1..];
+  }
+}
+
+ghost predicate NoDescendantSources(pending: seq<Selection>, kept: seq<Selection>)
+{
+  forall candidate, other :: candidate in pending && (other in pending || other in kept) ==>
+    !below(candidate.node.path, other.node.path)
+}
+
+ghost function Greedy(machine: ParallelMachine, active: seq<string>, pending: seq<Selection>,
+                      kept: seq<Selection>): seq<Selection>
+  decreases |pending|
+{
+  if |pending| == 0 then kept
+  else if (exists other :: other in kept &&
+             overlaps(conflictExits(machine, active, pending[0]), conflictExits(machine, active, other)))
+  then Greedy(machine, active, pending[1..], kept)
+  else Greedy(machine, active, pending[1..], kept + [pending[0]])
+}
+
+lemma {:induction false} GreedyWhenApart(machine: ParallelMachine, active: seq<string>,
+                                         pending: seq<Selection>, kept: seq<Selection>)
+  requires NoDescendantSources(pending, kept)
+  ensures removeConflicts(machine, active, pending, kept) == Greedy(machine, active, pending, kept)
+  decreases |pending|
+{
+  if |pending| > 0 {
+    var first := pending[0];
+    var exits := conflictExits(machine, active, first);
+    assert NoDescendantSources(pending[1..], kept);
+    AnyPreemptsMeaning(machine, active, first, kept);
+    var clash := exists other :: other in kept && overlaps(exits, conflictExits(machine, active, other));
+    assert anyPreempts(machine, active, first, kept) == clash;
+    if clash {
+      GreedyWhenApart(machine, active, pending[1..], kept);
+    } else {
+      var p := (other: Selection) => !overlaps(exits, conflictExits(machine, active, other));
+      FilterKeepsAll(p, kept);
+      assert removeConflicts(machine, active, pending, kept) ==
+        removeConflicts(machine, active, pending[1..], kept + [first]);
+      assert NoDescendantSources(pending[1..], kept + [first]);
+      GreedyWhenApart(machine, active, pending[1..], kept + [first]);
+    }
+  }
+}
+
+lemma DescendantWins(machine: ParallelMachine, active: seq<string>, ancestor: Selection, descendant: Selection)
+  requires below(descendant.node.path, ancestor.node.path)
+  requires overlaps(conflictExits(machine, active, ancestor), conflictExits(machine, active, descendant))
+  ensures removeConflicts(machine, active, [ancestor, descendant], []) == [descendant]
+  ensures removeConflicts(machine, active, [descendant, ancestor], []) == [descendant]
+{
+  BelowMeaning(descendant.node.path, ancestor.node.path);
+  BelowMeaning(ancestor.node.path, descendant.node.path);
+  TwoSelectionConflicts(machine, active, ancestor, descendant);
+  TwoSelectionConflicts(machine, active, descendant, ancestor);
+}
+
+ghost predicate Within(path: seq<string>, domain: seq<string>)
+{
+  |domain| <= |path| && path[..|domain|] == domain
+}
+
+lemma WithinMeaning(path: seq<string>, domain: seq<string>)
+  ensures Within(path, domain) <==> below(path, domain) || path == domain
+{
+  BelowMeaning(path, domain);
+}
+
+lemma ComparableMeaning(a: seq<string>, b: seq<string>)
+  ensures comparable(a, b) <==> Within(a, b) || Within(b, a)
+{
+  CommonPrefixMeaning(a, b);
+  if Within(b, a) {
+    CommonPrefixExact(a, b, |a|);
+  }
+  if Within(a, b) {
+    CommonPrefixExact(a, b, |b|);
+  }
+}
+
+lemma WithinShared(path: seq<string>, a: seq<string>, b: seq<string>)
+  requires Within(path, a) && Within(path, b)
+  ensures comparable(a, b)
+{
+  ComparableMeaning(a, b);
+  if |a| <= |b| {
+    assert b[..|a|] == path[..|b|][..|a|];
+  } else {
+    assert a[..|b|] == path[..|a|][..|b|];
+  }
+}
+
+lemma WithinTransitive(path: seq<string>, middle: seq<string>, domain: seq<string>)
+  requires Within(path, middle) && Within(middle, domain)
+  ensures Within(path, domain)
+{
+  assert path[..|domain|] == path[..|middle|][..|domain|];
+}
+
+ghost predicate PlanFrom(machine: ParallelMachine, active: seq<string>, plan: ParallelPlan)
+{
+  exists source, target, reenter :: source in active && target in machine.nodes &&
+    plan == parallelPlan(machine, active, source, target, reenter)
+}
+
+lemma {:induction false} PlansFromActive(machine: ParallelMachine, active: seq<string>, selections: seq<Selection>)
+  requires forall selection :: selection in selections ==> selection.id in active
+  ensures forall plan :: plan in selectionPlans(machine, active, selections) ==> PlanFrom(machine, active, plan)
+  decreases |selections|
+{
+  if |selections| > 0 {
+    PlansFromActive(machine, active, selections[1..]);
+    var selection := selections[0];
+    var plan := selectionPlan(machine, active, selection);
+    if plan.Some? {
+      var result := selection.evaluation.result.value;
+      assert PlanFrom(machine, active, plan.value) by {
+        assert plan.value == parallelPlan(machine, active, selection.id, result.target.value, result.reenter);
+      }
+    }
+  }
+}
+
+lemma PlanFromFacts(machine: ParallelMachine, active: seq<string>, plan: ParallelPlan)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active) && PlanFrom(machine, active, plan)
+  ensures ParallelValid(machine, plan.active)
+  ensures ActiveNodePath(machine, active, plan.domain)
+  ensures forall id :: id in machine.nodes && machine.nodes[id].path == plan.domain ==> id in plan.active
+  ensures forall id :: id in plan.active <==>
+    id in machine.nodes && ((id in active && id !in plan.exits) || id in plan.entries)
+  ensures forall id :: id in machine.nodes && !Within(machine.nodes[id].path, plan.domain) ==>
+    id !in plan.exits && id !in plan.entries
+{
+  var source, target, reenter :| source in active && target in machine.nodes &&
+    plan == parallelPlan(machine, active, source, target, reenter);
+  KnownSource(machine, active, source);
+  PlanContext(machine, active, source, target, reenter);
+  PlanValid(machine, active, source, target, reenter);
+  PlanShape(machine, active, source, target, reenter);
+  assert PlanDomainFacts(machine, active, source, target, reenter, plan);
+  assert PlanMemberFacts(machine, active, target, plan);
+  forall id | id in machine.nodes && !Within(machine.nodes[id].path, plan.domain)
+    ensures id !in plan.exits && id !in plan.entries
+  {
+    WithinMeaning(machine.nodes[id].path, plan.domain);
+  }
+}
+
+ghost predicate PlansApart(plans: seq<ParallelPlan>)
+{
+  forall i, j :: 0 <= i < |plans| && 0 <= j < |plans| && i != j ==> !comparable(plans[i].domain, plans[j].domain)
+}
+
+lemma {:induction false} DomainsApartMeaning(plans: seq<ParallelPlan>)
+  requires domainsApart(plans)
+  ensures PlansApart(plans)
+  decreases |plans|
+{
+  if |plans| > 0 {
+    DomainsApartMeaning(plans[1..]);
+    forall i, j | 0 <= i < |plans| && 0 <= j < |plans| && i != j
+      ensures !comparable(plans[i].domain, plans[j].domain)
+    {
+      ComparableMeaning(plans[i].domain, plans[j].domain);
+      ComparableMeaning(plans[j].domain, plans[i].domain);
+      if i == 0 {
+        assert plans[j] in plans[1..];
+      } else if j == 0 {
+        assert plans[i] in plans[1..];
+      } else {
+        assert plans[i] == plans[1..][i - 1] && plans[j] == plans[1..][j - 1];
+      }
+    }
+  }
+}
+
+lemma NarrowWithin(parallel: Option<string>, target: seq<string>, domain: seq<string>)
+  requires Within(target, domain)
+  ensures Within(target, narrow(parallel, target, domain))
+{
+  BelowMeaning(target, domain);
+}
+
+lemma DomainWithinTarget(parallel: Option<string>, source: seq<string>, target: seq<string>, reenter: bool)
+  ensures Within(target, transitionDomain(parallel, source, target, reenter))
+{
+  if commonPrefix(source, target) == |source| {
+    assert source == target[..|source|];
+    NarrowWithin(parallel, target, source);
+  } else if |target| > 0 {
+    var ancestors := target[0..|target| - 1];
+    var lca := commonPrefix(source, ancestors);
+    assert source[0..lca] == ancestors[0..lca] == target[0..lca];
+    if lca == 0 {
+      NarrowWithin(parallel, target, target[0..1]);
+    } else {
+      NarrowWithin(parallel, target, source[0..lca]);
+    }
+  }
+}
+
+// statelyai/xstate#5895 pattern: one transition's exit set contains the
+// other's target or an ancestor of it. Its domains are then comparable.
+lemma PatternDomainsComparable(machine: ParallelMachine, active: seq<string>,
+                               source1: string, target1: string, reenter1: bool,
+                               source2: string, target2: string, reenter2: bool, node: string)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source1 in active && target1 in machine.nodes && source2 in active && target2 in machine.nodes
+  requires node in machine.nodes && Within(machine.nodes[target2].path, machine.nodes[node].path)
+  requires node in parallelPlan(machine, active, source1, target1, reenter1).exits
+  ensures comparable(parallelPlan(machine, active, source1, target1, reenter1).domain,
+                     parallelPlan(machine, active, source2, target2, reenter2).domain)
+{
+  var nodes := machine.nodes;
+  var plan1 := parallelPlan(machine, active, source1, target1, reenter1);
+  var plan2 := parallelPlan(machine, active, source2, target2, reenter2);
+  KnownSource(machine, active, source1);
+  KnownSource(machine, active, source2);
+  PlanContext(machine, active, source1, target1, reenter1);
+  PlanContext(machine, active, source2, target2, reenter2);
+  var nodePath := nodes[node].path;
+  var targetPath := nodes[target2].path;
+  assert exiting(nodes, plan1.domain, plan1.reentered, node);
+  WithinMeaning(nodePath, plan1.domain);
+  WithinTransitive(targetPath, nodePath, plan1.domain);
+  DomainWithinTarget(machine.parallel, nodes[source2].path, targetPath, reenter2);
+  WithinShared(targetPath, plan1.domain, plan2.domain);
+}
+
+// Every #5895-pattern pair in the plans checked by `multiReady` fails
+// `domainsApart`, so the step is refused before comparison.
+lemma PatternRefused(machine: ParallelMachine, active: seq<string>, plans: seq<ParallelPlan>, i: int, j: int,
+                     source1: string, target1: string, reenter1: bool,
+                     source2: string, target2: string, reenter2: bool, node: string)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source1 in active && target1 in machine.nodes && source2 in active && target2 in machine.nodes
+  requires 0 <= i < |plans| && 0 <= j < |plans| && i != j
+  requires plans[i] == parallelPlan(machine, active, source1, target1, reenter1)
+  requires plans[j] == parallelPlan(machine, active, source2, target2, reenter2)
+  requires node in machine.nodes && Within(machine.nodes[target2].path, machine.nodes[node].path)
+  requires node in plans[i].exits
+  ensures !domainsApart(plans)
+{
+  PatternDomainsComparable(machine, active, source1, target1, reenter1, source2, target2, reenter2, node);
+  if domainsApart(plans) {
+    DomainsApartMeaning(plans);
+    assert !comparable(plans[i].domain, plans[j].domain);
+  }
+}
+
+ghost predicate Combined(plans: seq<ParallelPlan>, active: seq<string>, id: string)
+{
+  (id in active && !plansExit(plans, id)) || plansEnter(plans, id)
+}
+
+ghost predicate PlansContext(machine: ParallelMachine, active: seq<string>, plans: seq<ParallelPlan>)
+{
+  ParallelWellFormed(machine) && ParallelValid(machine, active) &&
+  (forall plan :: plan in plans ==> PlanFrom(machine, active, plan)) && PlansApart(plans)
+}
+
+lemma CombinedOwned(machine: ParallelMachine, active: seq<string>, plans: seq<ParallelPlan>, id: string, i: int)
+  requires PlansContext(machine, active, plans)
+  requires id in machine.nodes && 0 <= i < |plans| && Within(machine.nodes[id].path, plans[i].domain)
+  ensures Combined(plans, active, id) <==> id in plans[i].active
+{
+  var path := machine.nodes[id].path;
+  forall j | 0 <= j < |plans| && j != i
+    ensures id !in plans[j].exits && id !in plans[j].entries
+  {
+    if Within(path, plans[j].domain) {
+      WithinShared(path, plans[i].domain, plans[j].domain);
+    }
+    PlanFromFacts(machine, active, plans[j]);
+  }
+  PlanFromFacts(machine, active, plans[i]);
+  assert plansExit(plans, id) <==> id in plans[i].exits;
+  assert plansEnter(plans, id) <==> id in plans[i].entries;
+}
+
+lemma CombinedUnowned(machine: ParallelMachine, active: seq<string>, plans: seq<ParallelPlan>, id: string)
+  requires PlansContext(machine, active, plans)
+  requires id in machine.nodes
+  requires forall i :: 0 <= i < |plans| ==> !Within(machine.nodes[id].path, plans[i].domain)
+  ensures Combined(plans, active, id) <==> id in active
+{
+  forall plan | plan in plans
+    ensures id !in plan.exits && id !in plan.entries
+  {
+    PlanFromFacts(machine, active, plan);
+  }
+}
+
+lemma ChildrenAgree(machine: ParallelMachine, next: seq<string>, other: seq<string>, id: string)
+  requires id in machine.nodes && ChildrenActive(machine, other, id)
+  requires forall child :: child in machine.nodes[id].children ==> (child in next <==> child in other)
+  ensures ChildrenActive(machine, next, id)
+{
+}
+
+lemma ParentWithin(machine: ParallelMachine, id: string)
+  requires ParallelWellFormed(machine) && id in machine.nodes && |machine.nodes[id].path| > 1
+  ensures var path := machine.nodes[id].path;
+    var parent := path[|path| - 2];
+    parent in machine.nodes && Within(path, machine.nodes[parent].path) &&
+    |machine.nodes[parent].path| == |path| - 1
+{
+  assert ParallelNodeShape(machine, id);
+}
+
+lemma ChildWithin(machine: ParallelMachine, id: string, child: string)
+  requires ParallelWellFormed(machine) && id in machine.nodes && child in machine.nodes[id].children
+  ensures child in machine.nodes && machine.nodes[child].path == machine.nodes[id].path + [child]
+  ensures Within(machine.nodes[child].path, machine.nodes[id].path)
+{
+  assert ParallelNodeShape(machine, id);
+}
+
+lemma CombinedOwnedNode(machine: ParallelMachine, active: seq<string>, plans: seq<ParallelPlan>,
+                        next: seq<string>, id: string, i: int)
+  requires PlansContext(machine, active, plans)
+  requires forall x :: x in next <==> x in machine.nodes && Combined(plans, active, x)
+  requires id in next && 0 <= i < |plans| && Within(machine.nodes[id].path, plans[i].domain)
+  ensures |machine.nodes[id].path| > 1 ==> machine.nodes[id].path[|machine.nodes[id].path| - 2] in next
+  ensures ChildrenActive(machine, next, id)
+{
+  var path := machine.nodes[id].path;
+  var plan := plans[i];
+  PlanFromFacts(machine, active, plan);
+  CombinedOwned(machine, active, plans, id, i);
+  if |path| > 1 {
+    var parent := path[|path| - 2];
+    ParentWithin(machine, id);
+    var parentPath := machine.nodes[parent].path;
+    if Within(parentPath, plan.domain) {
+      CombinedOwned(machine, active, plans, parent, i);
+    } else {
+      forall j | 0 <= j < |plans|
+        ensures !Within(parentPath, plans[j].domain)
+      {
+        if Within(parentPath, plans[j].domain) {
+          WithinTransitive(path, parentPath, plans[j].domain);
+          WithinShared(path, plan.domain, plans[j].domain);
+        }
+      }
+      CombinedUnowned(machine, active, plans, parent);
+    }
+  }
+  forall child | child in machine.nodes[id].children
+    ensures child in next <==> child in plan.active
+  {
+    ChildWithin(machine, id, child);
+    WithinTransitive(machine.nodes[child].path, path, plan.domain);
+    CombinedOwned(machine, active, plans, child, i);
+  }
+  ChildrenAgree(machine, next, plan.active, id);
+}
+
+lemma CombinedUnownedNode(machine: ParallelMachine, active: seq<string>, plans: seq<ParallelPlan>,
+                          next: seq<string>, id: string)
+  requires PlansContext(machine, active, plans)
+  requires forall x :: x in next <==> x in machine.nodes && Combined(plans, active, x)
+  requires id in next
+  requires forall i :: 0 <= i < |plans| ==> !Within(machine.nodes[id].path, plans[i].domain)
+  ensures |machine.nodes[id].path| > 1 ==> machine.nodes[id].path[|machine.nodes[id].path| - 2] in next
+  ensures ChildrenActive(machine, next, id)
+{
+  var path := machine.nodes[id].path;
+  CombinedUnowned(machine, active, plans, id);
+  if |path| > 1 {
+    var parent := path[|path| - 2];
+    ParentWithin(machine, id);
+    forall j | 0 <= j < |plans|
+      ensures !Within(machine.nodes[parent].path, plans[j].domain)
+    {
+      if Within(machine.nodes[parent].path, plans[j].domain) {
+        WithinTransitive(path, machine.nodes[parent].path, plans[j].domain);
+      }
+    }
+    CombinedUnowned(machine, active, plans, parent);
+  }
+  forall child | child in machine.nodes[id].children
+    ensures child in next <==> child in active
+  {
+    CombinedUnownedChild(machine, active, plans, next, id, child);
+  }
+  ChildrenAgree(machine, next, active, id);
+}
+
+lemma CombinedUnownedChild(machine: ParallelMachine, active: seq<string>, plans: seq<ParallelPlan>,
+                           next: seq<string>, id: string, child: string)
+  requires PlansContext(machine, active, plans)
+  requires forall x :: x in next <==> x in machine.nodes && Combined(plans, active, x)
+  requires id in machine.nodes && child in machine.nodes[id].children
+  requires forall i :: 0 <= i < |plans| ==> !Within(machine.nodes[id].path, plans[i].domain)
+  ensures child in next <==> child in active
+{
+  hide *;
+  reveal PlansContext();
+  var path := machine.nodes[id].path;
+  ChildWithin(machine, id, child);
+  var childPath := machine.nodes[child].path;
+  if j :| 0 <= j < |plans| && Within(childPath, plans[j].domain) {
+    var plan := plans[j];
+    assert plan in plans;
+    PlanFromFacts(machine, active, plan);
+    WithinChild(path, child, plan.domain);
+    PathEnds(machine, child);
+    CombinedOwned(machine, active, plans, child, j);
+  } else {
+    CombinedUnowned(machine, active, plans, child);
+  }
+}
+
+lemma WithinChild(path: seq<string>, child: string, domain: seq<string>)
+  requires Within(path + [child], domain) && !Within(path, domain)
+  ensures domain == path + [child]
+{
+  if |domain| <= |path| {
+    assert path[..|domain|] == (path + [child])[..|domain|];
+  }
+}
+
+lemma CombinedValid(machine: ParallelMachine, active: seq<string>, plans: seq<ParallelPlan>, next: seq<string>)
+  requires PlansContext(machine, active, plans)
+  requires forall x :: x in next <==> x in machine.nodes && Combined(plans, active, x)
+  requires Subseq(next, machine.order)
+  ensures ParallelValid(machine, next)
+{
+  var root := machine.root;
+  if i :| 0 <= i < |plans| && Within(machine.nodes[root].path, plans[i].domain) {
+    PlanFromFacts(machine, active, plans[i]);
+    CombinedOwned(machine, active, plans, root, i);
+  } else {
+    CombinedUnowned(machine, active, plans, root);
+  }
+  forall id | id in next
+    ensures id in machine.nodes &&
+      (|machine.nodes[id].path| > 1 ==> machine.nodes[id].path[|machine.nodes[id].path| - 2] in next) &&
+      ChildrenActive(machine, next, id)
+  {
+    if i :| 0 <= i < |plans| && Within(machine.nodes[id].path, plans[i].domain) {
+      CombinedOwnedNode(machine, active, plans, next, id, i);
+    } else {
+      CombinedUnownedNode(machine, active, plans, next, id);
+    }
+  }
+}
+
+lemma MultiPlansContext(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, snapshot.active)
+  requires multiReady(machine, snapshot.active, parallelSelections(machine, snapshot, event))
+  ensures var kept := removeConflicts(machine, snapshot.active, parallelSelections(machine, snapshot, event), []);
+    PlansContext(machine, snapshot.active, selectionPlans(machine, snapshot.active, kept))
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  var active := snapshot.active;
+  var kept := removeConflicts(machine, active, selections, []);
+  SelectionSourcesActive(machine, snapshot, event);
+  RemoveConflictsDrawn(machine, active, selections, []);
+  PlansFromActive(machine, active, kept);
+  DomainsApartMeaning(selectionPlans(machine, active, kept));
+}
+
+lemma MultiStepMembers(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  requires ParallelWellFormed(machine)
+  requires |parallelSelections(machine, snapshot, event)| >= 2
+  ensures var kept := removeConflicts(machine, snapshot.active, parallelSelections(machine, snapshot, event), []);
+    var plans := selectionPlans(machine, snapshot.active, kept);
+    var next := parallelStep(machine, snapshot, event).snapshot.active;
+    Subseq(next, machine.order) &&
+    forall x :: x in next <==> x in machine.nodes && Combined(plans, snapshot.active, x)
+{
+  hide *;
+  reveal parallelStep, Combined, ParallelWellFormed;
+  var active := snapshot.active;
+  var kept := removeConflicts(machine, active, parallelSelections(machine, snapshot, event), []);
+  var plans := selectionPlans(machine, active, kept);
+  var keep := (id: string) => (((id in active) && !(plansExit(plans, id))) || plansEnter(plans, id));
+  var next := parallelStep(machine, snapshot, event).snapshot.active;
+  assert next == SeqFilter(keep, machine.order);
+  FilterSubseq(keep, machine.order);
+  forall x
+    ensures x in next <==> x in machine.nodes && Combined(plans, active, x)
+  {
+    assert keep(x) == Combined(plans, active, x);
+  }
+}
+
+lemma MultiStepValid(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, snapshot.active)
+  requires parallelStepReady(machine, snapshot, event)
+  ensures ParallelValid(machine, parallelStep(machine, snapshot, event).snapshot.active)
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  if |selections| < 2 {
+    ParallelStepValid(machine, snapshot, event);
+  } else {
+    var kept := removeConflicts(machine, snapshot.active, selections, []);
+    var plans := selectionPlans(machine, snapshot.active, kept);
+    MultiPlansContext(machine, snapshot, event);
+    MultiStepMembers(machine, snapshot, event);
+    CombinedValid(machine, snapshot.active, plans, parallelStep(machine, snapshot, event).snapshot.active);
+  }
+}
+
+lemma CombinedLifecycleLists(machine: ParallelMachine, active: seq<string>, plans: seq<ParallelPlan>)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  ensures var exits := reverse(SeqFilter((id: string) => plansExit(plans, id), active));
+    var entries := SeqFilter((id: string) => plansEnter(plans, id), machine.order);
+    declaredPath(machine.nodes, exits) && declaredPath(machine.nodes, entries) &&
+    (forall id :: id in exits <==> id in active && plansExit(plans, id)) &&
+    (forall id :: id in entries <==> id in machine.nodes && plansEnter(plans, id)) &&
+    Subseq(reverse(exits), active) && Subseq(entries, machine.order)
+{
+  var p := (id: string) => plansExit(plans, id);
+  var filtered := SeqFilter(p, active);
+  var exits := reverse(filtered);
+  var entries := SeqFilter((id: string) => plansEnter(plans, id), machine.order);
+  ReverseMembers(filtered);
+  ReverseInvolution(filtered);
+  FilterSubseq(p, active);
+  FiltersAreSubsequences(machine.order);
+  DeclaredMembers(machine.nodes, exits);
+  DeclaredMembers(machine.nodes, entries);
+}
+
+lemma MultiStepMeaning(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, snapshot.active)
+  requires |parallelSelections(machine, snapshot, event)| >= 2
+  ensures var active := snapshot.active;
+    var kept := removeConflicts(machine, active, parallelSelections(machine, snapshot, event), []);
+    var plans := selectionPlans(machine, active, kept);
+    var step := parallelStep(machine, snapshot, event);
+    var exits := reverse(SeqFilter((id: string) => plansExit(plans, id), active));
+    var entries := SeqFilter((id: string) => plansEnter(plans, id), machine.order);
+    declaredPath(machine.nodes, exits) && declaredPath(machine.nodes, entries) &&
+    var exited := lifecycle(machine.nodes, exits, snapshot.context, event, true);
+    var updated := applyAll(exited.context, kept);
+    var entered := lifecycle(machine.nodes, entries, updated.context, event, false);
+    step == ParallelStep(ParallelSnapshot(step.snapshot.active, entered.context), false,
+      exited.reused && updated.reused && entered.reused,
+      exited.effects + Effects(kept) + entered.effects)
+{
+  var active := snapshot.active;
+  var kept := removeConflicts(machine, active, parallelSelections(machine, snapshot, event), []);
+  var plans := selectionPlans(machine, active, kept);
+  CombinedLifecycleLists(machine, active, plans);
+  var exits := reverse(SeqFilter((id: string) => plansExit(plans, id), active));
+  var exited := lifecycle(machine.nodes, exits, snapshot.context, event, true);
+  ApplyAllEffects(exited.context, kept);
 }

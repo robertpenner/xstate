@@ -413,3 +413,594 @@ export function compoundTransition(
     effects: [...exited.effects, ...updated.effects, ...entered.effects]
   };
 }
+
+export type ParallelMachine = {
+  root: string;
+  context: Record<string, number>;
+  nodes: Record<string, CompoundNode>;
+  order: readonly string[];
+  parallel: string | undefined;
+};
+export type ParallelSnapshot = {
+  active: readonly string[];
+  context: Record<string, number>;
+};
+export type ParallelStep = {
+  snapshot: ParallelSnapshot;
+  snapshotReused: boolean;
+  contextReused: boolean;
+  effects: readonly Effect[];
+};
+
+export function below(
+  path: readonly string[],
+  prefix: readonly string[]
+): boolean {
+  //@ verify
+  //@ ensures \result ==> path.length > prefix.length
+  return (
+    path.length > prefix.length && commonPrefix(path, prefix) === prefix.length
+  );
+}
+
+export function samePath(a: readonly string[], b: readonly string[]): boolean {
+  //@ verify
+  //@ ensures \result ==> a.length === b.length
+  return a.length === b.length && commonPrefix(a, b) === a.length;
+}
+
+export function completes(
+  nodes: Record<string, CompoundNode>,
+  parallel: string | undefined,
+  target: readonly string[],
+  path: readonly string[]
+): boolean {
+  //@ verify
+  //@ ensures path.length < 2 ==> \result
+  //@ decreases path.length
+  if (path.length < 2) return true;
+  const id = path[0];
+  if (!(id in nodes)) return false;
+  const node = lookupNode(nodes, id);
+  const child = path[1];
+  const allowed =
+    id === parallel ||
+    (below(target, node.path)
+      ? child === target[node.path.length]
+      : child === node.initial);
+  return allowed && completes(nodes, parallel, target, path.slice(1));
+}
+
+export function entering(
+  nodes: Record<string, CompoundNode>,
+  parallel: string | undefined,
+  target: readonly string[],
+  domain: readonly string[],
+  extra: string | undefined,
+  id: string
+): boolean {
+  //@ verify
+  if (!(id in nodes)) return false;
+  if (id === extra) return true;
+  const path = lookupNode(nodes, id).path;
+  return (
+    below(path, domain) &&
+    completes(
+      nodes,
+      parallel,
+      target,
+      path.slice(domain.length === 0 ? 0 : domain.length - 1)
+    )
+  );
+}
+
+export function exiting(
+  nodes: Record<string, CompoundNode>,
+  domain: readonly string[],
+  reentered: string | undefined,
+  id: string
+): boolean {
+  //@ verify
+  if (!(id in nodes)) return false;
+  if (id === reentered) return true;
+  return below(lookupNode(nodes, id).path, domain);
+}
+
+export function narrow(
+  parallel: string | undefined,
+  target: readonly string[],
+  domain: readonly string[]
+): readonly string[] {
+  //@ verify
+  if (domain.length === 0 || !below(target, domain)) return domain;
+  if (domain[domain.length - 1] !== parallel) return domain;
+  return target.slice(0, domain.length + 1);
+}
+
+export function transitionDomain(
+  parallel: string | undefined,
+  source: readonly string[],
+  target: readonly string[],
+  reenter: boolean
+): readonly string[] {
+  //@ verify
+  if (commonPrefix(source, target) === source.length) {
+    return reenter ? source : narrow(parallel, target, source);
+  }
+  if (target.length === 0) return [];
+  const ancestors = target.slice(0, target.length - 1);
+  const lca = commonPrefix(source, ancestors);
+  if (reenter) return source.slice(0, lca);
+  return narrow(
+    parallel,
+    target,
+    lca === 0 ? target.slice(0, 1) : source.slice(0, lca)
+  );
+}
+
+export function runLifecycle(
+  nodes: Record<string, CompoundNode>,
+  path: readonly string[],
+  context: Record<string, number>,
+  event: Event,
+  exiting: boolean
+): Applied {
+  //@ verify
+  if (!declaredPath(nodes, path)) return { context, reused: true, effects: [] };
+  return lifecycle(nodes, path, context, event, exiting);
+}
+
+export function leafSelection(
+  nodes: Record<string, CompoundNode>,
+  id: string,
+  base: number,
+  context: Record<string, number>,
+  event: Event
+): Selection | undefined {
+  //@ verify
+  if (!(id in nodes)) return undefined;
+  const node = lookupNode(nodes, id);
+  if (node.children.length > 0 || base < 0 || base > node.path.length)
+    return undefined;
+  const path = node.path.slice(base);
+  if (!declaredPath(nodes, path)) return undefined;
+  return select(nodes, path, context, event);
+}
+
+export function regionSelections(
+  nodes: Record<string, CompoundNode>,
+  active: readonly string[],
+  base: number,
+  context: Record<string, number>,
+  event: Event
+): readonly Selection[] {
+  //@ verify
+  //@ ensures active.length === 0 ==> \result.length === 0
+  //@ decreases active.length
+  if (active.length === 0) return [];
+  const first = leafSelection(nodes, active[0], base, context, event);
+  const rest = regionSelections(nodes, active.slice(1), base, context, event);
+  return first === undefined ? rest : [first, ...rest];
+}
+
+export function activeParallel(
+  machine: ParallelMachine,
+  active: readonly string[]
+): readonly string[] {
+  //@ verify
+  const parallel = machine.parallel;
+  if (
+    parallel === undefined ||
+    !active.includes(parallel) ||
+    !(parallel in machine.nodes)
+  )
+    return [];
+  return lookupNode(machine.nodes, parallel).path;
+}
+
+export function parallelSelections(
+  machine: ParallelMachine,
+  snapshot: ParallelSnapshot,
+  event: Event
+): readonly Selection[] {
+  //@ verify
+  const parallelPath = activeParallel(machine, snapshot.active);
+  const regions = regionSelections(
+    machine.nodes,
+    snapshot.active,
+    parallelPath.length,
+    snapshot.context,
+    event
+  );
+  if (regions.length > 0 || !declaredPath(machine.nodes, parallelPath))
+    return regions;
+  const fallback = select(machine.nodes, parallelPath, snapshot.context, event);
+  return fallback === undefined ? [] : [fallback];
+}
+
+export function parallelReady(
+  machine: ParallelMachine,
+  snapshot: ParallelSnapshot,
+  event: Event
+): boolean {
+  //@ verify
+  const selections = parallelSelections(machine, snapshot, event);
+  if (selections.length === 0) return true;
+  if (selections.length > 1) return false;
+  const result = selections[0].evaluation.result;
+  if (result === undefined) return true;
+  const target = result.target;
+  if (target === undefined) return true;
+  if (!(target in machine.nodes)) return false;
+  const targetPath = lookupNode(machine.nodes, target).path;
+  if (targetPath.length < 2) return true;
+  return !(
+    targetPath[targetPath.length - 2] === machine.parallel &&
+    snapshot.active.includes(target)
+  );
+}
+
+export function parallelInitialTransition(
+  machine: ParallelMachine,
+  event: Event
+): ParallelStep {
+  //@ verify
+  //@ ensures !\result.snapshotReused
+  const nodes = machine.nodes;
+  const parallel = machine.parallel;
+  const target =
+    machine.root in nodes ? lookupNode(nodes, machine.root).path : [];
+  const entries = machine.order.filter((id) =>
+    entering(nodes, parallel, target, [], undefined, id)
+  );
+  const entered = runLifecycle(nodes, entries, machine.context, event, false);
+  return {
+    snapshot: { active: entries, context: entered.context },
+    snapshotReused: false,
+    contextReused: entered.reused,
+    effects: entered.effects
+  };
+}
+
+export type ParallelPlan = {
+  domain: readonly string[];
+  reentered: string | undefined;
+  extra: string | undefined;
+  exits: readonly string[];
+  entries: readonly string[];
+  active: readonly string[];
+};
+
+export function parallelPlan(
+  machine: ParallelMachine,
+  active: readonly string[],
+  source: string,
+  target: string,
+  reenter: boolean
+): ParallelPlan {
+  //@ verify
+  const nodes = machine.nodes;
+  const parallel = machine.parallel;
+  const sourcePath = source in nodes ? lookupNode(nodes, source).path : [];
+  const targetPath = target in nodes ? lookupNode(nodes, target).path : [];
+  const domain = transitionDomain(parallel, sourcePath, targetPath, reenter);
+  const reentered =
+    reenter && samePath(domain, sourcePath) ? source : undefined;
+  const extra =
+    reentered !== undefined
+      ? reentered
+      : samePath(domain, targetPath) && target !== source
+        ? target
+        : undefined;
+  const exits = reverse(
+    active.filter((id) => exiting(nodes, domain, reentered, id))
+  );
+  const entries = machine.order.filter((id) =>
+    entering(nodes, parallel, targetPath, domain, extra, id)
+  );
+  const next = machine.order.filter(
+    (id) =>
+      (active.includes(id) && !exiting(nodes, domain, reentered, id)) ||
+      entering(nodes, parallel, targetPath, domain, extra, id)
+  );
+  return { domain, reentered, extra, exits, entries, active: next };
+}
+
+export function parallelTransition(
+  machine: ParallelMachine,
+  snapshot: ParallelSnapshot,
+  event: Event
+): ParallelStep {
+  //@ verify
+  //@ ensures \result.snapshotReused ==> \result.snapshot === snapshot
+  const selections = parallelSelections(machine, snapshot, event);
+  if (selections.length === 0) {
+    return { snapshot, snapshotReused: true, contextReused: true, effects: [] };
+  }
+  const selected = selections[0];
+  const nodes = machine.nodes;
+  const result = selected.evaluation.result;
+  const target = result === undefined ? undefined : result.target;
+  const reenter = result === undefined ? false : result.reenter;
+  if (target === undefined || !(target in nodes)) {
+    const updated = apply(snapshot.context, selected.evaluation);
+    const entered = runLifecycle(
+      nodes,
+      reenter ? [selected.id] : [],
+      updated.context,
+      event,
+      false
+    );
+    return {
+      snapshot: { active: snapshot.active, context: entered.context },
+      snapshotReused: false,
+      contextReused: updated.reused && entered.reused,
+      effects: [...updated.effects, ...entered.effects]
+    };
+  }
+  const plan = parallelPlan(
+    machine,
+    snapshot.active,
+    selected.id,
+    target,
+    reenter
+  );
+  const exited = runLifecycle(nodes, plan.exits, snapshot.context, event, true);
+  const updated = apply(exited.context, selected.evaluation);
+  const entered = runLifecycle(
+    nodes,
+    plan.entries,
+    updated.context,
+    event,
+    false
+  );
+  return {
+    snapshot: { active: plan.active, context: entered.context },
+    snapshotReused: false,
+    contextReused: exited.reused && updated.reused && entered.reused,
+    effects: [...exited.effects, ...updated.effects, ...entered.effects]
+  };
+}
+
+export function selectionPlan(
+  machine: ParallelMachine,
+  active: readonly string[],
+  selection: Selection
+): ParallelPlan | undefined {
+  //@ verify
+  const result = selection.evaluation.result;
+  if (result === undefined) return undefined;
+  const target = result.target;
+  if (target === undefined || !(target in machine.nodes)) return undefined;
+  return parallelPlan(machine, active, selection.id, target, result.reenter);
+}
+
+export function conflictExits(
+  machine: ParallelMachine,
+  active: readonly string[],
+  selection: Selection
+): readonly string[] {
+  //@ verify
+  const plan = selectionPlan(machine, active, selection);
+  return plan === undefined ? [] : plan.exits;
+}
+
+export function overlaps(a: readonly string[], b: readonly string[]): boolean {
+  //@ verify
+  return a.some((id) => b.includes(id));
+}
+
+export function preempts(
+  machine: ParallelMachine,
+  active: readonly string[],
+  candidate: Selection,
+  kept: Selection
+): boolean {
+  //@ verify
+  return (
+    overlaps(
+      conflictExits(machine, active, candidate),
+      conflictExits(machine, active, kept)
+    ) && !below(candidate.node.path, kept.node.path)
+  );
+}
+
+export function anyPreempts(
+  machine: ParallelMachine,
+  active: readonly string[],
+  candidate: Selection,
+  kept: readonly Selection[]
+): boolean {
+  //@ verify
+  //@ decreases kept.length
+  if (kept.length === 0) return false;
+  return (
+    preempts(machine, active, candidate, kept[0]) ||
+    anyPreempts(machine, active, candidate, kept.slice(1))
+  );
+}
+
+export function removeConflicts(
+  machine: ParallelMachine,
+  active: readonly string[],
+  pending: readonly Selection[],
+  kept: readonly Selection[]
+): readonly Selection[] {
+  //@ verify
+  //@ decreases pending.length
+  if (pending.length === 0) return kept;
+  const first = pending[0];
+  const rest = pending.slice(1);
+  if (anyPreempts(machine, active, first, kept)) {
+    return removeConflicts(machine, active, rest, kept);
+  }
+  const exits = conflictExits(machine, active, first);
+  const survivors = kept.filter(
+    (other) => !overlaps(exits, conflictExits(machine, active, other))
+  );
+  return removeConflicts(machine, active, rest, [...survivors, first]);
+}
+
+export function selectionPlans(
+  machine: ParallelMachine,
+  active: readonly string[],
+  selections: readonly Selection[]
+): readonly ParallelPlan[] {
+  //@ verify
+  //@ ensures \result.length <= selections.length
+  //@ decreases selections.length
+  if (selections.length === 0) return [];
+  const plan = selectionPlan(machine, active, selections[0]);
+  const rest = selectionPlans(machine, active, selections.slice(1));
+  return plan === undefined ? rest : [plan, ...rest];
+}
+
+export function plansExit(plans: readonly ParallelPlan[], id: string): boolean {
+  //@ verify
+  return plans.some((plan) => plan.exits.includes(id));
+}
+
+export function plansEnter(
+  plans: readonly ParallelPlan[],
+  id: string
+): boolean {
+  //@ verify
+  return plans.some((plan) => plan.entries.includes(id));
+}
+
+export function applyAll(
+  context: Record<string, number>,
+  selections: readonly Selection[]
+): Applied {
+  //@ verify
+  //@ ensures selections.length === 0 ==> \result.context === context
+  //@ decreases selections.length
+  if (selections.length === 0) return { context, reused: true, effects: [] };
+  const first = apply(context, selections[0].evaluation);
+  const rest = applyAll(first.context, selections.slice(1));
+  return {
+    context: rest.context,
+    reused: first.reused && rest.reused,
+    effects: [...first.effects, ...rest.effects]
+  };
+}
+
+export function selectionReady(
+  machine: ParallelMachine,
+  active: readonly string[],
+  selection: Selection
+): boolean {
+  //@ verify
+  const result = selection.evaluation.result;
+  if (result === undefined) return true;
+  const target = result.target;
+  if (target === undefined) return !result.reenter;
+  if (!(target in machine.nodes)) return false;
+  const targetPath = lookupNode(machine.nodes, target).path;
+  if (targetPath.length < 2) return true;
+  return !(
+    targetPath[targetPath.length - 2] === machine.parallel &&
+    active.includes(target)
+  );
+}
+
+export function comparable(
+  a: readonly string[],
+  b: readonly string[]
+): boolean {
+  //@ verify
+  const shared = commonPrefix(a, b);
+  return shared === a.length || shared === b.length;
+}
+
+export function sourceApart(
+  path: readonly string[],
+  selections: readonly Selection[]
+): boolean {
+  //@ verify
+  //@ decreases selections.length
+  if (selections.length === 0) return true;
+  return (
+    !comparable(path, selections[0].node.path) &&
+    sourceApart(path, selections.slice(1))
+  );
+}
+
+export function sourcesApart(selections: readonly Selection[]): boolean {
+  //@ verify
+  //@ decreases selections.length
+  if (selections.length === 0) return true;
+  const first = selections[0];
+  const rest = selections.slice(1);
+  return sourceApart(first.node.path, rest) && sourcesApart(rest);
+}
+
+export function domainsApart(plans: readonly ParallelPlan[]): boolean {
+  //@ verify
+  //@ decreases plans.length
+  if (plans.length === 0) return true;
+  const first = plans[0];
+  const rest = plans.slice(1);
+  return (
+    !rest.some((other) => comparable(first.domain, other.domain)) &&
+    domainsApart(rest)
+  );
+}
+
+export function multiReady(
+  machine: ParallelMachine,
+  active: readonly string[],
+  selections: readonly Selection[]
+): boolean {
+  //@ verify
+  const kept = removeConflicts(machine, active, selections, []);
+  return (
+    selections.every((selection) =>
+      selectionReady(machine, active, selection)
+    ) &&
+    sourcesApart(selections) &&
+    domainsApart(selectionPlans(machine, active, kept))
+  );
+}
+
+export function parallelStepReady(
+  machine: ParallelMachine,
+  snapshot: ParallelSnapshot,
+  event: Event
+): boolean {
+  //@ verify
+  const selections = parallelSelections(machine, snapshot, event);
+  if (selections.length < 2) return parallelReady(machine, snapshot, event);
+  return multiReady(machine, snapshot.active, selections);
+}
+
+export function parallelStep(
+  machine: ParallelMachine,
+  snapshot: ParallelSnapshot,
+  event: Event
+): ParallelStep {
+  //@ verify
+  //@ ensures \result.snapshotReused ==> \result.snapshot === snapshot
+  const selections = parallelSelections(machine, snapshot, event);
+  if (selections.length < 2)
+    return parallelTransition(machine, snapshot, event);
+  const nodes = machine.nodes;
+  const active = snapshot.active;
+  const kept = removeConflicts(machine, active, selections, []);
+  const plans = selectionPlans(machine, active, kept);
+  const exits = reverse(active.filter((id) => plansExit(plans, id)));
+  const entries = machine.order.filter((id) => plansEnter(plans, id));
+  const next = machine.order.filter(
+    (id) =>
+      (active.includes(id) && !plansExit(plans, id)) || plansEnter(plans, id)
+  );
+  const exited = runLifecycle(nodes, exits, snapshot.context, event, true);
+  const updated = applyAll(exited.context, kept);
+  const entered = runLifecycle(nodes, entries, updated.context, event, false);
+  return {
+    snapshot: { active: next, context: entered.context },
+    snapshotReused: false,
+    contextReused: exited.reused && updated.reused && entered.reused,
+    effects: [...exited.effects, ...updated.effects, ...entered.effects]
+  };
+}
