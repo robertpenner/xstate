@@ -308,6 +308,15 @@ describe('single parallel subtree model', () => {
     ).toThrow(/Unsupported/);
   });
 
+  it('refuses array targets before running', () => {
+    expect(() =>
+      compareParallelTrace(
+        lights({ jump: { target: ['.a.a2', '.b.b2'] } as never }),
+        []
+      )
+    ).toThrow(/Unsupported target/);
+  });
+
   it('refuses steps where more than one region selects a transition', () => {
     const config = lights();
     config.states!.p.states!.b.states!.b1.on = { next: { target: 'b2' } };

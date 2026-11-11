@@ -29,6 +29,24 @@ const defects = [
     after: 'statesToExit.sort((a, b) => a.order - b.order);',
     testFile: 'packages/core/test/machine-model/compoundModel.test.ts',
     test: 'orders multiple exits and entries around a pre-exit transition calculation'
+  },
+  {
+    name: 'parallel domain is never narrowed to a region',
+    file: 'packages/core/src/stateUtils.ts',
+    before: "while (narrowed.type === 'parallel') {",
+    after: "while (narrowed.type === 'parallel' && targetStates.length < 0) {",
+    testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
+    test: 'narrows a cross-region transition to the target region'
+  },
+  {
+    name: 'parallel regions are entered in reverse document order',
+    file: 'packages/core/src/stateUtils.ts',
+    before: `for (const stateNodeToEnter of [...statesToEnter].sort(
+        (a, b) => a.order - b.order`,
+    after: `for (const stateNodeToEnter of [...statesToEnter].sort(
+        (a, b) => b.order - a.order`,
+    testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
+    test: 'enters every region of a root-level parallel machine in document order'
   }
 ];
 for (const defect of defects) {
