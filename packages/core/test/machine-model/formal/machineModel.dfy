@@ -2419,7 +2419,10 @@ lemma ReenterWidens(machine: ParallelMachine, active: seq<string>, source: strin
   requires machine.nodes[source].path[|machine.nodes[parallel].path|] !=
     machine.nodes[target].path[|machine.nodes[parallel].path|]
   ensures var plan := parallelPlan(machine, active, source, target, true);
-    plan.domain == machine.nodes[parallel].path && parallel !in plan.exits && parallel !in plan.entries
+    plan.domain == machine.nodes[parallel].path && parallel !in plan.exits && parallel !in plan.entries &&
+    forall id ::
+      (id in active && id in machine.nodes && below(machine.nodes[id].path, machine.nodes[parallel].path)) ==>
+        id in plan.exits
 {
   var nodes := machine.nodes;
   var parallelPath := nodes[parallel].path;
@@ -2440,6 +2443,65 @@ lemma ReenterWidens(machine: ParallelMachine, active: seq<string>, source: strin
   assert plan.extra == None;
   assert !exiting(nodes, plan.domain, plan.reentered, parallel);
   assert !entering(nodes, machine.parallel, targetPath, plan.domain, plan.extra, parallel);
+  forall id | id in active && id in nodes && below(nodes[id].path, parallelPath)
+    ensures id in plan.exits
+  {
+    assert exiting(nodes, plan.domain, plan.reentered, id);
+  }
+}
+
+lemma ReenterResetsSubtree(machine: ParallelMachine, active: seq<string>, source: string, target: string, parallel: string)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source in active && target in machine.nodes
+  requires machine.parallel == Some(parallel)
+  requires source == parallel || below(machine.nodes[parallel].path, machine.nodes[source].path)
+  requires below(machine.nodes[target].path, machine.nodes[parallel].path)
+  ensures var plan := parallelPlan(machine, active, source, target, true);
+    plan.domain == machine.nodes[source].path && plan.reentered == Some(source) &&
+    source in plan.exits && source in plan.entries &&
+    forall id ::
+      (id in active && id in machine.nodes && InRegion(machine.nodes[id].path, machine.nodes[parallel].path)) ==>
+        id in plan.exits
+{
+  hide *;
+  reveal InRegion(), PlanFacts(), PlanDomainFacts(), PlanMemberFacts(), exiting(), entering(), below(),
+    parallelPlan(), transitionDomain(), ParallelWellFormed(), ParallelNodeShape();
+  KnownNodes(machine, active, source, parallel);
+  var nodes := machine.nodes;
+  var parallelPath := nodes[parallel].path;
+  var sourcePath := nodes[source].path;
+  var targetPath := nodes[target].path;
+  assert ParallelNodeShape(machine, parallel);
+  assert ParallelNodeShape(machine, source);
+  BelowMeaning(targetPath, parallelPath);
+  if source != parallel {
+    BelowMeaning(parallelPath, sourcePath);
+  }
+  assert |parallelPath| >= |sourcePath| && parallelPath[..|sourcePath|] == sourcePath;
+  assert targetPath[..|sourcePath|] == sourcePath;
+  CommonPrefixExact(sourcePath, targetPath, |sourcePath|);
+  assert transitionDomain(machine.parallel, sourcePath, targetPath, true) == sourcePath;
+  SamePathMeaning(sourcePath, sourcePath);
+  var plan := parallelPlan(machine, active, source, target, true);
+  assert plan.domain == sourcePath;
+  assert plan.reentered == Some(source);
+  PlanContext(machine, active, source, target, true);
+  assert exiting(nodes, plan.domain, plan.reentered, source);
+  assert entering(nodes, machine.parallel, targetPath, plan.domain, plan.extra, source);
+  forall id | id in active && id in nodes && InRegion(nodes[id].path, parallelPath)
+    ensures id in plan.exits
+  {
+    var path := nodes[id].path;
+    assert ParallelNodeShape(machine, id);
+    assert path[..|sourcePath|] == sourcePath;
+    if |path| == |sourcePath| {
+      assert path == sourcePath;
+      assert id == source;
+    } else {
+      BelowMeaning(path, sourcePath);
+    }
+    assert exiting(nodes, plan.domain, plan.reentered, id);
+  }
 }
 
 lemma ParallelSelfReenter(machine: ParallelMachine, active: seq<string>, parallel: string)
