@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 456,
+  "verifiedCount": 462,
   "functions": [
     "mergePatch",
     "apply",
@@ -207,6 +207,10 @@
     "ReenterWidens",
     "ReenterResetsSubtree",
     "ParallelSelfReenter",
+    "NarrowWithin",
+    "DomainWithinTarget",
+    "PatternDomainsComparable",
+    "PatternRefused",
     "PlanDeclared",
     "ParallelStepMeaning",
     "ParallelTargetlessKeepsActive",

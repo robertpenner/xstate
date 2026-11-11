@@ -3016,6 +3016,80 @@ lemma {:induction false} DomainsApartMeaning(plans: seq<ParallelPlan>)
   }
 }
 
+lemma NarrowWithin(parallel: Option<string>, target: seq<string>, domain: seq<string>)
+  requires Within(target, domain)
+  ensures Within(target, narrow(parallel, target, domain))
+{
+  BelowMeaning(target, domain);
+}
+
+lemma DomainWithinTarget(parallel: Option<string>, source: seq<string>, target: seq<string>, reenter: bool)
+  ensures Within(target, transitionDomain(parallel, source, target, reenter))
+{
+  if commonPrefix(source, target) == |source| {
+    assert source == target[..|source|];
+    NarrowWithin(parallel, target, source);
+  } else if |target| > 0 {
+    var ancestors := target[0..|target| - 1];
+    var lca := commonPrefix(source, ancestors);
+    assert source[0..lca] == ancestors[0..lca] == target[0..lca];
+    if lca == 0 {
+      NarrowWithin(parallel, target, target[0..1]);
+    } else {
+      NarrowWithin(parallel, target, source[0..lca]);
+    }
+  }
+}
+
+// statelyai/xstate#5895 pattern: one transition's exit set contains the
+// other's target or an ancestor of it. Its domains are then comparable.
+lemma PatternDomainsComparable(machine: ParallelMachine, active: seq<string>,
+                               source1: string, target1: string, reenter1: bool,
+                               source2: string, target2: string, reenter2: bool, node: string)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source1 in active && target1 in machine.nodes && source2 in active && target2 in machine.nodes
+  requires node in machine.nodes && Within(machine.nodes[target2].path, machine.nodes[node].path)
+  requires node in parallelPlan(machine, active, source1, target1, reenter1).exits
+  ensures comparable(parallelPlan(machine, active, source1, target1, reenter1).domain,
+                     parallelPlan(machine, active, source2, target2, reenter2).domain)
+{
+  var nodes := machine.nodes;
+  var plan1 := parallelPlan(machine, active, source1, target1, reenter1);
+  var plan2 := parallelPlan(machine, active, source2, target2, reenter2);
+  KnownSource(machine, active, source1);
+  KnownSource(machine, active, source2);
+  PlanContext(machine, active, source1, target1, reenter1);
+  PlanContext(machine, active, source2, target2, reenter2);
+  var nodePath := nodes[node].path;
+  var targetPath := nodes[target2].path;
+  assert exiting(nodes, plan1.domain, plan1.reentered, node);
+  WithinMeaning(nodePath, plan1.domain);
+  WithinTransitive(targetPath, nodePath, plan1.domain);
+  DomainWithinTarget(machine.parallel, nodes[source2].path, targetPath, reenter2);
+  WithinShared(targetPath, plan1.domain, plan2.domain);
+}
+
+// Every #5895-pattern pair in the plans checked by `multiReady` fails
+// `domainsApart`, so the step is refused before comparison.
+lemma PatternRefused(machine: ParallelMachine, active: seq<string>, plans: seq<ParallelPlan>, i: int, j: int,
+                     source1: string, target1: string, reenter1: bool,
+                     source2: string, target2: string, reenter2: bool, node: string)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, active)
+  requires source1 in active && target1 in machine.nodes && source2 in active && target2 in machine.nodes
+  requires 0 <= i < |plans| && 0 <= j < |plans| && i != j
+  requires plans[i] == parallelPlan(machine, active, source1, target1, reenter1)
+  requires plans[j] == parallelPlan(machine, active, source2, target2, reenter2)
+  requires node in machine.nodes && Within(machine.nodes[target2].path, machine.nodes[node].path)
+  requires node in plans[i].exits
+  ensures !domainsApart(plans)
+{
+  PatternDomainsComparable(machine, active, source1, target1, reenter1, source2, target2, reenter2, node);
+  if domainsApart(plans) {
+    DomainsApartMeaning(plans);
+    assert !comparable(plans[i].domain, plans[j].domain);
+  }
+}
+
 ghost predicate Combined(plans: seq<ParallelPlan>, active: seq<string>, id: string)
 {
   (id in active && !plansExit(plans, id)) || plansEnter(plans, id)
