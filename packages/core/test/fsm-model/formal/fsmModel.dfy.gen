@@ -15,38 +15,11 @@ datatype Transition = target(target: string) | config(config: TransitionConfig) 
 
 datatype StateNode = StateNode(on: map<string, Transition>, inheritedOn: map<string, Transition>)
 
-datatype Machine = Machine(initial: string, context: Option<map<string, Value>>, inherited: map<string, Value>, states: map<string, StateNode>, inheritedStates: map<string, StateNode>)
+datatype Machine = Machine(initial: string, context: Option<map<string, Value>>, states: map<string, StateNode>, inheritedStates: map<string, StateNode>)
 
 datatype Snapshot = Snapshot(value: string, context: map<string, Value>)
 
 datatype Step = Step(snapshot: Snapshot, reused: bool)
-
-function strictEquals(a: Value, b: Value): bool
-{
-  match a {
-    case integer(i_a_value) =>
-      if b.integer? then
-        (b.value == i_a_value)
-      else
-        (b.negativeZero? && (i_a_value == 0))
-    case negativeZero =>
-      if b.integer? then
-        (b.value == 0)
-      else
-        b.negativeZero?
-    case notANumber =>
-      false
-    case undefinedValue =>
-      b.undefinedValue?
-    case opaque_(i_a_id) =>
-      (b.opaque_? && (b.id == i_a_id))
-  }
-}
-
-lemma strictEquals_ensures(a: Value, b: Value)
-  ensures (a.notANumber? ==> !(strictEquals(a, b)))
-{
-}
 
 function sameValue(a: Value, b: Value): bool
 {
@@ -69,22 +42,6 @@ lemma sameValue_ensures(a: Value, b: Value)
 {
 }
 
-function read(inherited: map<string, Value>, context: map<string, Value>, key: string): Value
-{
-  if (key in context) then
-    context[key]
-  else
-    if (key in inherited) then
-      inherited[key]
-    else
-      Value.undefinedValue
-}
-
-lemma read_ensures(inherited: map<string, Value>, context: map<string, Value>, key: string)
-  ensures ((key in context) ==> ((key in context) && (var i_value := context[key]; (i_value == read(inherited, context, key)))))
-{
-}
-
 function initialState(machine: Machine): Snapshot
 {
   Snapshot(machine.initial, (match machine.context { case Some(i_oc0_val) => i_oc0_val case None => map[] }))
@@ -97,15 +54,11 @@ lemma initialState_ensures(machine: Machine)
 
 function lookupState(machine: Machine, value: string): Option<StateNode>
 {
-  if (value in machine.states) then
-    var i_own_val := machine.states[value];
-    Some(i_own_val)
-  else
-    (if value in machine.inheritedStates then Some(machine.inheritedStates[value]) else None)
+  (if value in machine.states then Some(machine.states[value]) else None)
 }
 
 lemma lookupState_ensures(machine: Machine, value: string)
-  ensures (!((value in machine.states)) ==> !((value in machine.inheritedStates)) ==> (match lookupState(machine, value) { case Some(i_) => false case None => true }))
+  ensures (!((value in machine.states)) ==> (match lookupState(machine, value) { case Some(i_) => false case None => true }))
 {
 }
 
@@ -121,7 +74,7 @@ function lookupTransition(machine: Machine, value: string, type_: string): Optio
 }
 
 lemma lookupTransition_ensures(machine: Machine, value: string, type_: string)
-  ensures (!((value in machine.states)) ==> !((value in machine.inheritedStates)) ==> (match lookupTransition(machine, value, type_) { case Some(i_) => false case None => true }))
+  ensures (!((value in machine.states)) ==> (match lookupTransition(machine, value, type_) { case Some(i_) => false case None => true }))
 {
 }
 
@@ -148,13 +101,23 @@ lemma resolveTransition_ensures(transition: Option<Transition>, context: map<str
 {
 }
 
-function patchChanges(inherited: map<string, Value>, context: map<string, Value>, patch: seq<PatchEntry>): bool
+function entryUnchanged(context: map<string, Value>, entry: PatchEntry): bool
 {
-  (exists entry :: entry in patch && !(strictEquals(entry.value, read(inherited, context, entry.key))))
+  ((entry.key in context) && sameValue(entry.value, context[entry.key]))
 }
 
-lemma patchChanges_ensures(inherited: map<string, Value>, context: map<string, Value>, patch: seq<PatchEntry>)
-  ensures ((|patch| == 0) ==> !(patchChanges(inherited, context, patch)))
+lemma entryUnchanged_ensures(context: map<string, Value>, entry: PatchEntry)
+  ensures (!((entry.key in context)) ==> !(entryUnchanged(context, entry)))
+{
+}
+
+function patchChanges(context: map<string, Value>, patch: seq<PatchEntry>): bool
+{
+  (exists entry :: entry in patch && !(entryUnchanged(context, entry)))
+}
+
+lemma patchChanges_ensures(context: map<string, Value>, patch: seq<PatchEntry>)
+  ensures ((|patch| == 0) ==> !(patchChanges(context, patch)))
 {
 }
 
@@ -180,7 +143,7 @@ function transition(machine: Machine, snapshot: Snapshot, event: FSMEvent): Step
     case Some(i_config_val) =>
       var target := (match i_config_val.target { case Some(i_oc1_val) => i_oc1_val case None => snapshot.value });
       var patch := (match i_config_val.context { case Some(i_oc2_val) => i_oc2_val case None => [] });
-      var changed := patchChanges(machine.inherited, snapshot.context, patch);
+      var changed := patchChanges(snapshot.context, patch);
       if ((target == snapshot.value) && !(changed)) then
         Step(snapshot, true)
       else

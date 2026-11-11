@@ -16,14 +16,16 @@ import {
 // reuse after every event. It also checks the parts of the snapshot surface
 // the model leaves out.
 //
-// The model's contexts are plain objects whose keys carry a ':' prefix. No
-// Object.prototype property starts with ':', so `key in context` and
+// The model's contexts are plain objects whose keys are strings: ':' and the
+// name for a string key, and '#' and an interned number for a symbol key. No
+// Object.prototype property starts with ':' or '#', so `key in context` and
 // `context[key]` in the model's TypeScript find own keys only, as Dafny map
-// lookups do. Values become the model's `Value`: integers, -0, NaN and
-// undefined by kind, and everything else an opaque id interned by Object.is,
-// so strings compare by content and objects by identity.
+// lookups and `createFSM`'s `Object.hasOwn` checks do. Values become the
+// model's `Value`: integers, -0, NaN and undefined by kind, and everything
+// else an opaque id interned by Object.is, so strings compare by content and
+// objects by identity.
 
-export type JsContext = Record<string, unknown>;
+export type JsContext = Record<PropertyKey, unknown>;
 export type JsTransitionConfig = { target?: string; context?: JsContext };
 export type JsTransition =
   | string
@@ -39,10 +41,10 @@ export type JsConfig = {
   states: Record<string, { on?: Record<string, JsTransition> }>;
 };
 
-const encodeKey = (key: string) => `:${key}`;
-const decodeKey = (key: string) => key.slice(1);
+const keyLabel = (key: PropertyKey) =>
+  typeof key === 'symbol' ? key.toString() : JSON.stringify(key);
 
-const setOwn = (object: object, key: string, value: unknown) =>
+const setOwn = (object: object, key: PropertyKey, value: unknown) =>
   Object.defineProperty(object, key, {
     value,
     enumerable: true,
@@ -50,38 +52,30 @@ const setOwn = (object: object, key: string, value: unknown) =>
     configurable: true
   });
 
-// The model covers contexts and patches made of own, enumerable, string-keyed
-// data properties on an object whose prototype is Object.prototype.
-// `createFSM` reads accessors twice, skips symbol keys when comparing but
-// copies them, and reads keys through other prototypes, so those inputs are
-// refused.
+// The model covers contexts and patches made of own, enumerable data
+// properties, with string or symbol keys, on an object with any prototype.
+// `createFSM` reads only own keys of both, so their prototypes never matter.
+// It reads accessors more than once, and it finds a non-enumerable own
+// context key with `Object.hasOwn` but drops it when spreading, so those
+// inputs are refused.
 export function assertPlainData(object: object, label: string) {
-  expect(
-    Object.getPrototypeOf(object),
-    `${label}: prototype must be Object.prototype`
-  ).toBe(Object.prototype);
-  expect(
-    Object.getOwnPropertySymbols(object),
-    `${label}: symbol keys are outside the model`
-  ).toEqual([]);
-  for (const [key, descriptor] of Object.entries(
-    Object.getOwnPropertyDescriptors(object)
-  ))
+  for (const key of Reflect.ownKeys(object)) {
+    const descriptor = Object.getOwnPropertyDescriptor(object, key)!;
     expect(
       'value' in descriptor && descriptor.enumerable,
-      `${label}: ${JSON.stringify(key)} must be an enumerable data property`
+      `${label}: ${keyLabel(key)} must be an enumerable data property`
     ).toBe(true);
+  }
 }
 
 // The own data properties of `object`, and for each name the value from the
 // nearest prototype below Object.prototype that has it, whether or not the
-// object also owns the name. `createFSM` reads states with
-// `config.states[value]` and transitions with `Object.hasOwn(on, type)`, both
-// of which find non-enumerable properties, so every string key counts.
-// `createFSM` would run an own or nearest accessor on every lookup. Accessors
-// are refused on every level, including shadowed entries and inherited
-// transitions that `createFSM` never reads, which refuses some configs it
-// handles.
+// object also owns the name. `createFSM` finds states and transitions with
+// `Object.hasOwn`, which finds non-enumerable properties, so every string
+// key counts. The inherited entries let the model state that `createFSM`
+// ignores them. `createFSM` would run an own accessor on every lookup.
+// Accessors are refused on every level, including the inherited entries
+// `createFSM` never reads, which refuses some configs it handles.
 function ownAndInherited<T>(
   object: object,
   label: string,
@@ -156,15 +150,23 @@ class Values {
 // translates the model's contexts back to JavaScript objects.
 export function toModel(config: JsConfig) {
   const values = new Values();
+  const symbols: symbol[] = [];
+  const encodeKey = (key: PropertyKey) => {
+    if (typeof key !== 'symbol') return `:${String(key)}`;
+    if (!symbols.includes(key)) symbols.push(key);
+    return `#${symbols.indexOf(key)}`;
+  };
+  const decodeKey = (key: string): PropertyKey =>
+    key.startsWith('#') ? symbols[Number(key.slice(1))] : key.slice(1);
   const encodeContext = (object: JsContext, label: string) => {
     assertPlainData(object, label);
     const context: Record<string, Value> = {};
-    for (const [key, value] of Object.entries(object))
-      setOwn(context, encodeKey(key), values.toValue(value));
+    for (const key of Reflect.ownKeys(object))
+      setOwn(context, encodeKey(key), values.toValue(object[key]));
     return context;
   };
   // Setting keys in the model's order lets JavaScript move integer-like keys
-  // first, as it does for the objects `createFSM` spreads.
+  // first and symbols last, as it does for the objects `createFSM` spreads.
   const decodeContext = (context: Record<string, Value>) => {
     const object: JsContext = {};
     for (const [key, value] of Object.entries(context))
@@ -173,9 +175,9 @@ export function toModel(config: JsConfig) {
   };
   const patchEntries = (patch: JsContext) => {
     assertPlainData(patch, 'patch');
-    return Object.entries(patch).map(([key, value]) => ({
+    return Reflect.ownKeys(patch).map((key) => ({
       key: encodeKey(key),
-      value: values.toValue(value)
+      value: values.toValue(patch[key])
     }));
   };
   const toConfig = (
@@ -203,9 +205,6 @@ export function toModel(config: JsConfig) {
       };
     return { kind: 'config', config: toConfig(definition)! };
   };
-  const inherited: Record<string, Value> = {};
-  for (const key of Object.getOwnPropertyNames(Object.prototype))
-    setOwn(inherited, encodeKey(key), values.toValue(({} as JsContext)[key]));
   // createFSM treats an undefined transition as no transition, so the
   // model's transition tables leave it out. The empty string is a target.
   // A state whose `on` is missing has no transitions, and it still shadows
@@ -224,23 +223,12 @@ export function toModel(config: JsConfig) {
   const states = ownAndInherited(config.states, 'config.states', (node, name) =>
     toStateNode(node, `config.states[${JSON.stringify(name)}]`)
   );
-  // A name that only Object.prototype supplies reads a method, or for
-  // `__proto__` the prototype of config.states. The model gives such a name
-  // no state, which is right only while it finds no `on`.
-  for (const name of Object.getOwnPropertyNames(Object.prototype))
-    if (!states.own.has(name) && !states.inherited.has(name))
-      expect(
-        (config.states as Record<string, { on?: unknown } | undefined>)[name]
-          ?.on,
-        `config.states.${name} finds transitions outside the model`
-      ).toBe(undefined);
   const machine: Machine = {
     initial: config.initial,
     context:
       config.context === undefined
         ? undefined
         : encodeContext(config.context, 'config.context'),
-    inherited,
     states: states.own,
     inheritedStates: states.inherited
   };
@@ -273,15 +261,15 @@ function assertSameSnapshot(
   label: string
 ) {
   expect(actual.value, `${label}: value`).toBe(expected.value);
-  const entries = Object.entries(decodeContext(expected.context));
-  expect(Object.keys(actual.context), `${label}: context keys`).toEqual(
-    entries.map(([key]) => key)
+  const decoded = decodeContext(expected.context);
+  const keys = Reflect.ownKeys(decoded);
+  expect(Reflect.ownKeys(actual.context), `${label}: context keys`).toEqual(
+    keys
   );
-  for (const [key, value] of entries)
-    expect(
-      actual.context[key],
-      `${label}: context ${JSON.stringify(key)}`
-    ).toBe(value);
+  for (const key of keys)
+    expect(actual.context[key], `${label}: context ${keyLabel(key)}`).toBe(
+      decoded[key]
+    );
 }
 
 export function assertAgrees(config: JsConfig, events: readonly FSMEvent[]) {

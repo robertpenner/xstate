@@ -1,7 +1,7 @@
 import { assertAgrees, toModel, type JsConfig } from './fsmAdapter.ts';
 import { initialState, run, transition } from './fsmModel.ts';
 
-const setOwn = (object: object, key: string, value: unknown) =>
+const setOwn = (object: object, key: PropertyKey, value: unknown) =>
   Object.defineProperty(object, key, {
     value,
     enumerable: true,
@@ -68,19 +68,20 @@ describe('the fsm model and createFSM', () => {
     return run(machine, initialState(machine), events(...types)).value;
   };
 
-  it('finds a state that config.states inherits through Object.create', () => {
+  it('gives a state that config.states inherits through Object.create no transitions', () => {
     const base = { busy: { on: { back: 'idle' } } };
     const deeper = Object.create(base) as JsConfig['states'];
     setOwn(deeper, 'done', { on: { reset: 'idle' } });
     const states = Object.create(deeper) as JsConfig['states'];
     setOwn(states, 'idle', { on: { go: 'busy', finish: 'done' } });
     const config: JsConfig = { initial: 'idle', states };
-    const types = ['go', 'back', 'finish', 'reset', 'go'];
-    expect(finalValue(config, types)).toBe('busy');
-    assertAgrees(config, events(...types));
+    expect(finalValue(config, ['go', 'back'])).toBe('busy');
+    expect(finalValue(config, ['finish', 'reset'])).toBe('done');
+    assertAgrees(config, events('go', 'back', 'go'));
+    assertAgrees(config, events('finish', 'reset', 'go'));
   });
 
-  it('finds a state inherited through a literal __proto__', () => {
+  it('gives a state inherited through a literal __proto__ no transitions', () => {
     const config: JsConfig = {
       initial: 'idle',
       states: {
@@ -89,11 +90,11 @@ describe('the fsm model and createFSM', () => {
       } as JsConfig['states']
     };
     expect(Object.hasOwn(config.states, 'busy')).toBe(false);
-    expect(finalValue(config, ['go', 'back'])).toBe('idle');
+    expect(finalValue(config, ['go', 'back'])).toBe('busy');
     assertAgrees(config, events('go', 'back'));
   });
 
-  it('uses an own state over an inherited state of the same name', () => {
+  it('ignores an inherited state with the same name as an own state', () => {
     const states = Object.create({
       idle: { on: { go: 'inherited' } },
       inherited: {}
@@ -150,32 +151,34 @@ describe('the fsm model and createFSM', () => {
     assertAgrees(config, events('go', 'back'));
   });
 
-  // Each case patches the context `{ zero: 0, text: 'a', ref }` and states
-  // whether createFSM keeps the snapshot.
+  // Each case patches the context `{ zero: 0, text: 'a', ref, nan: NaN }`
+  // and states whether createFSM keeps the snapshot.
   const ref = { label: 'ref' };
   const keepOrCopy: [string, Record<string, unknown>, boolean][] = [
-    ['undefined for an absent key', { absent: undefined }, true],
-    ['-0 over 0 alone', { zero: -0 }, true],
+    ['undefined for an absent key', { absent: undefined }, false],
+    ['-0 over 0 alone', { zero: -0 }, false],
     ['-0 over 0 beside a change', { zero: -0, text: 'b' }, false],
-    ['NaN', { added: Number.NaN }, false],
+    ['0 over 0', { zero: 0 }, true],
+    ['NaN for an absent key', { added: Number.NaN }, false],
+    ['NaN over an own NaN', { nan: Number.NaN }, true],
     ['an equal string', { text: 'a' }, true],
     ['a different string', { text: 'b' }, false],
     ['the same reference', { ref }, true],
     ['an equal but distinct object', { ref: { label: 'ref' } }, false],
     [
-      'Object.prototype.toString for toString',
+      'Object.prototype.toString for the inherited toString',
       { toString: Object.prototype.toString },
-      true
+      false
     ],
     ['another value for toString', { toString: 'own' }, false]
   ];
 
   it.each(keepOrCopy)(
-    'copies a patch exactly when some value is not === to the value read: %s',
+    'copies a patch exactly when some key is not own or some value differs under Object.is: %s',
     (_name, patch, keeps) => {
       const config: JsConfig = {
         initial: 'idle',
-        context: { zero: 0, text: 'a', ref },
+        context: { zero: 0, text: 'a', ref, nan: Number.NaN },
         states: { idle: { on: { patch: { context: patch } } } }
       };
       const { machine, decodeContext } = toModel(config);
@@ -185,15 +188,18 @@ describe('the fsm model and createFSM', () => {
       });
       expect(step.reused).toBe(keeps);
       const context = decodeContext(step.snapshot.context);
-      if (keeps) expect(Object.keys(context)).toEqual(['zero', 'text', 'ref']);
+      if (keeps)
+        expect(Object.keys(context)).toEqual(['zero', 'text', 'ref', 'nan']);
       else
-        for (const [key, value] of Object.entries(patch))
+        for (const [key, value] of Object.entries(patch)) {
+          expect(Object.hasOwn(context, key), key).toBe(true);
           expect(context[key], key).toBe(value);
+        }
       assertAgrees(config, [{ type: 'patch', payload: 0 }]);
     }
   );
 
-  it('always copies for a NaN patch value, and not for 0 over -0', () => {
+  it('keeps the snapshot for NaN over an own NaN, and copies for 0 over -0', () => {
     const config: JsConfig = {
       initial: 'idle',
       context: { x: Number.NaN, y: -0 },
@@ -209,11 +215,11 @@ describe('the fsm model and createFSM', () => {
     const { machine, decodeContext } = toModel(config);
     const start = initialState(machine);
     expect(transition(machine, start, { type: 'nan', payload: 0 }).reused).toBe(
-      false
+      true
     );
     const zero = transition(machine, start, { type: 'zero', payload: 0 });
-    expect(zero.reused).toBe(true);
-    expect(decodeContext(zero.snapshot.context).y).toBe(-0);
+    expect(zero.reused).toBe(false);
+    expect(decodeContext(zero.snapshot.context).y).toBe(0);
     assertAgrees(config, [
       { type: 'nan', payload: 0 },
       { type: 'zero', payload: 0 }
@@ -241,7 +247,7 @@ describe('the fsm model and createFSM', () => {
     ]);
   });
 
-  it('compares a patch for an absent __proto__ with Object.prototype', () => {
+  it('copies a patch for an absent __proto__, even with Object.prototype', () => {
     const inheritedProto = {};
     setOwn(inheritedProto, '__proto__', Object.prototype);
     const otherProto = {};
@@ -258,15 +264,61 @@ describe('the fsm model and createFSM', () => {
         }
       }
     };
+    const { machine } = toModel(config);
+    for (const type of ['inherited', 'other'])
+      expect(
+        transition(machine, initialState(machine), { type, payload: 0 }).reused,
+        type
+      ).toBe(false);
     assertAgrees(config, [
       { type: 'inherited', payload: 0 },
       { type: 'other', payload: 0 }
     ]);
   });
 
+  it('agrees for a null-prototype context, whose prototype createFSM never reads', () => {
+    const context = Object.create(null) as Record<string, unknown>;
+    context.x = 1;
+    const config: JsConfig = {
+      initial: 'idle',
+      context,
+      states: {
+        idle: {
+          on: {
+            same: { context: { x: 1 } },
+            toString: { context: { toString: 'own' } }
+          }
+        }
+      }
+    };
+    assertAgrees(config, events('same', 'toString', 'same'));
+  });
+
+  it('compares symbol keys like string keys', () => {
+    const s = Symbol('s');
+    const t = Symbol('t');
+    const config: JsConfig = {
+      initial: 'idle',
+      context: { x: 1, [s]: 1 },
+      states: {
+        idle: {
+          on: {
+            same: { context: { [s]: 1 } },
+            other: { context: { [s]: 2 } },
+            absent: { context: { [t]: undefined } }
+          }
+        }
+      }
+    };
+    const { machine } = toModel(config);
+    const start = initialState(machine);
+    expect(transition(machine, start, events('same')[0]).reused).toBe(true);
+    expect(transition(machine, start, events('other')[0]).reused).toBe(false);
+    expect(transition(machine, start, events('absent')[0]).reused).toBe(false);
+    assertAgrees(config, events('same', 'other', 'other', 'absent', 'absent'));
+  });
+
   it.each([
-    ['a null-prototype context', Object.create(null), {}],
-    ['a context with a symbol key', { [Symbol('s')]: 1 }, {}],
     [
       'a patch with an accessor',
       {},
@@ -302,14 +354,6 @@ describe('the fsm model and createFSM', () => {
     [
       'a transition with an accessor',
       () => ({ idle: { on: accessor({}, 'go', 'idle') } })
-    ],
-    [
-      'an inherited state named on, which states.__proto__ reaches',
-      () => {
-        const states = Object.create({ on: { on: { go: 'idle' } } });
-        setOwn(states, 'idle', {});
-        return states;
-      }
     ]
   ])('refuses states with %s, which is outside the model', (_name, build) => {
     expect(() =>
@@ -317,18 +361,21 @@ describe('the fsm model and createFSM', () => {
     ).toThrow(/outside the model|must be/);
   });
 
-  it('refuses a state name that a polluted Object.prototype answers with an on', () => {
+  it('gives the snapshot value __proto__ no transitions when states inherits a state named on', () => {
+    const states = Object.create({ on: { on: { go: 'idle' } } });
+    setOwn(states, 'idle', {});
+    assertAgrees({ initial: '__proto__', states }, events('go'));
+  });
+
+  it('ignores a state that a polluted Object.prototype supplies', () => {
     Object.defineProperty(Object.prototype, 'polluted', {
       value: { on: { go: 'idle' } },
       configurable: true
     });
     try {
-      expect(() =>
-        assertAgrees(
-          { initial: 'polluted', states: { idle: {} } },
-          events('go')
-        )
-      ).toThrow(/polluted finds transitions outside the model/);
+      const config: JsConfig = { initial: 'polluted', states: { idle: {} } };
+      expect(finalValue(config, ['go'])).toBe('polluted');
+      assertAgrees(config, events('go'));
     } finally {
       delete (Object.prototype as Record<string, unknown>).polluted;
     }

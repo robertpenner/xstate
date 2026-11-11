@@ -10,36 +10,57 @@ import {
 
 const stateNames = ['a', 'b', 'c', '', '__proto__', 'toString'];
 const eventTypes = ['go', 'back', 'toString', 'constructor', '__proto__', ''];
-const contextKeys = ['x', 'y', 'toString', '__proto__'];
+const contextKeys: PropertyKey[] = [
+  'x',
+  'y',
+  'toString',
+  '__proto__',
+  Symbol('shared')
+];
 
 // Integers, -0, NaN and undefined have their own model kinds. Strings,
 // booleans, fractions and references are opaque: the shared reference and
 // equal strings compare equal, and each fresh object compares unequal.
+// `undefined` has its own branch because a patch of `undefined` for a key the
+// context does not own is the case where own-key and prototype reads differ.
 const shared = { label: 'shared' };
 const contextValue = fc.oneof(
   fc.integer({ min: -2, max: 2 }),
-  fc.constantFrom<unknown>(
-    -0,
-    Number.NaN,
-    0.5,
-    undefined,
-    'a',
-    'b',
-    true,
-    shared
-  ),
+  fc.constant(undefined),
+  fc.constantFrom<unknown>(-0, Number.NaN, 0.5, 'a', 'b', true, shared),
   fc.constant(null).map(() => ({ label: 'fresh' }))
 );
 // Builds objects with Object.fromEntries, which defines own data properties,
 // so a `__proto__` entry is an own key.
-const record = <T>(keys: string[], value: fc.Arbitrary<T>) =>
+const record = <T>(keys: PropertyKey[], value: fc.Arbitrary<T>) =>
   fc
     .uniqueArray(fc.tuple(fc.constantFrom(...keys), value), {
       selector: ([key]) => key,
       maxLength: keys.length
     })
     .map((entries) => Object.fromEntries(entries));
-const patch = record(contextKeys, contextValue);
+// Copies own data properties, keeping a `__proto__` key own, onto an object
+// whose prototype is `base`. Both levels draw from the same names, so an own
+// entry often shadows an inherited one.
+const withPrototype = ([own, base]: [object, object]) =>
+  Object.defineProperties(
+    Object.create(base),
+    Object.getOwnPropertyDescriptors(own)
+  );
+const table = <T>(keys: PropertyKey[], value: fc.Arbitrary<T>) =>
+  fc.oneof(
+    { weight: 2, arbitrary: record(keys, value) },
+    {
+      weight: 1,
+      arbitrary: fc
+        .tuple(record(keys, value), record(keys, value))
+        .map(withPrototype)
+    }
+  );
+// createFSM reads only a patch's own keys, so an inherited patch entry
+// changes nothing. Contexts stay without inherited entries: function
+// transitions read the adapter's decoded copy, which has no prototype.
+const patch = table(contextKeys, contextValue);
 const target = fc.constantFrom(...stateNames);
 const configObject = fc.oneof(
   fc.constant({}),
@@ -77,24 +98,6 @@ const definition = fc.oneof(
   transitionFunction,
   fc.constant(undefined)
 );
-// Copies own data properties, keeping a `__proto__` key own, onto an object
-// whose prototype is `base`. Both levels draw from the same names, so an own
-// entry often shadows an inherited one.
-const withPrototype = ([own, base]: [object, object]) =>
-  Object.defineProperties(
-    Object.create(base),
-    Object.getOwnPropertyDescriptors(own)
-  );
-const table = <T>(keys: string[], value: fc.Arbitrary<T>) =>
-  fc.oneof(
-    { weight: 2, arbitrary: record(keys, value) },
-    {
-      weight: 1,
-      arbitrary: fc
-        .tuple(record(keys, value), record(keys, value))
-        .map(withPrototype)
-    }
-  );
 const stateNode = table(eventTypes, definition).map((on) => ({ on }));
 const config: fc.Arbitrary<JsConfig> = fc.record(
   {

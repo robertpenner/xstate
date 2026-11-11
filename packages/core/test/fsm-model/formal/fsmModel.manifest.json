@@ -1,20 +1,10 @@
 {
   "source": "fsmModel.ts",
-  "verifiedCount": 76,
+  "verifiedCount": 61,
   "functions": {
-    "strictEquals": {
-      "parameters": [],
-      "ensures": ["(a.notANumber? ==> !(strictEquals(a, b)))"]
-    },
     "sameValue": {
       "parameters": [],
       "ensures": ["(sameValue(a, b) == (a == b))"]
-    },
-    "read": {
-      "parameters": [],
-      "ensures": [
-        "((key in context) ==> ((key in context) && (var i_value := context[key]; (i_value == read(inherited, context, key)))))"
-      ]
     },
     "initialState": {
       "parameters": [],
@@ -23,13 +13,13 @@
     "lookupState": {
       "parameters": [],
       "ensures": [
-        "(!((value in machine.states)) ==> !((value in machine.inheritedStates)) ==> (match lookupState(machine, value) { case Some(i_) => false case None => true }))"
+        "(!((value in machine.states)) ==> (match lookupState(machine, value) { case Some(i_) => false case None => true }))"
       ]
     },
     "lookupTransition": {
       "parameters": [],
       "ensures": [
-        "(!((value in machine.states)) ==> !((value in machine.inheritedStates)) ==> (match lookupTransition(machine, value, type_) { case Some(i_) => false case None => true }))"
+        "(!((value in machine.states)) ==> (match lookupTransition(machine, value, type_) { case Some(i_) => false case None => true }))"
       ]
     },
     "resolveTransition": {
@@ -38,11 +28,15 @@
         "((match transition { case Some(i_) => false case None => true }) ==> (match resolveTransition(transition, context, event) { case Some(i_) => false case None => true }))"
       ]
     },
-    "patchChanges": {
+    "entryUnchanged": {
       "parameters": [],
       "ensures": [
-        "((|patch| == 0) ==> !(patchChanges(inherited, context, patch)))"
+        "(!((entry.key in context)) ==> !(entryUnchanged(context, entry)))"
       ]
+    },
+    "patchChanges": {
+      "parameters": [],
+      "ensures": ["((|patch| == 0) ==> !(patchChanges(context, patch)))"]
     },
     "mergePatch": {
       "parameters": [],
@@ -66,13 +60,12 @@
   "specFunctions": [
     "HasKey",
     "DistinctKeys",
-    "NoNotANumber",
+    "OwnsPatch",
     "ResolvedPatch",
     "ResolvedTarget",
     "Resolve",
-    "KeepsStateWithPatch",
     "Declared",
-    "StateOf",
+    "KeepsStateWithPatch",
     "TargetDeclared",
     "TransitionTargetsDeclared",
     "TargetsDeclared"
@@ -81,41 +74,35 @@
     "datatype Value = integer(value: int) | negativeZero | notANumber | undefinedValue | opaque_(id: int)",
     "datatype Transition = target(target: string) | config(config: TransitionConfig) | function_(compute: (map<string, Value>, FSMEvent) -> Option<TransitionConfig>)",
     "datatype StateNode = StateNode(on: map<string, Transition>, inheritedOn: map<string, Transition>)",
-    "datatype Machine = Machine(initial: string, context: Option<map<string, Value>>, inherited: map<string, Value>, states: map<string, StateNode>, inheritedStates: map<string, StateNode>)",
+    "datatype Machine = Machine(initial: string, context: Option<map<string, Value>>, states: map<string, StateNode>, inheritedStates: map<string, StateNode>)",
     "datatype Snapshot = Snapshot(value: string, context: map<string, Value>)",
     "datatype Step = Step(snapshot: Snapshot, reused: bool)"
   ],
   "laws": [
-    "StrictEqualsSymmetric",
-    "StrictEqualsReflexiveExceptNaN",
-    "StrictEqualsDiffersFromSameValue",
     "MergeKeys",
     "MergeValues",
     "MergeOfOwnedValuesIsIdentity",
-    "UnchangedMergeReadsStrictlyEqual",
+    "PatchUnchangedIffOwned",
     "MergeSettles",
     "MergeIdempotent",
     "TransitionMeaning",
     "ChangedPatchCopies",
-    "TransitionReadsMatchMerge",
-    "OwnStateShadowsInherited",
-    "InheritedStateLookup",
+    "ContextIsFullMerge",
+    "PatchKeysOwnedAfterStep",
     "DeclaredStateLookup",
+    "InheritedStateHasNoTransitions",
+    "InheritedStatesIgnored",
     "InheritedEventIsNotFound",
     "MissingTransitionKeepsSnapshot",
-    "ReuseIsExactWithoutNaN",
+    "ReuseIsExact",
     "UnchangedPatchKeepsSnapshot",
-    "EqualCopyIsOwnNaN",
     "StringTargetIsConfigTarget",
     "EmptyConfigKeepsSnapshot",
     "ContextKeysKept",
-    "UndefinedOnAbsentKeyIsUnchanged",
-    "NegativeZeroOverZeroIsUnchanged",
-    "NegativeZeroAppliesWithAnotherChange",
-    "NotANumberAlwaysChanges",
-    "OpaqueComparesByIdentity",
-    "InheritedValueIsUnchanged",
-    "InheritedMismatchOwnsKey",
+    "AbsentKeyAlwaysChanges",
+    "OwnedEntryComparesWithObjectIs",
+    "NegativeZeroOverZeroCopies",
+    "NotANumberOverOwnNotANumberKeepsSnapshot",
     "StepStaysDeclared",
     "RunStaysDeclared",
     "InitialContext",
@@ -136,24 +123,9 @@
       "after": "return mergePatch(context, patch.slice(1));"
     },
     {
-      "name": "a patch for a key the context does not own counts as unchanged",
-      "before": "(entry) => !strictEquals(entry.value, read(inherited, context, entry.key))",
-      "after": "(entry) =>\n      entry.key in context &&\n      !strictEquals(entry.value, read(inherited, context, entry.key))"
-    },
-    {
-      "name": "patches compare with Object.is instead of ===",
-      "before": "!strictEquals(entry.value, read(",
-      "after": "!sameValue(entry.value, read("
-    },
-    {
-      "name": "a key the context does not own counts as changed",
-      "before": "(entry) => !strictEquals(entry.value, read(inherited, context, entry.key))",
-      "after": "(entry) =>\n      !(entry.key in context) ||\n      !strictEquals(entry.value, read(inherited, context, entry.key))"
-    },
-    {
-      "name": "the copy merges only the changed entries",
+      "name": "the copy applies only the first changed entry",
       "before": "return mergePatch({ ...context, [entry.key]: entry.value }, patch.slice(1));",
-      "after": "return mergePatch(\n    entry.key in context && strictEquals(entry.value, read({}, context, entry.key))\n      ? context\n      : { ...context, [entry.key]: entry.value },\n    patch.slice(1)\n  );"
+      "after": "return entryUnchanged(context, entry)\n    ? mergePatch(context, patch.slice(1))\n    : { ...context, [entry.key]: entry.value };"
     },
     {
       "name": "the copy drops the first patch entry",
@@ -161,14 +133,19 @@
       "after": "context: changed ? mergePatch(snapshot.context, patch.slice(1)) : snapshot.context"
     },
     {
-      "name": "inherited keys read as undefined",
-      "before": "if (key in inherited) return inherited[key];",
-      "after": "if (key in inherited) return { kind: 'undefinedValue' };"
+      "name": "a patch for a key the context does not own counts as unchanged",
+      "before": "return false;",
+      "after": "return true;"
     },
     {
-      "name": "NaN is === to NaN",
-      "before": "case 'notANumber':\n      return false;",
-      "after": "case 'notANumber':\n      return b.kind === 'notANumber';"
+      "name": "a key the context does not own compares as undefined",
+      "before": "return false;",
+      "after": "return sameValue(entry.value, { kind: 'undefinedValue' });"
+    },
+    {
+      "name": "-0 equals 0 and NaN differs from NaN, as with ===",
+      "before": "case 'negativeZero':\n      return b.kind === 'negativeZero';\n    case 'notANumber':\n      return b.kind === 'notANumber';",
+      "after": "case 'negativeZero':\n      return b.kind === 'negativeZero' || (b.kind === 'integer' && b.value === 0);\n    case 'notANumber':\n      return false;"
     },
     {
       "name": "the configured target is ignored",
@@ -196,9 +173,9 @@
       "after": "const node = lookupState(machine, machine.initial);"
     },
     {
-      "name": "state lookup ignores inherited states",
-      "before": "return machine.inheritedStates.get(value);",
-      "after": "return undefined;"
+      "name": "state lookup reads inherited states",
+      "before": "return machine.states.get(value);",
+      "after": "return machine.states.get(value) ?? machine.inheritedStates.get(value);"
     },
     {
       "name": "event lookup reads inherited events",
@@ -207,7 +184,7 @@
     }
   ],
   "refactor": {
-    "before": ": b.kind === 'negativeZero' && a.value === 0;",
-    "after": ": a.value === 0 && b.kind === 'negativeZero';"
+    "before": "return sameValue(entry.value, context[entry.key]);",
+    "after": "return sameValue(context[entry.key], entry.value);"
   }
 }

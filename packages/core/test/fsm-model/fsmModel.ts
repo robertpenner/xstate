@@ -1,12 +1,12 @@
 // LemmaScript model of `createFSM` from `xstate/fsm`. Its `transition` follows
-// `packages/core/src/fsm.ts`, which matches the published 6.0.0-beta.1 build.
-// A context or patch value is a JavaScript value as `Object.is` tells them
-// apart: an integer (`0` is +0), -0, NaN, undefined, or an opaque value with an
-// id (strings by content; booleans, null, fractions, and objects by `===`).
-// `strictEquals` is JavaScript `===` over these values. A context patch is the entry list of the patch object, so its keys
-// are distinct. Transition tables are Maps, which find only own keys, as
-// xstate's `Object.hasOwn` lookup does. `config.states[value]` reads through
-// the prototype chain, so a machine has own and inherited state tables.
+// `packages/core/src/fsm.ts` on `next`, after 757b605 (inherited states are
+// ignored) and c70dd85 (patches compare own keys with Object.is). A context or
+// patch value is a JavaScript value as `Object.is` tells them apart: an
+// integer (`0` is +0), -0, NaN, undefined, or an opaque value with an id
+// (strings by content; booleans, null, fractions, and objects by identity).
+// A context patch is the entry list of the patch object, so its keys are
+// distinct. Context, state, and transition tables are Maps, which find only
+// own keys, as xstate's `Object.hasOwn` checks do.
 export type Value =
   | { kind: 'integer'; value: number }
   | { kind: 'negativeZero' }
@@ -35,39 +35,16 @@ export type StateNode = {
   on: Map<string, Transition>;
   inheritedOn: Map<string, Transition>;
 };
-// `inherited` holds the values a context reads for keys it does not own: the
-// properties of its prototype, Object.prototype. `inheritedStates` holds, for
-// each name, the state from the nearest prototype of `config.states` that has
-// one.
+// `inheritedStates` holds, for each name, the state from the nearest prototype
+// of `config.states` that has one, which xstate never reads.
 export type Machine = {
   initial: string;
   context: Record<string, Value> | undefined;
-  inherited: Record<string, Value>;
   states: Map<string, StateNode>;
   inheritedStates: Map<string, StateNode>;
 };
 export type Snapshot = { value: string; context: Record<string, Value> };
 export type Step = { snapshot: Snapshot; reused: boolean };
-
-// JavaScript `===`.
-export function strictEquals(a: Value, b: Value): boolean {
-  //@ verify
-  //@ ensures a.kind === 'notANumber' ==> !\result
-  switch (a.kind) {
-    case 'integer':
-      return b.kind === 'integer'
-        ? b.value === a.value
-        : b.kind === 'negativeZero' && a.value === 0;
-    case 'negativeZero':
-      return b.kind === 'integer' ? b.value === 0 : b.kind === 'negativeZero';
-    case 'notANumber':
-      return false;
-    case 'undefinedValue':
-      return b.kind === 'undefinedValue';
-    case 'opaque':
-      return b.kind === 'opaque' ? b.id === a.id : false;
-  }
-}
 
 // JavaScript `Object.is`.
 export function sameValue(a: Value, b: Value): boolean {
@@ -87,35 +64,20 @@ export function sameValue(a: Value, b: Value): boolean {
   }
 }
 
-// `context[key]`: the own value, else the inherited value, else undefined.
-export function read(
-  inherited: Record<string, Value>,
-  context: Record<string, Value>,
-  key: string
-): Value {
-  //@ verify
-  //@ ensures key in context ==> \result === context[key]
-  if (key in context) return context[key];
-  if (key in inherited) return inherited[key];
-  return { kind: 'undefinedValue' };
-}
-
 export function initialState(machine: Machine): Snapshot {
   //@ verify
   //@ ensures \result.value === machine.initial
   return { value: machine.initial, context: machine.context ?? {} };
 }
 
-// `config.states[value]`: the own state, else the inherited state, else none.
+// `Object.hasOwn(config.states, value) ? config.states[value] : undefined`.
 export function lookupState(
   machine: Machine,
   value: string
 ): StateNode | undefined {
   //@ verify
-  //@ ensures !machine.states.has(value) && !machine.inheritedStates.has(value) ==> \result === undefined
-  const own = machine.states.get(value);
-  if (own !== undefined) return own;
-  return machine.inheritedStates.get(value);
+  //@ ensures !machine.states.has(value) ==> \result === undefined
+  return machine.states.get(value);
 }
 
 export function lookupTransition(
@@ -124,7 +86,7 @@ export function lookupTransition(
   type: string
 ): Transition | undefined {
   //@ verify
-  //@ ensures !machine.states.has(value) && !machine.inheritedStates.has(value) ==> \result === undefined
+  //@ ensures !machine.states.has(value) ==> \result === undefined
   const node = lookupState(machine, value);
   if (node === undefined) return undefined;
   return node.on.get(type);
@@ -150,17 +112,25 @@ export function resolveTransition(
   }
 }
 
-// `transition` copies when `patch[key] !== context[key]` for some patch key.
+// `Object.hasOwn(context, key) && Object.is(patch[key], context[key])`.
+export function entryUnchanged(
+  context: Record<string, Value>,
+  entry: PatchEntry
+): boolean {
+  //@ verify
+  //@ ensures !(entry.key in context) ==> !\result
+  if (entry.key in context) return sameValue(entry.value, context[entry.key]);
+  return false;
+}
+
+// `transition` copies when some patch entry is not unchanged.
 export function patchChanges(
-  inherited: Record<string, Value>,
   context: Record<string, Value>,
   patch: readonly PatchEntry[]
 ): boolean {
   //@ verify
   //@ ensures patch.length === 0 ==> !\result
-  return patch.some(
-    (entry) => !strictEquals(entry.value, read(inherited, context, entry.key))
-  );
+  return patch.some((entry) => !entryUnchanged(context, entry));
 }
 
 export function mergePatch(
@@ -190,7 +160,7 @@ export function transition(
   if (config === undefined) return { snapshot, reused: true };
   const target = config.target ?? snapshot.value;
   const patch = config.context ?? [];
-  const changed = patchChanges(machine.inherited, snapshot.context, patch);
+  const changed = patchChanges(snapshot.context, patch);
   if (target === snapshot.value && !changed) return { snapshot, reused: true };
   return {
     snapshot: {
