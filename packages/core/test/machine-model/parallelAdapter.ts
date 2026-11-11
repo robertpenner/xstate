@@ -139,19 +139,61 @@ export function compareParallelTrace(config: Config, events: readonly Event[]) {
       contextReused: expected.contextReused
     };
   }
-  const trace = [compare(undefined)];
+  const trace = [{ ...compare(undefined), selections: 0, kept: 0 }];
   for (const event of events) {
     const previous = actual;
     const modelEvent = {
       type: event.type,
       value: encoding.encodeValue(event)
     };
-    if (!model.parallelReady(machine, expected.snapshot, modelEvent)) {
-      throw new Error(`Unsupported step: ${event.type}`);
+    if (!model.parallelStepReady(machine, expected.snapshot, modelEvent)) {
+      const reason = refusalReason(machine, expected.snapshot, modelEvent);
+      throw new Error(`Unsupported step: ${event.type} (${reason})`);
     }
-    expected = model.parallelTransition(machine, expected.snapshot, modelEvent);
+    const selected = model.parallelSelections(
+      machine,
+      expected.snapshot,
+      modelEvent
+    );
+    const selections = selected.length;
+    const kept =
+      selections < 2
+        ? selections
+        : model.removeConflicts(machine, expected.snapshot.active, selected, [])
+            .length;
+    expected = model.parallelStep(machine, expected.snapshot, modelEvent);
     [actual, actualEffects] = transition(runtime, actual, event);
-    trace.push(compare(previous));
+    trace.push({ ...compare(previous), selections, kept });
   }
   return trace;
+}
+
+export type RefusalReason =
+  | 'unknown target'
+  | 'active region target'
+  | 'targetless reentry'
+  | 'comparable sources'
+  | 'comparable domains';
+
+// Names the first `parallelStepReady` clause that fails, in the order the
+// model checks them.
+export function refusalReason(
+  machine: model.ParallelMachine,
+  snapshot: model.ParallelSnapshot,
+  event: model.Event
+): RefusalReason {
+  const selections = model.parallelSelections(machine, snapshot, event);
+  for (const selection of selections) {
+    const result = selection.evaluation.result;
+    const target = result?.target;
+    if (target === undefined) {
+      if (selections.length > 1 && result?.reenter) return 'targetless reentry';
+    } else if (!(target in machine.nodes)) {
+      return 'unknown target';
+    } else if (!model.selectionReady(machine, snapshot.active, selection)) {
+      return 'active region target';
+    }
+  }
+  if (!model.sourcesApart(selections)) return 'comparable sources';
+  return 'comparable domains';
 }

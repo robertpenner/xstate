@@ -12,6 +12,12 @@ function SeqFilter<T(!new)>(p: T -> bool, xs: seq<T>): seq<T>
   else (if p(xs[0]) then [xs[0]] else []) + SeqFilter(p, xs[1..])
 }
 
+predicate SeqAll<T>(xs: seq<T>, p: T -> bool)
+  decreases |xs|
+{
+  |xs| == 0 || (p(xs[0]) && SeqAll(xs[1..], p))
+}
+
 datatype PatchEntry = PatchEntry(key: string, value: int)
 
 datatype Event = Event(type_: string, value: int)
@@ -2354,5 +2360,202 @@ lemma RegionFirstSelection(machine: ParallelMachine, snapshot: ParallelSnapshot,
     |regions| > 0 ==> parallelSelections(machine, snapshot, event) == regions
   ensures |parallelSelections(machine, snapshot, event)| == 0 ==>
     parallelTransition(machine, snapshot, event) == ParallelStep(snapshot, true, true, [])
+{
+}
+
+function selectionPlan(machine: ParallelMachine, active: seq<string>, selection: Selection): Option<ParallelPlan>
+{
+  var result := selection.evaluation.result;
+  match result {
+    case Some(i_result_val) =>
+      var target := i_result_val.target;
+      match target {
+        case Some(i_target_val) =>
+          if !((i_target_val in machine.nodes)) then
+            None
+          else
+            Some(parallelPlan(machine, active, selection.id, i_target_val, i_result_val.reenter))
+        case None =>
+          None
+      }
+    case None =>
+      None
+  }
+}
+
+function conflictExits(machine: ParallelMachine, active: seq<string>, selection: Selection): seq<string>
+{
+  var plan := selectionPlan(machine, active, selection);
+  match plan {
+    case Some(i_plan_val) =>
+      i_plan_val.exits
+    case None =>
+      []
+  }
+}
+
+function overlaps(a: seq<string>, b: seq<string>): bool
+{
+  (exists id :: id in a && (id in b))
+}
+
+function preempts(machine: ParallelMachine, active: seq<string>, candidate: Selection, kept: Selection): bool
+{
+  (overlaps(conflictExits(machine, active, candidate), conflictExits(machine, active, kept)) && !(below(candidate.node.path, kept.node.path)))
+}
+
+function anyPreempts(machine: ParallelMachine, active: seq<string>, candidate: Selection, kept: seq<Selection>): bool
+  decreases |kept|
+{
+  if (|kept| == 0) then
+    false
+  else
+    (preempts(machine, active, candidate, kept[0]) || anyPreempts(machine, active, candidate, kept[1..]))
+}
+
+function removeConflicts(machine: ParallelMachine, active: seq<string>, pending: seq<Selection>, kept: seq<Selection>): seq<Selection>
+  decreases |pending|
+{
+  if (|pending| == 0) then
+    kept
+  else
+    var first := pending[0];
+    var rest := pending[1..];
+    if anyPreempts(machine, active, first, kept) then
+      removeConflicts(machine, active, rest, kept)
+    else
+      var exits := conflictExits(machine, active, first);
+      var survivors := SeqFilter((other: Selection) => !(overlaps(exits, conflictExits(machine, active, other))), kept);
+      removeConflicts(machine, active, rest, (survivors + [first]))
+}
+
+function selectionPlans(machine: ParallelMachine, active: seq<string>, selections: seq<Selection>): seq<ParallelPlan>
+  decreases |selections|
+{
+  if (|selections| == 0) then
+    []
+  else
+    var plan := selectionPlan(machine, active, selections[0]);
+    var rest := selectionPlans(machine, active, selections[1..]);
+    match plan {
+      case Some(i_plan_val) =>
+        ([i_plan_val] + rest)
+      case None =>
+        rest
+    }
+}
+
+lemma selectionPlans_ensures(machine: ParallelMachine, active: seq<string>, selections: seq<Selection>)
+  ensures (|selectionPlans(machine, active, selections)| <= |selections|)
+{
+}
+
+function plansExit(plans: seq<ParallelPlan>, id: string): bool
+{
+  (exists plan :: plan in plans && (id in plan.exits))
+}
+
+function plansEnter(plans: seq<ParallelPlan>, id: string): bool
+{
+  (exists plan :: plan in plans && (id in plan.entries))
+}
+
+function applyAll(context: map<string, int>, selections: seq<Selection>): Applied
+  decreases |selections|
+{
+  if (|selections| == 0) then
+    Applied(context, true, [])
+  else
+    var first := apply(context, selections[0].evaluation);
+    var rest := applyAll(first.context, selections[1..]);
+    Applied(rest.context, (first.reused && rest.reused), (first.effects + rest.effects))
+}
+
+lemma applyAll_ensures(context: map<string, int>, selections: seq<Selection>)
+  ensures ((|selections| == 0) ==> (applyAll(context, selections).context == context))
+{
+}
+
+function selectionReady(machine: ParallelMachine, active: seq<string>, selection: Selection): bool
+{
+  var result := selection.evaluation.result;
+  match result {
+    case Some(i_result_val) =>
+      var target := i_result_val.target;
+      match target {
+        case Some(i_target_val) =>
+          if !((i_target_val in machine.nodes)) then
+            false
+          else
+            var targetPath := lookupNode(machine.nodes, i_target_val).path;
+            ((|targetPath| < 2) || !(((match machine.parallel { case Some(i_value) => (i_value == targetPath[(|targetPath| - 2)]) case None => false }) && (i_target_val in active))))
+        case None =>
+          !(i_result_val.reenter)
+      }
+    case None =>
+      true
+  }
+}
+
+function comparable(a: seq<string>, b: seq<string>): bool
+{
+  var shared := commonPrefix(a, b);
+  ((shared == |a|) || (shared == |b|))
+}
+
+function sourceApart(path: seq<string>, selections: seq<Selection>): bool
+  decreases |selections|
+{
+  ((|selections| == 0) || (!(comparable(path, selections[0].node.path)) && sourceApart(path, selections[1..])))
+}
+
+function sourcesApart(selections: seq<Selection>): bool
+  decreases |selections|
+{
+  ((|selections| == 0) || (var first := selections[0]; (var rest := selections[1..]; (sourceApart(first.node.path, rest) && sourcesApart(rest)))))
+}
+
+function domainsApart(plans: seq<ParallelPlan>): bool
+  decreases |plans|
+{
+  ((|plans| == 0) || (var first := plans[0]; (var rest := plans[1..]; (!((exists other :: other in rest && comparable(first.domain, other.domain))) && domainsApart(rest)))))
+}
+
+function multiReady(machine: ParallelMachine, active: seq<string>, selections: seq<Selection>): bool
+{
+  var kept := removeConflicts(machine, active, selections, []);
+  ((SeqAll(selections, (selection: Selection) => selectionReady(machine, active, selection)) && sourcesApart(selections)) && domainsApart(selectionPlans(machine, active, kept)))
+}
+
+function parallelStepReady(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): bool
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  if (|selections| < 2) then
+    parallelReady(machine, snapshot, event)
+  else
+    multiReady(machine, snapshot.active, selections)
+}
+
+function parallelStep(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): ParallelStep
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  if (|selections| < 2) then
+    parallelTransition(machine, snapshot, event)
+  else
+    var nodes := machine.nodes;
+    var active := snapshot.active;
+    var kept := removeConflicts(machine, active, selections, []);
+    var plans := selectionPlans(machine, active, kept);
+    var exits := reverse(SeqFilter((id: string) => plansExit(plans, id), active));
+    var entries := SeqFilter((id: string) => plansEnter(plans, id), machine.order);
+    var next := SeqFilter((id: string) => (((id in active) && !(plansExit(plans, id))) || plansEnter(plans, id)), machine.order);
+    var exited := runLifecycle(nodes, exits, snapshot.context, event, true);
+    var updated := applyAll(exited.context, kept);
+    var entered := runLifecycle(nodes, entries, updated.context, event, false);
+    ParallelStep(ParallelSnapshot(next, entered.context), false, ((exited.reused && updated.reused) && entered.reused), ((exited.effects + updated.effects) + entered.effects))
+}
+
+lemma parallelStep_ensures(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  ensures (parallelStep(machine, snapshot, event).snapshotReused ==> (parallelStep(machine, snapshot, event).snapshot == snapshot))
 {
 }

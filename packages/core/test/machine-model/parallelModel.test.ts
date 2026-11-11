@@ -317,19 +317,179 @@ describe('single parallel subtree model', () => {
     ).toThrow(/Unsupported target/);
   });
 
-  it('refuses steps where more than one region selects a transition', () => {
-    const config = lights();
-    config.states!.p.states!.b.states!.b1.on = { next: { target: 'b2' } };
-    expect(() => compareParallelTrace(config, [{ type: 'next' }])).toThrow(
-      /Unsupported step/
-    );
-  });
-
   it('refuses a non-reentering target of an already active region', () => {
     expect(() =>
       compareParallelTrace(lights({ jump: { target: '.b' } }), [
         { type: 'jump' }
       ])
     ).toThrow(/Unsupported step/);
+  });
+});
+
+type On = Logged['on'];
+function regions(aOn: On, bOn: On, cOn: On = {}, pOn: On = {}): Config {
+  return {
+    id: 'm',
+    context: { count: 0 },
+    initial: 'p',
+    states: {
+      p: logged('p', {
+        type: 'parallel',
+        on: pOn,
+        states: {
+          a: logged('a', {
+            initial: 'a1',
+            states: { a1: logged('a1', { on: aOn }), a2: logged('a2') }
+          }),
+          b: logged('b', {
+            initial: 'b1',
+            states: { b1: logged('b1', { on: bOn }), b2: logged('b2') }
+          }),
+          c: logged('c', {
+            initial: 'c1',
+            states: { c1: logged('c1', { on: cOn }), c2: logged('c2') }
+          })
+        }
+      }),
+      off: logged('off')
+    }
+  };
+}
+const patch =
+  (count: number, target?: string, reenter?: boolean) =>
+  ({ context }: { context: Record<string, unknown> }) => ({
+    ...(target === undefined ? {} : { target }),
+    ...(reenter === undefined ? {} : { reenter }),
+    context: { count: Number(context.count) * 10 + count }
+  });
+
+describe('multi-transition parallel steps', () => {
+  it('takes independent region transitions together, exiting in reverse document order', () => {
+    const trace = compareParallelTrace(
+      regions({ go: { target: 'a2' } }, { go: { target: 'b2' } }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].selections).toBe(2);
+    expect(trace[1].value).toEqual({ p: { a: 'a2', b: 'b2', c: 'c1' } });
+    expect(labels(trace[1])).toEqual([
+      'exit b1',
+      'exit a1',
+      'enter a2',
+      'enter b2'
+    ]);
+  });
+
+  it('combines handled, declined and blocked regions', () => {
+    const trace = compareParallelTrace(
+      regions(
+        { go: patch(1, 'a2') },
+        { go: (): undefined => undefined },
+        { go: undefined }
+      ),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].selections).toBe(2);
+    expect(trace[1].value).toEqual({ p: { a: 'a2', b: 'b1', c: 'c1' } });
+    expect(trace[1].context).toEqual({ count: 1 });
+  });
+
+  it('runs every selected callback on the pre-step context and merges patches in region order', () => {
+    const trace = compareParallelTrace(
+      regions({ go: patch(1) }, { go: patch(2) }, { go: patch(3) }),
+      [{ type: 'go' }, { type: 'go' }]
+    );
+    expect(trace[1].selections).toBe(3);
+    expect(trace.map((step) => step.context)).toEqual([
+      { count: 0 },
+      { count: 3 },
+      { count: 33 }
+    ]);
+  });
+
+  it.each([
+    [
+      'cross-region first',
+      { go: patch(1, '#m.p.b.b2') },
+      { go: patch(2, 'b2') }
+    ],
+    ['local first', { go: patch(1, 'a2') }, { go: patch(2, '#m.p.a.a2') }]
+  ] as const)(
+    'keeps the earlier region when a cross-region transition overlaps a local one (%s)',
+    (_, aOn, bOn) => {
+      const trace = compareParallelTrace(regions(aOn, bOn), [{ type: 'go' }]);
+      expect(trace[1].selections).toBe(2);
+      expect(trace[1].context).toEqual({ count: 1 });
+    }
+  );
+
+  it('keeps the earlier of two regions that both leave the parallel node', () => {
+    const trace = compareParallelTrace(
+      regions({ go: patch(1, '#m.off') }, { go: patch(2, '#m.off') }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].value).toBe('off');
+    expect(trace[1].context).toEqual({ count: 1 });
+    expect(labels(trace[1])).toEqual([
+      'exit c1',
+      'exit c',
+      'exit b1',
+      'exit b',
+      'exit a1',
+      'exit a',
+      'exit p',
+      'enter off'
+    ]);
+  });
+
+  it.each([
+    [
+      'local first',
+      { go: patch(1, 'a2') },
+      { go: patch(2, '#m.p', true) },
+      { a: 'a2', b: 'b1', c: 'c1' }
+    ],
+    [
+      'reentry first',
+      { go: patch(1, '#m.p', true) },
+      { go: patch(2, 'b2') },
+      { a: 'a1', b: 'b1', c: 'c1' }
+    ]
+  ] as const)(
+    'resolves a region transition against a reentry of the parallel node (%s)',
+    (_, aOn, bOn, value) => {
+      const trace = compareParallelTrace(regions(aOn, bOn), [{ type: 'go' }]);
+      expect(trace[1].context).toEqual({ count: 1 });
+      expect(trace[1].value).toEqual({ p: value });
+    }
+  );
+
+  it('selects the parallel node once when every region declines', () => {
+    const trace = compareParallelTrace(regions({}, {}, {}, { go: patch(1) }), [
+      { type: 'go' }
+    ]);
+    expect(trace[1].selections).toBe(1);
+    expect(trace[1].context).toEqual({ count: 1 });
+  });
+
+  it.each([
+    [
+      'active region target',
+      { go: { target: '#m.p.b' } },
+      { go: { target: '#m.off' } }
+    ],
+    [
+      'targetless reentry',
+      { go: { reenter: true } },
+      { go: { target: '#m.p', reenter: true } }
+    ],
+    [
+      'comparable domains',
+      { go: { target: '#m.p.a.a1' } },
+      { go: { target: '#m.off' } }
+    ]
+  ] as const)('refuses a %s before running', (reason, aOn, bOn) => {
+    expect(() =>
+      compareParallelTrace(regions(aOn, bOn), [{ type: 'go' }])
+    ).toThrow(`Unsupported step: go (${reason})`);
   });
 });

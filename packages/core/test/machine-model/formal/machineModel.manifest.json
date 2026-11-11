@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 388,
+  "verifiedCount": 400,
   "functions": [
     "mergePatch",
     "apply",
@@ -34,7 +34,26 @@
     "parallelReady",
     "parallelInitialTransition",
     "parallelPlan",
-    "parallelTransition"
+    "parallelTransition",
+    "SeqAll",
+    "selectionPlan",
+    "conflictExits",
+    "overlaps",
+    "preempts",
+    "anyPreempts",
+    "removeConflicts",
+    "selectionPlans",
+    "plansExit",
+    "plansEnter",
+    "applyAll",
+    "selectionReady",
+    "comparable",
+    "sourceApart",
+    "sourcesApart",
+    "domainsApart",
+    "multiReady",
+    "parallelStepReady",
+    "parallelStep"
   ],
   "contracts": [
     "mergePatch_ensures",
@@ -55,7 +74,10 @@
     "completes_ensures",
     "regionSelections_ensures",
     "parallelInitialTransition_ensures",
-    "parallelTransition_ensures"
+    "parallelTransition_ensures",
+    "selectionPlans_ensures",
+    "applyAll_ensures",
+    "parallelStep_ensures"
   ],
   "specFunctions": [
     "Selected",

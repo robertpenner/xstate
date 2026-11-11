@@ -7,7 +7,15 @@ const effect = () => {
 };
 
 it('compares generated single-parallel trees, targets and event traces', () => {
-  const stats = { runs: 0, parallel: 0, refused: 0, steps: 0 };
+  const stats = {
+    runs: 0,
+    parallel: 0,
+    refused: 0,
+    steps: 0,
+    multiSteps: 0,
+    conflictSteps: 0,
+    reasons: {} as Record<string, number>
+  };
   fc.assert(
     fc.property(
       fc.integer({ min: 1, max: 4 }),
@@ -79,11 +87,15 @@ it('compares generated single-parallel trees, targets and event traces', () => {
         stats.runs++;
         if (parallel) stats.parallel++;
         try {
-          stats.steps +=
-            compareParallelTrace(
-              config,
-              events.map((type) => ({ type }))
-            ).length - 1;
+          const trace = compareParallelTrace(
+            config,
+            events.map((type) => ({ type }))
+          );
+          stats.steps += trace.length - 1;
+          for (const step of trace) {
+            if (step.selections > 1) stats.multiSteps++;
+            if (step.kept < step.selections) stats.conflictSteps++;
+          }
         } catch (error) {
           if (
             !(error instanceof Error) ||
@@ -91,6 +103,8 @@ it('compares generated single-parallel trees, targets and event traces', () => {
           )
             throw error;
           stats.refused++;
+          const reason = /\((.*)\)$/.exec(error.message)?.[1] ?? 'single';
+          stats.reasons[reason] = (stats.reasons[reason] ?? 0) + 1;
         }
       }
     ),
@@ -104,4 +118,6 @@ it('compares generated single-parallel trees, targets and event traces', () => {
   console.info('parallel property coverage', stats);
   expect(stats.parallel).toBeGreaterThan(stats.runs / 4);
   expect(stats.steps).toBeGreaterThan(stats.runs);
+  expect(stats.multiSteps).toBeGreaterThan(0);
+  expect(stats.conflictSteps).toBeGreaterThan(0);
 });
