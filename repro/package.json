@@ -1,0 +1,12 @@
+{
+  "name": "xstate-v6-parallel-conflict-repro",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "xstate": "6.0.0-beta.1",
+    "xstate-v5": "npm:xstate@5.32.5"
+  }
+}
