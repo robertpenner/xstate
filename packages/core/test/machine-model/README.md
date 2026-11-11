@@ -75,6 +75,10 @@ comparison. Context values and ordinary effect arguments may be opaque values,
 including references, `undefined`, `NaN` and signed zero. Configuration and
 callback-result fields not listed above cause explicit refusal. Unknown
 callback arguments and enqueue operations also cause explicit refusal.
+Refusals remain fatal to comparison even if an authored callback catches the
+exception. Capability inspection of the callback argument/enqueue objects
+(including enumeration and prototype inspection) is outside the supported
+domain and is refused.
 
 [`compoundAdapter.ts`](./compoundAdapter.ts) additionally accepts root handlers
 and lifecycle callbacks, nested atomic/compound states, and a root-only atomic
@@ -105,7 +109,13 @@ The adapter interns values with `Object.is`. Each distinct value receives an
 integer token; tokens preserve opaque identity, `NaN` and signed-zero
 distinctions. String keys receive a `:` prefix so JavaScript prototype keys
 cannot collide with map lookup in the executable model. Encoding/decoding and
-normalization are tested, not proved.
+normalization are tested, not proved. The reserved `$prototype` map key records
+the context prototype as another token; user keys always start with `:` and
+cannot collide with it. Decoding preserves a null prototype until a supplied
+patch changes it to `Object.prototype`, including an empty or null-prototype
+patch. Callbacks therefore observe the same inherited properties. Prototype
+information is in the map value, so callback interpretation remains a function
+of the mathematical context.
 
 Callbacks become total mathematical functions over encoded contexts and events.
 Their target-validity assumptions appear in the membership laws. Runtime
@@ -171,6 +181,10 @@ reproductions of two suspected runtime bugs:
 Both assert observed output, so a runtime change requires revisiting these
 characterizations and the model's exit/entry plans.
 The AFK run log records the investigation; no production fix is included.
+
+[`adapterContract.test.ts`](./adapterContract.test.ts) checks both adapters
+against caught refusals, reflective capability probes, null-prototype contexts,
+empty patches, and pre-exit versus post-patch prototype observations.
 
 ## Reproduce
 

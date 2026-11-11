@@ -17,7 +17,7 @@ from confirmed defects.
 
 **Baseline:** `bcd3840` (`origin/next`, refreshed before creating the worktree).
 
-**Verified integration head:** `f3e9b7d` (flat milestone, evidence below).
+**Verified integration head:** `aeb6c78` (flat and compound milestones).
 
 ## Workflow authorization
 
@@ -28,10 +28,10 @@ worktree/lifecycle scripts do not exist in this fork. Existing `main` and
 
 ## Ticket progress
 
-| Issue | Outcome                                        | Status              | Blocker                  | Integration           | Verification             |
-| ----- | ---------------------------------------------- | ------------------- | ------------------------ | --------------------- | ------------------------ |
-| #9    | Flat-machine model, proofs, differential tests | integrated/verified | None                     | `f3e9b7d`             | Flat milestone below     |
-| #10   | Nested compound-state model and evidence       | integrated/verified | None; consumes `f3e9b7d` | This milestone commit | Compound milestone below |
+| Issue | Outcome                                        | Status              | Blocker                  | Integration | Verification             |
+| ----- | ---------------------------------------------- | ------------------- | ------------------------ | ----------- | ------------------------ |
+| #9    | Flat-machine model, proofs, differential tests | integrated/verified | None                     | `f3e9b7d`   | Flat milestone below     |
+| #10   | Nested compound-state model and evidence       | integrated/verified | None; consumes `f3e9b7d` | `aeb6c78`   | Compound milestone below |
 
 ## Verification evidence
 
@@ -202,24 +202,52 @@ user's request for frequent pushes. This checkpoint does not complete #10.
 
 ## Publication at stop or handoff
 
-**Published verified head:** `f3e9b7d`.
+**Published verified head:** `aeb6c78`.
 
 **Unverified checkpoint:** compound implementation and proof work; see verification
 above. The checkpoint's commit is identified by its `chore(core): checkpoint`
 message and the Git history containing this log.
 
-**Remaining local work:** publish the verified compound milestone and complete
-independent series review.
+**Remaining local work:** publish verified review fixes and obtain follow-up
+review and PR publication checks.
 
 ## Final series review
 
-**Base/head:** pending.
+**Base/head:** `bcd3840` / `aeb6c78` for the first independent review.
 
 **Contracts:** robertpenner/xstate#8, #9, #10 and refreshed agent briefs.
 
-**Evidence:** pending.
+**Evidence:** the independent reviewer read the materialized 20-file series,
+fixed refs, issue contracts, runtime source, proof artifacts, and command logs.
 
-**Findings:** pending.
+**Findings:**
+
+- S1: an authored callback could catch the adapter's unsupported-operation
+  exception, or inspect a capability through reflection, and still obtain a
+  successful comparison. Regression tests reproduced both bypasses for both
+  adapters. The evaluator now remembers refusals and rejects the comparison
+  after callback completion; reflective probes are explicitly refused.
+- S2: decoding an accepted null-prototype context created an ordinary object,
+  changing callback-visible inherited properties. Tests reproduced the false
+  discrepancies. A reserved prototype token now participates in the encoded
+  context map, so callbacks remain mathematical functions of the map. Every
+  supplied patch records the runtime's ordinary-object result, including empty
+  and null-prototype patches. Tests also cover pre-exit versus post-patch
+  callback observations and a user key named `$prototype`.
+- E1: the reviewer requested evidence about added `requires false` clauses.
+  An isolated copy of `aeb6c78` accepted that addition to
+  `initialTransition_ensures`: the complete driver still reported 252 verified
+  tasks, all 13 model defects rejected, and successful regeneration. This
+  confirmed a protection gap, not an unsound proof in the submitted model.
+  Header-preservation checks and three anti-weakening probes are being verified
+  in a separate follow-up. The updated checker already rejects the isolated
+  false-precondition proof.
+
+The adapter repairs pass 24 new regression cases and the complete 83-test
+model suite. Build, typecheck, lint, and formatting pass. The full core suite
+passes 187 files and 3029 tests (29 skipped, three todo). All three runtime
+mutations still fail differential assertions and production source is restored.
+Final proof-driver checks are still running.
 
 **Remaining blockers:** final independent review and PR publication checks.
 

@@ -135,20 +135,30 @@ export function createEncoding() {
   };
   const encode = (context: Context): Record<string, number> => {
     plainRecord(context, 'context');
-    return Object.fromEntries(
-      Object.entries(context).map(([key, value]) => [
-        `:${key}`,
-        encodeValue(value)
-      ])
-    );
+    return {
+      $prototype: encodeValue(Object.getPrototypeOf(context)),
+      ...Object.fromEntries(
+        Object.entries(context).map(([key, value]) => [
+          `:${key}`,
+          encodeValue(value)
+        ])
+      )
+    };
   };
-  const decode = (context: Record<string, number>): Context =>
-    Object.fromEntries(
-      Object.entries(context).map(([key, value]) => [
-        key.slice(1),
-        values[value]
-      ])
+  const decode = (context: Record<string, number>): Context => {
+    const prototype = values[context.$prototype];
+    assert.ok(
+      prototype === null || prototype === Object.prototype,
+      'Encoded context must retain its prototype'
     );
+    const decoded = Object.fromEntries(
+      Object.entries(context)
+        .filter(([key]) => key !== '$prototype')
+        .map(([key, value]) => [key.slice(1), values[value]])
+    );
+    Object.setPrototypeOf(decoded, prototype);
+    return decoded;
+  };
   const evaluate =
     (
       definition: Transition,
@@ -157,19 +167,32 @@ export function createEncoding() {
     ) =>
     (context: Record<string, number>, event: model.Event): model.Evaluation => {
       const effects: model.Effect[] = [];
+      let unsupported: Error | undefined;
+      const refuse = (message: string): never => {
+        unsupported ??= new Error(message);
+        throw unsupported;
+      };
+      const enqueueAccess = (_target: Enqueue, key: string | symbol): never =>
+        refuse(`Unsupported enqueue operation: ${String(key)}`);
+      const argumentKey = (key: string | symbol) => {
+        if (key !== 'context' && key !== 'event')
+          refuse(`Unsupported callback argument: ${String(key)}`);
+      };
       const enqueue: Enqueue = new Proxy(
         (action: (...args: unknown[]) => void, ...args: unknown[]) => {
-          if (typeof action !== 'function')
-            throw new Error('Unsupported effect');
+          if (typeof action !== 'function') refuse('Unsupported effect');
           effects.push({
             action: encodeValue(action),
             args: args.map(encodeValue)
           });
         },
         {
-          get: (_target, key) => {
-            throw new Error(`Unsupported enqueue operation: ${String(key)}`);
-          }
+          get: enqueueAccess,
+          has: enqueueAccess,
+          getOwnPropertyDescriptor: enqueueAccess,
+          ownKeys: () => refuse('Unsupported enqueue enumeration'),
+          getPrototypeOf: () =>
+            refuse('Unsupported enqueue prototype inspection')
         }
       );
       const result =
@@ -182,18 +205,27 @@ export function createEncoding() {
                 },
                 {
                   get: (target, key, receiver) => {
-                    if (key !== 'context' && key !== 'event') {
-                      throw new Error(
-                        `Unsupported callback argument: ${String(key)}`
-                      );
-                    }
+                    argumentKey(key);
                     return Reflect.get(target, key, receiver);
-                  }
+                  },
+                  has: (target, key) => {
+                    argumentKey(key);
+                    return Reflect.has(target, key);
+                  },
+                  getOwnPropertyDescriptor: (target, key) => {
+                    argumentKey(key);
+                    return Reflect.getOwnPropertyDescriptor(target, key);
+                  },
+                  ownKeys: () =>
+                    refuse('Unsupported callback argument enumeration'),
+                  getPrototypeOf: () =>
+                    refuse('Unsupported callback argument prototype inspection')
                 }
               ),
               enqueue
             )
           : definition;
+      if (unsupported) throw unsupported;
       validateResult(result, resolveTarget, lifecycle);
       const normalized =
         result ??
@@ -211,7 +243,7 @@ export function createEncoding() {
                 patch:
                   normalized.context === undefined
                     ? undefined
-                    : Object.entries(encode(normalized.context)).map(
+                    : Object.entries(encode({ ...normalized.context })).map(
                         ([key, value]) => ({ key, value })
                       )
               },
