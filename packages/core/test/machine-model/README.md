@@ -18,9 +18,9 @@ multi-transition parallel extension
 unmodified LemmaScript 0.6.6. Dafny 4.11.0 proves its contracts and the laws in
 [`formal/machineModel.dfy`](./formal/machineModel.dfy).
 [`formal/machineModel.manifest.json`](./formal/machineModel.manifest.json) lists
-136 laws (including proof helpers and a concrete lifecycle witness), 22 generated
+140 laws (including proof helpers and a concrete lifecycle witness), 22 generated
 contract lemmas, and 22 deliberately incorrect model edits. The complete proof
-currently checks 456 verification tasks. Function postconditions support
+currently checks 462 verification tasks. Function postconditions support
 composition; they are also checked against the generated bodies.
 Eleven additional proof-weakening probes check that generated contracts cannot
 gain restrictive preconditions or lose their original postconditions.
@@ -125,6 +125,10 @@ The laws establish:
   incomparable: each node lies inside at most
   one domain, so its membership comes from that plan's own valid result or from
   the previous active set.
+- Two kept plans in the statelyai/xstate#5895 pattern, where one exit set
+  contains the other's target or an ancestor of it, always have comparable
+  domains, so `parallelStepReady` refuses the step (`PatternDomainsComparable`,
+  `PatternRefused`).
 
 The patch and identity contracts differ from `createFSM`, which compares patch
 values before deciding whether to copy. No FSM reuse law is imported here.
@@ -194,20 +198,27 @@ Targetless `reenter: true` transitions are refused when several regions
 select, because the runtime's targetless-reentry lifecycle is a separate
 suspected bug.
 
-On kept selections, the comparable-domains refusal coincides with the general
-#5895 pattern: two kept transitions with disjoint exit sets, where one exit set
-contains the other's target or an ancestor of it. If the pattern holds, that
-target lies inside or at the first transition's domain (a reentering source can
-be its own domain), and the second domain is an ancestor-or-self of the target,
-so the two domains lie on one path and are comparable. Conversely, when two
-kept domains are comparable, the inner domain is active and lies below the
-outer one, so it is in the outer transition's exit set, and it is an
-ancestor-or-self of its own target. This argument is informal; no law states
-it. The pattern includes instances the runtime handles correctly. An atomic
-self-target whose domain is the atomic node itself is neither exited nor
-entered, so keeping it alongside a transition that exits the parallel node
-yields a valid runtime configuration. The model still refuses that step
-because its validity proof needs pairwise incomparable domains.
+The comparable-domains refusal also covers the general #5895 pattern: one
+transition's exit set contains another transition's target or an ancestor of
+that target. `PatternDomainsComparable` proves that the two domains are then
+comparable. The exited node lies inside or at the first domain (a reentering
+source can be its own domain), and both domains are ancestors-or-self of the
+second target. `PatternRefused` applies this to the plans that `multiReady`
+checks: any two of them that match the pattern make `domainsApart` false, so
+the step is refused before comparison.
+
+The converse is informal; no law states it. When two kept domains are strictly
+comparable, the inner domain is active and below the outer one, so it is in
+the outer exit set, and it is an ancestor-or-self of its own target. Equal
+domains do not match the pattern: two regions that both target an atomic
+region `B` have domain `B` and empty exit sets. The active-region refusal
+rejects that step first; no law shows that an earlier refusal catches every
+equal-domain case, so the comparable-domains count is not proved to count only
+#5895 instances. The pattern includes instances the runtime
+handles correctly. An atomic self-target whose domain is the atomic node itself
+is neither exited nor entered, so keeping it alongside a transition that exits
+the parallel node yields a valid runtime configuration. The model still refuses
+that step because its validity proof needs pairwise incomparable domains.
 
 Multiple parallel nodes, choices, history, completion, eventless transitions,
 raised events, timers, actors, routes, state input and persistence remain
