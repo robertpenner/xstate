@@ -3,6 +3,15 @@
 
 datatype Option<T> = None | Some(value: T)
 
+function SeqFilter<T(!new)>(p: T -> bool, xs: seq<T>): seq<T>
+  ensures |SeqFilter(p, xs)| <= |xs|
+  ensures forall x :: x in SeqFilter(p, xs) <==> x in xs && p(x)
+  decreases |xs|
+{
+  if |xs| == 0 then []
+  else (if p(xs[0]) then [xs[0]] else []) + SeqFilter(p, xs[1..])
+}
+
 datatype PatchEntry = PatchEntry(key: string, value: int)
 
 datatype Event = Event(type_: string, value: int)
@@ -32,6 +41,14 @@ datatype CompoundSnapshot = CompoundSnapshot(path: seq<string>, context: map<str
 datatype Selection = Selection(id: string, node: CompoundNode, evaluation: Evaluation)
 
 datatype CompoundStep = CompoundStep(snapshot: CompoundSnapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>)
+
+datatype ParallelMachine = ParallelMachine(root: string, context: map<string, int>, nodes: map<string, CompoundNode>, order: seq<string>, parallel: Option<string>)
+
+datatype ParallelSnapshot = ParallelSnapshot(active: seq<string>, context: map<string, int>)
+
+datatype ParallelStep = ParallelStep(snapshot: ParallelSnapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>)
+
+datatype ParallelPlan = ParallelPlan(domain: seq<string>, reentered: Option<string>, extra: Option<string>, exits: seq<string>, entries: seq<string>, active: seq<string>)
 
 function mergePatch(context: map<string, int>, patch: seq<PatchEntry>): map<string, int>
   decreases |patch|
@@ -341,5 +358,228 @@ lemma compoundTransition_ensures(machine: CompoundMachine, snapshot: CompoundSna
   requires ready(machine, snapshot, event)
   requires forall k :: ((k in machine.nodes) ==> initialWitness(machine.nodes, k))
   ensures (compoundTransition(machine, snapshot, event).snapshotReused ==> (compoundTransition(machine, snapshot, event).snapshot == snapshot))
+{
+}
+
+function below(path: seq<string>, prefix: seq<string>): bool
+{
+  ((|path| > |prefix|) && (commonPrefix(path, prefix) == |prefix|))
+}
+
+lemma below_ensures(path: seq<string>, prefix: seq<string>)
+  ensures (below(path, prefix) ==> (|path| > |prefix|))
+{
+}
+
+function samePath(a: seq<string>, b: seq<string>): bool
+{
+  ((|a| == |b|) && (commonPrefix(a, b) == |a|))
+}
+
+lemma samePath_ensures(a: seq<string>, b: seq<string>)
+  ensures (samePath(a, b) ==> (|a| == |b|))
+{
+}
+
+function completes(nodes: map<string, CompoundNode>, parallel: Option<string>, target: seq<string>, path: seq<string>): bool
+  decreases |path|
+{
+  ((|path| < 2) || (var id := path[0]; (if !((id in nodes)) then false else (var node := lookupNode(nodes, id); (var child := path[1]; (var allowed := ((match parallel { case Some(i_value) => (i_value == id) case None => false }) || (if below(target, node.path) then (child == target[|node.path|]) else (match node.initial { case Some(i_value) => (i_value == child) case None => false }))); (allowed && completes(nodes, parallel, target, path[1..]))))))))
+}
+
+lemma completes_ensures(nodes: map<string, CompoundNode>, parallel: Option<string>, target: seq<string>, path: seq<string>)
+  ensures ((|path| < 2) ==> completes(nodes, parallel, target, path))
+{
+}
+
+function entering(nodes: map<string, CompoundNode>, parallel: Option<string>, target: seq<string>, domain: seq<string>, extra: Option<string>, id: string): bool
+{
+  if !((id in nodes)) then
+    false
+  else
+    ((match extra { case Some(i_value) => (i_value == id) case None => false }) || (var path := lookupNode(nodes, id).path; (below(path, domain) && completes(nodes, parallel, target, path[(if (|domain| == 0) then 0 else (|domain| - 1))..]))))
+}
+
+function exiting(nodes: map<string, CompoundNode>, domain: seq<string>, reentered: Option<string>, id: string): bool
+{
+  if !((id in nodes)) then
+    false
+  else
+    ((match reentered { case Some(i_value) => (i_value == id) case None => false }) || below(lookupNode(nodes, id).path, domain))
+}
+
+function narrow(parallel: Option<string>, target: seq<string>, domain: seq<string>): seq<string>
+{
+  if ((|domain| == 0) || !(below(target, domain))) then
+    domain
+  else
+    if (match parallel { case Some(i_value) => (i_value != domain[(|domain| - 1)]) case None => true }) then
+      domain
+    else
+      target[0..(|domain| + 1)]
+}
+
+function transitionDomain(parallel: Option<string>, source: seq<string>, target: seq<string>, reenter: bool): seq<string>
+{
+  if (commonPrefix(source, target) == |source|) then
+    if reenter then
+      source
+    else
+      narrow(parallel, target, source)
+  else
+    if (|target| == 0) then
+      []
+    else
+      var ancestors := target[0..(|target| - 1)];
+      var lca := commonPrefix(source, ancestors);
+      if reenter then
+        source[0..lca]
+      else
+        narrow(parallel, target, (if (lca == 0) then target[0..1] else source[0..lca]))
+}
+
+function runLifecycle(nodes: map<string, CompoundNode>, path: seq<string>, context: map<string, int>, event: Event, exiting: bool): Applied
+{
+  if !(declaredPath(nodes, path)) then
+    Applied(context, true, [])
+  else
+    lifecycle(nodes, path, context, event, exiting)
+}
+
+function leafSelection(nodes: map<string, CompoundNode>, id: string, base: int, context: map<string, int>, event: Event): Option<Selection>
+{
+  if !((id in nodes)) then
+    None
+  else
+    var node := lookupNode(nodes, id);
+    if (((|node.children| > 0) || (base < 0)) || (base > |node.path|)) then
+      None
+    else
+      var path := node.path[base..];
+      if !(declaredPath(nodes, path)) then
+        None
+      else
+        select(nodes, path, context, event)
+}
+
+function regionSelections(nodes: map<string, CompoundNode>, active: seq<string>, base: int, context: map<string, int>, event: Event): seq<Selection>
+  decreases |active|
+{
+  if (|active| == 0) then
+    []
+  else
+    var first := leafSelection(nodes, active[0], base, context, event);
+    var rest := regionSelections(nodes, active[1..], base, context, event);
+    match first {
+      case Some(i_first_val) =>
+        ([i_first_val] + rest)
+      case None =>
+        rest
+    }
+}
+
+lemma regionSelections_ensures(nodes: map<string, CompoundNode>, active: seq<string>, base: int, context: map<string, int>, event: Event)
+  ensures ((|active| == 0) ==> (|regionSelections(nodes, active, base, context, event)| == 0))
+{
+}
+
+function activeParallel(machine: ParallelMachine, active: seq<string>): seq<string>
+{
+  var parallel := machine.parallel;
+  match parallel {
+    case Some(i_parallel_val) =>
+      if (!((i_parallel_val in active)) || !((i_parallel_val in machine.nodes))) then
+        []
+      else
+        lookupNode(machine.nodes, i_parallel_val).path
+    case None =>
+      []
+  }
+}
+
+function parallelSelections(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): seq<Selection>
+{
+  var parallelPath := activeParallel(machine, snapshot.active);
+  var regions := regionSelections(machine.nodes, snapshot.active, |parallelPath|, snapshot.context, event);
+  if ((|regions| > 0) || !(declaredPath(machine.nodes, parallelPath))) then
+    regions
+  else
+    var fallback := select(machine.nodes, parallelPath, snapshot.context, event);
+    match fallback {
+      case Some(i_fallback_val) =>
+        [i_fallback_val]
+      case None =>
+        []
+    }
+}
+
+function parallelReady(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): bool
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  ((|selections| == 0) || (if (|selections| > 1) then false else (var result := selections[0].evaluation.result; (match result { case Some(i_result_val) => (var target := i_result_val.target; (match target { case Some(i_target_val) => (if !((i_target_val in machine.nodes)) then false else (var targetPath := lookupNode(machine.nodes, i_target_val).path; ((|targetPath| < 2) || !(((match machine.parallel { case Some(i_value) => (i_value == targetPath[(|targetPath| - 2)]) case None => false }) && (i_target_val in snapshot.active)))))) case None => true })) case None => true }))))
+}
+
+function parallelInitialTransition(machine: ParallelMachine, event: Event): ParallelStep
+{
+  var nodes := machine.nodes;
+  var parallel := machine.parallel;
+  var target := (if (machine.root in nodes) then lookupNode(nodes, machine.root).path else []);
+  var entries := SeqFilter((id: string) => entering(nodes, parallel, target, [], None, id), machine.order);
+  var entered := runLifecycle(nodes, entries, machine.context, event, false);
+  ParallelStep(ParallelSnapshot(entries, entered.context), false, entered.reused, entered.effects)
+}
+
+lemma parallelInitialTransition_ensures(machine: ParallelMachine, event: Event)
+  ensures !(parallelInitialTransition(machine, event).snapshotReused)
+{
+}
+
+function parallelPlan(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool): ParallelPlan
+{
+  var nodes := machine.nodes;
+  var parallel := machine.parallel;
+  var sourcePath := (if (source in nodes) then lookupNode(nodes, source).path else []);
+  var targetPath := (if (target in nodes) then lookupNode(nodes, target).path else []);
+  var domain := transitionDomain(parallel, sourcePath, targetPath, reenter);
+  var reentered := (if (reenter && samePath(domain, sourcePath)) then Option.Some(source) else Option.None);
+  var extra := (match reentered { case Some(i_reentered_val) => Option.Some(i_reentered_val) case None => (if (samePath(domain, targetPath) && (target != source)) then Option.Some(target) else Option.None) });
+  var exits := reverse(SeqFilter((id: string) => exiting(nodes, domain, reentered, id), active));
+  var entries := SeqFilter((id: string) => entering(nodes, parallel, targetPath, domain, extra, id), machine.order);
+  var next := SeqFilter((id: string) => (((id in active) && !(exiting(nodes, domain, reentered, id))) || entering(nodes, parallel, targetPath, domain, extra, id)), machine.order);
+  ParallelPlan(domain, reentered, extra, exits, entries, next)
+}
+
+function parallelTransition(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): ParallelStep
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  if (|selections| == 0) then
+    ParallelStep(snapshot, true, true, [])
+  else
+    var selected := selections[0];
+    var nodes := machine.nodes;
+    var result := selected.evaluation.result;
+    var target := (match result { case Some(i_result_val) => i_result_val.target case None => Option.None });
+    var reenter := (match result { case Some(i_result_val) => i_result_val.reenter case None => false });
+    match target {
+      case Some(i_target_val) =>
+        if !((i_target_val in nodes)) then
+          var updated := apply(snapshot.context, selected.evaluation);
+          var entered := runLifecycle(nodes, (if reenter then [selected.id] else []), updated.context, event, false);
+          ParallelStep(ParallelSnapshot(snapshot.active, entered.context), false, (updated.reused && entered.reused), (updated.effects + entered.effects))
+        else
+          var plan := parallelPlan(machine, snapshot.active, selected.id, i_target_val, reenter);
+          var exited := runLifecycle(nodes, plan.exits, snapshot.context, event, true);
+          var updated := apply(exited.context, selected.evaluation);
+          var entered := runLifecycle(nodes, plan.entries, updated.context, event, false);
+          ParallelStep(ParallelSnapshot(plan.active, entered.context), false, ((exited.reused && updated.reused) && entered.reused), ((exited.effects + updated.effects) + entered.effects))
+      case None =>
+        var updated := apply(snapshot.context, selected.evaluation);
+        var entered := runLifecycle(nodes, (if reenter then [selected.id] else []), updated.context, event, false);
+        ParallelStep(ParallelSnapshot(snapshot.active, entered.context), false, (updated.reused && entered.reused), (updated.effects + entered.effects))
+    }
+}
+
+lemma parallelTransition_ensures(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  ensures (parallelTransition(machine, snapshot, event).snapshotReused ==> (parallelTransition(machine, snapshot, event).snapshot == snapshot))
 {
 }

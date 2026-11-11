@@ -14,7 +14,7 @@ import * as model from './machineModel';
 
 export type State = {
   id?: string;
-  type?: 'atomic' | 'compound';
+  type?: 'atomic' | 'compound' | 'parallel';
   initial?: string;
   states?: Record<string, State>;
   on?: Record<string, Transition>;
@@ -22,7 +22,7 @@ export type State = {
   exit?: Callback;
 };
 export type Config = State & { context: Context };
-type AuthoredNode = {
+export type AuthoredNode = {
   config: State;
   id: string;
   key: string;
@@ -31,14 +31,8 @@ type AuthoredNode = {
   path: string[];
 };
 
-export function compareCompoundTrace(config: Config, events: readonly Event[]) {
+export function collectTree(config: Config, allowParallel: boolean) {
   plainRecord(config.context, 'context');
-  for (const event of events) {
-    plainRecord(event, 'event');
-    if (typeof event.type !== 'string')
-      throw new Error('Unsupported event.type');
-  }
-  const encoding = createEncoding();
   const registry = new Map<string, AuthoredNode>();
   const rootId = config.id ?? '';
   function collect(
@@ -86,6 +80,20 @@ export function compareCompoundTrace(config: Config, events: readonly Event[]) {
         node.children.set(key, collect(child, [...keyPath, key], node));
       }
     }
+    if (state.type === 'parallel') {
+      if (!allowParallel)
+        throw new Error(`Unsupported state type: ${state.type}`);
+      if (node.children.size === 0)
+        throw new Error(`Unsupported parallel state without regions at ${id}`);
+      for (const other of registry.values()) {
+        if (other !== node && other.config.type === 'parallel')
+          throw new Error(`Unsupported second parallel state at ${id}`);
+      }
+      if (state.initial !== undefined)
+        throw new Error(`Unsupported parallel initial at ${id}`);
+      if (state.on !== undefined) plainRecord(state.on, `${id}.on`);
+      return node;
+    }
     const compound = node.children.size > 0;
     if (
       state.type !== undefined &&
@@ -104,7 +112,6 @@ export function compareCompoundTrace(config: Config, events: readonly Event[]) {
     if (state.on !== undefined) plainRecord(state.on, `${id}.on`);
     return node;
   }
-  const root = collect(config, []);
   function resolveTarget(source: AuthoredNode, target: string): string {
     if (target.startsWith('#')) {
       if (target.length === 1 || !registry.has(target.slice(1))) {
@@ -122,6 +129,18 @@ export function compareCompoundTrace(config: Config, events: readonly Event[]) {
     }
     return `:${node.id}`;
   }
+  const root = collect(config, []);
+  return { registry, root, resolveTarget };
+}
+
+export function compareCompoundTrace(config: Config, events: readonly Event[]) {
+  for (const event of events) {
+    plainRecord(event, 'event');
+    if (typeof event.type !== 'string')
+      throw new Error('Unsupported event.type');
+  }
+  const encoding = createEncoding();
+  const { registry, root, resolveTarget } = collectTree(config, false);
   function initialPath(node: AuthoredNode): string[] {
     if (node.config.initial === undefined) return node.path;
     const child = node.children.get(node.config.initial);
