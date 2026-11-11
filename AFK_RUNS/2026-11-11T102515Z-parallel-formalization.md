@@ -244,9 +244,11 @@ that contradicts a ticket. Each entry gives a classification and evidence.
    ancestor-or-self of that target, so both domains lie on the target's path
    and are comparable. Conversely, comparable kept domains put the inner
    domain, which is active, in the outer exit set, and the inner domain is an
-   ancestor-or-self of its own target. On kept selections, `domainsApart`
-   therefore refuses exactly the pattern's instances. This argument is
-   informal, not a proved law. Some refused instances are valid in the
+   ancestor-or-self of its own target, although equal domains (two regions
+   targeting one atomic region) do not match the pattern and are refused
+   earlier at the active-region target. After the post-run review,
+   `PatternDomainsComparable` and `PatternRefused` prove the first direction;
+   the converse stays informal. Some refused instances are valid in the
    runtime: an atomic self-target in one region
    (domain is the atomic node itself, so it is neither exited nor entered)
    kept alongside a region transition that exits the parallel node yields a
@@ -323,9 +325,16 @@ robertpenner/xstate#17. Fixes:
   entry 1 limits the SCXML `type="internal"` correspondence; entry 4 records
   the orphaned-leaf mechanism; entry 5 gives the argument in both directions.
 
-Left open for the owner: #16 listed the #5895 pattern as a separate refusal;
-the adapter covers it through the comparable-domains check with an informal
-argument and no separate reason or count.
+Owner decision on the open question: #16 listed the #5895 pattern as a
+separate refusal, and the adapter covered it only through the
+comparable-domains check with an informal argument. The owner chose to prove
+the coverage instead of adding a redundant model clause. `PatternDomainsComparable`
+proves that two plans in the pattern have comparable domains, and
+`PatternRefused` proves that any such pair among the plans `multiReady` checks
+makes `domainsApart` false. Writing the converse out exposed an equal-domain
+case the README had missed (two regions targeting one atomic region give equal
+domains and empty exit sets, which is not the pattern); the active-region
+refusal rejects it first, and the README now says the converse is unproved.
 
 Verification at `3082715`:
 
@@ -334,6 +343,17 @@ Verification at `3082715`:
 - `pnpm test:machine-model`: 8 files, 116 tests passed.
 - `pnpm format:check`: passed. No TypeScript changed, so typecheck, lint,
   build and `test:core` were not rerun.
+
+Verification after the #5895 pattern laws (140 laws):
+
+- `pnpm verify:machine-model`: 462 verified, 0 errors; 22 seeded defects and
+  11 proof weakenings rejected. Two earlier attempts timed out in `lsc regen`
+  (the driver's 180-second limit per child) while the machine's load average
+  was above 130 from other sessions, and a third attempt with a longer limit
+  hit Dafny's 15-second limit on the unchanged `CompoundLifecycleMeaning`.
+  The passing run started once the load average was below 30.
+- `pnpm test:machine-model`: 8 files, 116 tests passed. `pnpm format:check`:
+  passed.
 
 ## Result
 
