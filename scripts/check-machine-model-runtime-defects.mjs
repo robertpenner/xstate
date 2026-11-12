@@ -67,54 +67,59 @@ const defects = [
     test: 'merges patches in region order'
   }
 ];
-for (const defect of defects) {
-  const file = path.join(root, defect.file);
-  const original = readFileSync(file, 'utf8');
-  const status = spawnSync(
-    'git',
-    ['status', '--porcelain', '--', defect.file],
-    {
-      cwd: root,
-      encoding: 'utf8'
+try {
+  for (const defect of defects) {
+    const file = path.join(root, defect.file);
+    const original = readFileSync(file, 'utf8');
+    const status = spawnSync(
+      'git',
+      ['status', '--porcelain', '--', defect.file],
+      {
+        cwd: root,
+        encoding: 'utf8'
+      }
+    );
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(
+      status.stdout,
+      '',
+      `Refusing to mutate edited source: ${defect.file}`
+    );
+    assert.equal(original.split(defect.before).length, 2, defect.name);
+    try {
+      writeFileSync(file, original.replace(defect.before, defect.after));
+      const result = await runCommand(
+        'pnpm',
+        [
+          'exec',
+          'vitest',
+          'run',
+          '--project',
+          'xstate',
+          defect.testFile ??
+            'packages/core/test/machine-model/machineModel.test.ts',
+          '-t',
+          defect.test
+        ],
+        { cwd: root, timeoutMs }
+      );
+      assert.equal(result.signal, null);
+      const output = result.output;
+      assert.notEqual(
+        result.status,
+        0,
+        `Undetected runtime defect: ${defect.name}`
+      );
+      assert.match(output, /AssertionError/, output);
+      assert.match(output, /1 failed/, output);
+      console.log(`Rejected runtime defect: ${defect.name}`);
+    } finally {
+      writeFileSync(file, original);
     }
-  );
-  assert.equal(status.status, 0, status.stderr);
-  assert.equal(
-    status.stdout,
-    '',
-    `Refusing to mutate edited source: ${defect.file}`
-  );
-  assert.equal(original.split(defect.before).length, 2, defect.name);
-  try {
-    writeFileSync(file, original.replace(defect.before, defect.after));
-    const result = await runCommand(
-      'pnpm',
-      [
-        'exec',
-        'vitest',
-        'run',
-        '--project',
-        'xstate',
-        defect.testFile ??
-          'packages/core/test/machine-model/machineModel.test.ts',
-        '-t',
-        defect.test
-      ],
-      { cwd: root, timeoutMs }
-    );
-    assert.equal(result.signal, null);
-    const output = result.output;
-    assert.notEqual(
-      result.status,
-      0,
-      `Undetected runtime defect: ${defect.name}`
-    );
-    assert.match(output, /AssertionError/, output);
-    assert.match(output, /1 failed/, output);
-    console.log(`Rejected runtime defect: ${defect.name}`);
-  } finally {
-    writeFileSync(file, original);
+    assert.equal(readFileSync(file, 'utf8'), original);
   }
-  assert.equal(readFileSync(file, 'utf8'), original);
+  console.log('Runtime defects rejected; original source restored.');
+} catch (error) {
+  console.error(error);
+  process.exitCode ||= 1;
 }
-console.log('Runtime defects rejected; original source restored.');

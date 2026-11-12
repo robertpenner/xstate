@@ -121,7 +121,7 @@ The laws establish:
 - The next active set contains every node that was active and not exited, plus
   every entered node, in document order. For a well-formed machine starting
   from a valid configuration, every step accepted by `parallelStepReady`
-  remains valid. Kept plans may have nested or equal domains. The proof
+  remains valid. Readiness does not require kept domains to be incomparable. The proof
   discards lifecycle-free plans only when reasoning about active nodes:
   `MovingCombined` proves that this preserves the exit and entry unions, and
   `ReadyMovingDomainsApart` proves that the remaining plans have incomparable
@@ -402,8 +402,12 @@ pnpm test:core
 pnpm build
 ```
 
-The drivers stop their complete child process groups on timeout, SIGINT, or
-SIGTERM before removing temporary proof files or restoring mutated runtime files.
+While a verification child is running, the drivers stop its complete process
+group on timeout, SIGINT, SIGTERM, or SIGHUP before removing temporary proof files
+or restoring mutated runtime files. Interrupted CLI runs retain exit statuses
+130, 143, and 129 respectively. SIGKILL cannot be handled; killing the driver
+forcibly or moving descendants into another session/group is outside this cleanup
+guarantee.
 `MACHINE_MODEL_VERIFY_TIMEOUT_MS` overrides the verification driver's default
 180000-millisecond per-command limit. `MACHINE_MODEL_RUNTIME_TIMEOUT_MS`
 overrides the runtime-defect driver's 60000-millisecond limit. Each override must

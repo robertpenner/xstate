@@ -193,10 +193,9 @@ owns its wrapper/targetability qualification.
 
 ### Publication at stop or handoff
 
-**Published code/test head:** `656c070`. This final documentation commit follows
-it. Its exact SHA and the final PR-check result are recorded in the parent-issue
-summary after readiness. Resolve the log commit locally with
-`git log -1 --format='%h %cI' -- AFK_RUNS/2026-11-12T060235Z-machine-model-followups.md`.
+**Published code/test head at AFK completion:** `656c070`; final AFK documentation
+commit `d198d61`. Its final PR-check result is recorded in the parent-issue summary
+after readiness. Later review repairs are recorded separately below.
 
 **Unverified checkpoint:** none.
 
@@ -241,8 +240,8 @@ result is reported after the ready transition in the parent-issue summary.
 
 **Completed:** 2026-11-12 07:15:11 UTC.
 
-**Duration:** 1 hour, 12 minutes, 36 seconds (4356 seconds), measured as this
-commit's committer timestamp minus the start timestamp.
+**Duration:** 1 hour, 12 minutes, 36 seconds (4356 seconds), measured as
+`d198d61`'s committer timestamp minus the start timestamp.
 
 **Final verification:** `pnpm verify:machine-model` passed 474 obligations,
 all 23 model defects and 11 proof weakenings; `pnpm test:core` passed 3063
@@ -261,3 +260,72 @@ links existing upstream reports instead of duplicating their diagnoses; no new
 v6 runtime bug or production behavior change is claimed.
 
 **Pre-existing unrelated failure(s):** none observed.
+
+### Fresh Opus review follow-up (2026-11-12)
+
+The user requested a new Opus context, a PR review comment, and repairs. Claude
+Opus 5.5 reviewed `f5ae474...d198d61` across Standards, Spec, and Ideas and
+evidence. The [published review](https://github.com/robertpenner/xstate/pull/22#pullrequestreview-5871125363)
+records the findings and their validation. The pinned 15-file change, fresh issue bodies/briefs, primary sources,
+and results are under
+`/Users/robertpenner/git/penner-agent-scratch/pr-22/run-OAXJNmKu`.
+The source review raised hypotheses; coordinator probes established:
+
+- **SIGHUP cleanup:** the driver died by signal before caller cleanup. The
+  regression failed with a null status instead of 129. SIGHUP now uses the same
+  group-cleanup path as SIGINT/SIGTERM.
+- **CLI interruption status:** after wiring SIGHUP cleanup, six actual-driver regressions returned 1 instead
+  of 130/143/129. The drivers now report failures after their `finally` cleanup
+  and preserve the interruption status. Runtime fixtures mutate isolated source
+  and check exact restoration.
+- **Failed spawn:** exhausting descriptors in an isolated Node 24 subprocess
+  aborted during signal-watcher setup. A failed spawn now rejects with its
+  original EMFILE before allocating deadlines or signal handlers; listener counts
+  remain unchanged.
+
+The Linux question was resolved from the original clean-head CI job log:
+Ubuntu 26.04 ran `pnpm test:tooling`, with 20 passes including SIGINT/SIGTERM.
+The README now describes readiness without asserting an accepted equal-domain
+example and documents the SIGKILL/session-escape limitation. Closing keywords do
+not close issues when the PR targets a non-default branch; issues remain open
+under the default-branch merge policy.
+
+These are verification-tool findings. No new v6 runtime issue was found, and
+v5/SCXML semantics do not govern these process-control failures. The existing
+upstream-report index remains authoritative without duplicate diagnoses.
+
+**Follow-up verification:** watched process regressions passed all 15 tests;
+the complete tooling suite passed 28 tests. All seven runtime mutations were
+rejected and production source was restored exactly. Build, typecheck, lint,
+and formatting passed.
+
+The first full proof attempt hit the baseline translator command's 180000 ms
+wall-clock limit after rejecting all 11 proof weakenings. No Dafny semantic
+error was returned. The concurrent core run passed 3055 tests but failed the
+parallel property test's 4000 ms interruption budget after 376 cases (seed 8912),
+three declaration hooks' 60000 ms budgets, and a worker RPC timeout. It returned
+no property counterexample. These were time-limit failures, with no established
+runtime defect. Both affected core
+files passed alone (21 tests); the parallel property completed in 214 ms.
+The subsequent `pnpm test:core --maxWorkers=1` passed all 189 files and 3063
+tests in 365.61 seconds, with unchanged test budgets. No core source or test was
+changed for these reruns. This establishes that the first timing failures do
+not reproduce in the serialized run; it does not identify their precise cause.
+The next complete proof run used the documented finite
+`MACHINE_MODEL_VERIFY_TIMEOUT_MS=600000` override without concurrent core or
+build commands. Its baseline passed 474 obligations with zero errors, and all
+23 model mutations and 11 proof weakenings were rejected. The final regenerated
+refactor passed 473 obligations but `PlanFromFacts` reached the unchanged
+15-second per-lemma limit. Dafny reported zero semantic errors and one timeout.
+The formal inputs are unchanged from `d198d61`.
+
+A further complete serialized run with the same 600000 ms command limit and
+15-second per-lemma limit passed: 474 verified, zero errors; all 23 model
+mutations and 11 proof weakenings rejected; freshness, additions-only inventory,
+and regenerated refactor verified. No model, generated proof, handwritten proof,
+manifest, or production source changed to obtain this result. The failed
+attempts above remain part of the verification record.
+
+The repair commit belongs to the existing PR branch. Publication, final
+clean-checkout CI, and the disposition of the review are recorded on
+[robertpenner/xstate#22](https://github.com/robertpenner/xstate/pull/22).

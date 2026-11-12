@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import {
+  copyFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -138,7 +140,12 @@ test('output overflow fails explicitly and stops the producing command', async (
   );
 });
 
-for (const signal of ['SIGINT', 'SIGTERM']) {
+const interruptions = [
+  ['SIGINT', 130],
+  ['SIGTERM', 143],
+  ['SIGHUP', 129]
+];
+for (const [signal, status] of interruptions) {
   test(`${signal} stops descendants before caller cleanup`, async () => {
     const directory = mkdtempSync(path.join(tmpdir(), 'xstate-signal-test-'));
     const pids = path.join(directory, 'pids');
@@ -187,7 +194,7 @@ try {
       // Allow the grandchild to install its TERM handler.
       await delay(100);
       driver.kill(signal);
-      assert.equal(await completed, signal === 'SIGINT' ? 130 : 143);
+      assert.equal(await completed, status);
       assert.match(output, new RegExp(`interrupted by ${signal}`));
       assert.equal(readFileSync(restored, 'utf8'), 'restored');
       for (const pid of readFileSync(pids, 'utf8').split(',').map(Number)) {
@@ -205,3 +212,115 @@ try {
     }
   });
 }
+
+for (const script of [
+  'verify-machine-model.mjs',
+  'check-machine-model-runtime-defects.mjs'
+]) {
+  for (const [signal, status] of interruptions) {
+    test(`${script} preserves ${signal} status after cleanup`, async () => {
+      const directory = mkdtempSync(path.join(tmpdir(), 'xstate-driver-test-'));
+      const bin = path.join(directory, 'bin');
+      const pidFile = path.join(directory, 'pid');
+      const sourceFile = path.join(
+        directory,
+        'packages/core/src/StateMachine.ts'
+      );
+      const original = 'const targetNode = selected.target?.[0] ?? sourceNode;';
+      mkdirSync(bin);
+      const command = `#!${process.execPath}
+const { writeFileSync } = require('node:fs');
+writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+setInterval(() => {}, 1000);
+`;
+      for (const name of ['dafny', 'pnpm'])
+        writeFileSync(path.join(bin, name), command, { mode: 0o755 });
+      writeFileSync(path.join(bin, 'git'), '#!/bin/sh\nexit 0\n', {
+        mode: 0o755
+      });
+      let entry = new URL(script, import.meta.url).pathname;
+      if (script === 'check-machine-model-runtime-defects.mjs') {
+        mkdirSync(path.join(directory, 'scripts'));
+        mkdirSync(path.dirname(sourceFile), { recursive: true });
+        writeFileSync(sourceFile, original);
+        for (const name of [script, 'machine-model-process.mjs'])
+          copyFileSync(
+            new URL(name, import.meta.url),
+            path.join(directory, 'scripts', name)
+          );
+        entry = path.join(directory, 'scripts', script);
+      }
+      const driver = spawn(process.execPath, [entry], {
+        env: {
+          ...process.env,
+          PATH: bin + path.delimiter + process.env.PATH,
+          LEMMASCRIPT_LSC: 'unused'
+        },
+        stdio: ['ignore', 'ignore', 'pipe']
+      });
+      let output = '';
+      driver.stderr.on('data', (data) => {
+        output += data;
+      });
+      const completed = new Promise((resolve) =>
+        driver.on('close', (code) => resolve(code))
+      );
+      try {
+        for (let attempt = 0; attempt < 250 && !existsSync(pidFile); attempt++)
+          await delay(20);
+        assert.equal(existsSync(pidFile), true, 'Driver command did not start');
+        driver.kill(signal);
+        assert.equal(await completed, status, output);
+        assert.match(output, new RegExp(`interrupted by ${signal}`));
+        assert.equal(running(Number(readFileSync(pidFile, 'utf8'))), false);
+        if (script === 'check-machine-model-runtime-defects.mjs')
+          assert.equal(readFileSync(sourceFile, 'utf8'), original);
+      } finally {
+        if (running(driver.pid)) driver.kill('SIGKILL');
+        if (existsSync(pidFile)) {
+          const pid = Number(readFileSync(pidFile, 'utf8'));
+          if (running(pid)) process.kill(pid, 'SIGKILL');
+        }
+        await completed;
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
+test('descriptor exhaustion reports the spawn error without leaking listeners', () => {
+  const program = `
+import assert from 'node:assert/strict';
+import { closeSync, openSync } from 'node:fs';
+import { runCommand } from ${JSON.stringify(new URL('./machine-model-process.mjs', import.meta.url).href)};
+const signals = ${JSON.stringify(interruptions.map(([signal]) => signal))};
+const listeners = signals.map((signal) => process.listenerCount(signal));
+const descriptors = [];
+try {
+  for (;;) {
+    try {
+      descriptors.push(openSync('/dev/null', 'r'));
+    } catch (error) {
+      assert.equal(error.code, 'EMFILE');
+      break;
+    }
+  }
+  await assert.rejects(runCommand(process.execPath, ['-e', ''], { timeoutMs: 2000 }), { code: 'EMFILE' });
+} finally {
+  for (const descriptor of descriptors) closeSync(descriptor);
+}
+assert.deepEqual(signals.map((signal) => process.listenerCount(signal)), listeners);
+`;
+  const result = spawnSync(
+    '/bin/sh',
+    [
+      '-c',
+      'ulimit -n 64; exec "$1" --input-type=module -e "$2"',
+      'spawn-failure-test',
+      process.execPath,
+      program
+    ],
+    { encoding: 'utf8', timeout: 10_000 }
+  );
+  assert.equal(result.status, 0, result.stderr);
+});

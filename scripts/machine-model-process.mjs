@@ -1,8 +1,10 @@
 import { execFile, spawn } from 'node:child_process';
+import { constants } from 'node:os';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const execute = promisify(execFile);
+const interruptSignals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
 
 async function waitForGroup(pid) {
   if (!pid) return;
@@ -44,6 +46,10 @@ export function runCommand(
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe']
     });
+    if (!child.pid) {
+      child.once('error', reject);
+      return;
+    }
     const stdout = [];
     const stderr = [];
     let bytes = 0;
@@ -56,8 +62,8 @@ export function runCommand(
       if (!closed || (failure && !cleanupDone)) return;
       clearTimeout(deadline);
       clearTimeout(escalation);
-      process.removeListener('SIGINT', interrupt);
-      process.removeListener('SIGTERM', interrupt);
+      for (const signal of interruptSignals)
+        process.removeListener(signal, interrupt);
       if (failure) reject(failure);
       else
         resolve({
@@ -97,14 +103,13 @@ export function runCommand(
       }, 100);
     };
     const interrupt = (signal) => {
-      process.exitCode = signal === 'SIGINT' ? 130 : 143;
+      process.exitCode = 128 + constants.signals[signal];
       terminate(new Error(`${label} interrupted by ${signal}`));
     };
     const deadline = setTimeout(() => {
       terminate(new Error(`${label} timed out after ${timeoutMs} ms`));
     }, timeoutMs);
-    process.on('SIGINT', interrupt);
-    process.on('SIGTERM', interrupt);
+    for (const signal of interruptSignals) process.on(signal, interrupt);
     for (const [stream, chunks] of [
       [child.stdout, stdout],
       [child.stderr, stderr]
