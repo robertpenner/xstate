@@ -15,15 +15,15 @@ robertpenner/xstate#19, robertpenner/xstate#20, and robertpenner/xstate#21.
 
 **Execution:** sequential.
 
-**Verified integration head:** `ed94c63` (process cleanup, evidence below).
+**Verified integration head:** `587ddcd` (nested kept domains, evidence below).
 
 ### Slice progress
 
-| Issue                  | Slice                       | Status               | Blocked by / reason    | Integration commit    | Verification                |
-| ---------------------- | --------------------------- | -------------------- | ---------------------- | --------------------- | --------------------------- |
-| robertpenner/xstate#19 | Process-tree cleanup        | integrated/verified  |                        | `ed94c63`             | See process-runner evidence |
-| robertpenner/xstate#20 | Nested kept-domain validity | verified; committing | None                   | Recorded after commit | See nested-domain evidence  |
-| robertpenner/xstate#21 | Refusal converse            | blocked              | robertpenner/xstate#20 |                       |                             |
+| Issue                  | Slice                       | Status                | Blocked by / reason | Integration commit    | Verification                         |
+| ---------------------- | --------------------------- | --------------------- | ------------------- | --------------------- | ------------------------------------ |
+| robertpenner/xstate#19 | Process-tree cleanup        | integrated/verified   |                     | `ed94c63`             | See process-runner evidence          |
+| robertpenner/xstate#20 | Nested kept-domain validity | integrated/verified   |                     | `587ddcd`             | See nested-domain evidence           |
+| robertpenner/xstate#21 | Refusal converse            | verified; documenting | None                | Recorded after commit | No comparable-domain refusal remains |
 
 ### Verification evidence
 
@@ -92,6 +92,22 @@ Authoritative brief:
 - Explicit Prettier formatting/checks cover the README and run log.
 - Removed only the task-generated `machineModel.dfy.base` translator scratch
   file. No production changes or unproved assumptions were introduced.
+
+### Refusal-converse outcome
+
+Authoritative brief:
+<https://github.com/robertpenner/xstate/issues/21#issuecomment-6817039235>.
+
+Prerequisite robertpenner/xstate#20 is integrated and published as `587ddcd`.
+The issue's "nothing left to prove" outcome applies: `multiReady` and the
+adapter no longer refuse comparable domains. The README removes the converse
+and comparable-domain refusal count and accounts for statelyai/xstate#5895
+through the active-region-target refusal. The retained pattern laws describe
+geometry only. No new law or counterexample is needed.
+
+This documentation-only outcome reuses the exact model/proof source verified
+for `587ddcd`; no executable file changes follow that verification. The issue
+remains open until the series PR merges.
 
 ### Recovery
 
