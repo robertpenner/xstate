@@ -2,11 +2,13 @@
 // is restored even when a test process fails; do not run other checks concurrently.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { childTimeout, runCommand } from './machine-model-process.mjs';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const timeoutMs = childTimeout('MACHINE_MODEL_RUNTIME_TIMEOUT_MS', 60_000);
 const defects = [
   {
     name: 'fast-path ignores static targets',
@@ -85,7 +87,7 @@ for (const defect of defects) {
   assert.equal(original.split(defect.before).length, 2, defect.name);
   try {
     writeFileSync(file, original.replace(defect.before, defect.after));
-    const result = spawnSync(
+    const result = await runCommand(
       'pnpm',
       [
         'exec',
@@ -98,11 +100,10 @@ for (const defect of defects) {
         '-t',
         defect.test
       ],
-      { cwd: root, encoding: 'utf8', timeout: 60_000 }
+      { cwd: root, timeoutMs }
     );
-    if (result.error) throw result.error;
     assert.equal(result.signal, null);
-    const output = result.stdout + result.stderr;
+    const output = result.output;
     assert.notEqual(
       result.status,
       0,

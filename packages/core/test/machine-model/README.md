@@ -393,6 +393,16 @@ pnpm test:core
 pnpm build
 ```
 
+The drivers stop their complete child process groups on timeout, SIGINT, or
+SIGTERM before removing temporary proof files or restoring mutated runtime files.
+`MACHINE_MODEL_VERIFY_TIMEOUT_MS` overrides the verification driver's default
+180000-millisecond per-command limit. `MACHINE_MODEL_RUNTIME_TIMEOUT_MS`
+overrides the runtime-defect driver's 60000-millisecond limit. Each override must
+be a finite positive number of milliseconds no greater than 2147483647; invalid
+values fail before any checks or mutations. A timeout reports the command and
+its limit and fails the run. `pnpm test:tooling` includes process-tree cleanup
+regressions for these drivers.
+
 The proof driver regenerates into temporary directories, checks exact freshness,
 requires every generated line to remain in order, and checks the declaration
 inventory. Generated executable bodies may only gain checked assertions.

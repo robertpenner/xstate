@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { childTimeout, runCommand } from './machine-model-process.mjs';
 import {
   mkdirSync,
   mkdtempSync,
@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const timeoutMs = childTimeout('MACHINE_MODEL_VERIFY_TIMEOUT_MS', 180_000);
 const directory = path.join(root, 'packages/core/test/machine-model');
 const read = (file) => readFileSync(path.join(directory, file), 'utf8');
 const manifest = JSON.parse(read('formal/machineModel.manifest.json'));
@@ -22,20 +23,14 @@ const config = read('lemmascript.json');
 const lsc = process.env.LEMMASCRIPT_LSC;
 assert.ok(lsc, 'Set LEMMASCRIPT_LSC to lemmascript@0.6.6/tools/dist/lsc.js');
 
-function run(command, args, cwd) {
-  const result = spawnSync(command, args, {
-    cwd,
-    encoding: 'utf8',
-    timeout: 180_000,
-    maxBuffer: 8 * 1024 * 1024
-  });
-  if (result.error) throw result.error;
+async function run(command, args, cwd) {
+  const result = await runCommand(command, args, { cwd, timeoutMs });
   assert.equal(
     result.signal,
     null,
     `${command} terminated by ${result.signal}`
   );
-  return { status: result.status, output: result.stdout + result.stderr };
+  return result;
 }
 
 function names(text, pattern) {
@@ -253,10 +248,10 @@ function verified(result) {
   );
 }
 
-const dafny = run('dafny', ['--version'], root);
+const dafny = await run('dafny', ['--version'], root);
 assert.equal(dafny.status, 0, dafny.output);
 assert.match(dafny.output, /^4\.11\.0\b/);
-const translator = run(process.execPath, [lsc, 'version'], root);
+const translator = await run(process.execPath, [lsc, 'version'], root);
 assert.equal(translator.status, 0, translator.output);
 assert.equal(translator.output.trim(), '0.6.6');
 checkInventory(generated, proof);
@@ -273,14 +268,14 @@ const scratch = mkdtempSync(
 );
 try {
   const baseline = prepare(scratch, 'baseline', source);
-  const generation = translate('gen', baseline);
+  const generation = await translate('gen', baseline);
   assert.equal(generation.status, 0, generation.output);
   assert.equal(
     readFileSync(path.join(baseline, 'formal/machineModel.dfy.gen'), 'utf8'),
     generated,
     'Generated model is stale'
   );
-  const result = translate('check', baseline);
+  const result = await translate('check', baseline);
   verified(result);
   console.log(result.output.trim().split('\n').at(-1));
   for (const [index, defect] of manifest.defects.entries()) {
@@ -289,7 +284,7 @@ try {
       `defect-${index}`,
       replaceOnce(source, defect)
     );
-    const rejected = translate('regen', cwd);
+    const rejected = await translate('regen', cwd);
     assert.notEqual(rejected.status, 0, `Accepted defect: ${defect.name}`);
     assert.match(
       rejected.output,
@@ -307,7 +302,7 @@ try {
     'refactor',
     replaceOnce(source, manifest.refactor)
   );
-  const regenerated = translate('regen', refactor);
+  const regenerated = await translate('regen', refactor);
   verified(regenerated);
   const changed = readFileSync(
     path.join(refactor, 'formal/machineModel.dfy.gen'),
