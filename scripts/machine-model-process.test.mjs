@@ -155,12 +155,18 @@ setInterval(() => {}, 1000);`;
       script,
       `
 import { runCommand } from ${JSON.stringify(new URL('./machine-model-process.mjs', import.meta.url).href)};
-import { writeFileSync } from 'node:fs';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { readFileSync, writeFileSync } from 'node:fs';
+${running.toString()}
 try {
   await runCommand(process.execPath, ['-e', ${JSON.stringify(childCode)}], { timeoutMs: 10000 });
 } catch (error) {
   console.error(error.message);
 } finally {
+  for (const pid of readFileSync(${JSON.stringify(pids)}, 'utf8').split(',').map(Number)) {
+    assert.equal(running(pid), false, 'Process ' + pid + ' survived until caller cleanup');
+  }
   writeFileSync(${JSON.stringify(restored)}, 'restored');
 }`
     );

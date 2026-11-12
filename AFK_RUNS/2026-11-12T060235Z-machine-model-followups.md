@@ -15,15 +15,15 @@ robertpenner/xstate#19, robertpenner/xstate#20, and robertpenner/xstate#21.
 
 **Execution:** sequential.
 
-**Verified integration head:** `587ddcd` (nested kept domains, evidence below).
+**Verified integration head:** `976c4a3` (all issue outcomes, evidence below).
 
 ### Slice progress
 
-| Issue                  | Slice                       | Status                | Blocked by / reason | Integration commit    | Verification                         |
-| ---------------------- | --------------------------- | --------------------- | ------------------- | --------------------- | ------------------------------------ |
-| robertpenner/xstate#19 | Process-tree cleanup        | integrated/verified   |                     | `ed94c63`             | See process-runner evidence          |
-| robertpenner/xstate#20 | Nested kept-domain validity | integrated/verified   |                     | `587ddcd`             | See nested-domain evidence           |
-| robertpenner/xstate#21 | Refusal converse            | verified; documenting | None                | Recorded after commit | No comparable-domain refusal remains |
+| Issue                  | Slice                       | Status              | Blocked by / reason | Integration commit | Verification                         |
+| ---------------------- | --------------------------- | ------------------- | ------------------- | ------------------ | ------------------------------------ |
+| robertpenner/xstate#19 | Process-tree cleanup        | integrated/verified |                     | `ed94c63`          | See process-runner evidence          |
+| robertpenner/xstate#20 | Nested kept-domain validity | integrated/verified |                     | `587ddcd`          | See nested-domain evidence           |
+| robertpenner/xstate#21 | Refusal converse            | integrated/verified |                     | `976c4a3`          | No comparable-domain refusal remains |
 
 ### Verification evidence
 
@@ -201,17 +201,38 @@ owns its wrapper/targetability qualification.
 
 ### Final series review
 
-**Base/head:** base `f5ae474`; final head pending.
+**Base/head:** `f5ae474` / `976c4a3`, 15 changed files, no uncommitted snapshot.
 
 **Contracts:** issue bodies and refreshed briefs for robertpenner/xstate#19,
 robertpenner/xstate#20, and robertpenner/xstate#21; parent
 robertpenner/xstate#14; XState `AGENTS.md`.
 
-**Evidence:** pending.
+**Evidence:** Fixed-revision patch, full changed files, unchanged definitions,
+issue bodies/comments, fresh briefs, standards, primary sources, and measured
+checks were materialized under `review/` in the scratch directory. The separate
+review context read the provenance and reviewed Standards, Spec, and Ideas and
+evidence. Its report is `review/review-result.txt`.
 
-**Findings:** pending.
+**Findings:** zero confirmed defects and zero material unresolved questions on
+each axis. The reviewer challenged equal/root/atomic domains, moving-plan
+overlap, retained patch/effect application, process-group cleanup ordering,
+SCXML mappings, and upstream-report novelty. The coordinator checked the new
+proof argument and the cited cleanup code against the pinned artifacts.
 
-**Remaining blockers:** pending implementation.
+One optional improvement was implemented: SIGINT and SIGTERM fixtures now check
+the tracked child and grandchild inside caller `finally`, before the restoration
+marker. This directly observes cleanup order. `pnpm test:tooling` passed all
+20 tests; `pnpm lint` and `pnpm format:check` passed. The coordinator reviewed
+this test-only correction against the finding. Model/proof and compiled-package
+sources are unchanged from `587ddcd`, so their recorded checks remain applicable.
+
+**Review limitations:** Read-only source review; execution evidence was supplied,
+not independently rerun. Local process tests ran on macOS and cover descendants
+that remain in the process group. No claim covers deliberate session/group
+escape. Formal proofs concern the translated model; differential evidence is
+sampled. No SCXML processor or proposed upstream fix was executed.
+
+**Remaining blockers:** final publication and PR checks.
 
 **Completed:** not measured.
 
