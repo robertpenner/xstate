@@ -18,9 +18,9 @@ multi-transition parallel extension
 unmodified LemmaScript 0.6.6. Dafny 4.11.0 proves its contracts and the laws in
 [`formal/machineModel.dfy`](./formal/machineModel.dfy).
 [`formal/machineModel.manifest.json`](./formal/machineModel.manifest.json) lists
-140 laws (including proof helpers and a concrete lifecycle witness), 22 generated
-contract lemmas, and 22 deliberately incorrect model edits. The complete proof
-currently checks 462 verification tasks. Function postconditions support
+148 laws (including proof helpers and a concrete lifecycle witness), 22 generated
+contract lemmas, and 23 deliberately incorrect model edits. The complete proof
+currently checks 474 verification tasks. Function postconditions support
 composition; they are also checked against the generated bodies.
 Eleven additional proof-weakening probes check that generated contracts cannot
 gain restrictive preconditions or lose their original postconditions.
@@ -121,14 +121,18 @@ The laws establish:
 - The next active set contains every node that was active and not exited, plus
   every entered node, in document order. For a well-formed machine starting
   from a valid configuration, every step accepted by `parallelStepReady`
-  remains valid. The proof relies on the kept plans' domains being pairwise
-  incomparable: each node lies inside at most
-  one domain, so its membership comes from that plan's own valid result or from
-  the previous active set.
+  remains valid. Readiness does not require kept domains to be incomparable. The proof
+  discards lifecycle-free plans only when reasoning about active nodes:
+  `MovingCombined` proves that this preserves the exit and entry unions, and
+  `ReadyMovingDomainsApart` proves that the remaining plans have incomparable
+  domains. A moving atomic-domain plan must exit its atomic domain
+  (`ReadyAtomicPlanExits`); two moving plans with nested or equal domains
+  would share an exit (`NestedMovingPlansOverlap`) and cannot both survive
+  conflict removal. Every kept result still contributes its patch and effects.
 - Two kept plans in the statelyai/xstate#5895 pattern, where one exit set
   contains the other's target or an ancestor of it, always have comparable
-  domains, so `parallelStepReady` refuses the step (`PatternDomainsComparable`,
-  `PatternRefused`).
+  domains (`PatternDomainsComparable`, `PatternDomainsNotApart`). This does not
+  imply that their combined configuration is invalid.
 
 The patch and identity contracts differ from `createFSM`, which compares patch
 values before deciding whether to copy. No FSM reuse law is imported here.
@@ -183,8 +187,8 @@ refused before running. A target must be a string, so array (multi-target)
 transitions are refused. Each step is checked against the model's
 `parallelStepReady` before it runs. When fewer than two regions select, this is
 the single-selection `parallelReady` check. When several regions select, every
-selection must pass that check, sources must lie on pairwise incomparable
-paths, and the kept plans' domains must be pairwise incomparable. A step is
+selection must pass that check and sources must lie on pairwise incomparable
+paths. A step is
 also refused when a transition, with or without `reenter`, targets an already
 active direct region of the parallel node, including in single-selection steps.
 Without `reenter`, the runtime runs the targeted region's entry actions again
@@ -198,27 +202,23 @@ Targetless `reenter: true` transitions are refused when several regions
 select, because the runtime's targetless-reentry lifecycle is a separate
 suspected bug.
 
-The comparable-domains refusal also covers the general #5895 pattern: one
+The general #5895 pattern is that one
 transition's exit set contains another transition's target or an ancestor of
 that target. `PatternDomainsComparable` proves that the two domains are then
 comparable. The exited node lies inside or at the first domain (a reentering
 source can be its own domain), and both domains are ancestors-or-self of the
-second target. `PatternRefused` applies this to the plans that `multiReady`
-checks: any two of them that match the pattern make `domainsApart` false, so
-the step is refused before comparison.
+second target. `PatternDomainsNotApart` states that such a pair makes
+`domainsApart` false. This is a geometric property, not a refusal condition.
+The pattern includes valid steps: an atomic self-target without reentry has
+empty exit and entry sets and may be kept alongside a transition that exits
+its parallel ancestor. Both transition results run in selection order, while
+the ancestor-exiting plan determines that atomic node's removal.
 
-The converse is informal; no law states it. When two kept domains are strictly
-comparable, the inner domain is active and below the outer one, so it is in
-the outer exit set, and it is an ancestor-or-self of its own target. Equal
-domains do not match the pattern: two regions that both target an atomic
-region `B` have domain `B` and empty exit sets. The active-region refusal
-rejects that step first; no law shows that an earlier refusal catches every
-equal-domain case, so the comparable-domains count is not proved to count only
-#5895 instances. The pattern includes instances the runtime
-handles correctly. An atomic self-target whose domain is the atomic node itself
-is neither exited nor entered, so keeping it alongside a transition that exits
-the parallel node yields a valid runtime configuration. The model still refuses
-that step because its validity proof needs pairwise incomparable domains.
+There is no comparable-domain refusal left, so there is no refusal converse
+to prove or comparable-domain refusal count to interpret. The active-region
+target refusal still covers the statelyai/xstate#5895 reproduction. All
+remaining comparable-domain cases are subject to the same listed readiness
+checks as other steps.
 
 Multiple parallel nodes, choices, history, completion, eventless transitions,
 raised events, timers, actors, routes, state input and persistence remain
@@ -334,7 +334,9 @@ document order, mixed handled/declined/blocked regions, pre-step callback
 context with patches merged in region order, conflicts where the earlier
 region wins in either order, two regions that both leave the parallel node, a
 region transition against a reentry of the parallel node, and the
-targetless-reentry and comparable-domain refusals.
+targetless-reentry refusal. Atomic self-targets beside an ancestor exit are
+compared in both selection orders, including configuration, patches, and
+exit/transition/entry effect order.
 
 [`parallelModel.property.test.ts`](./parallelModel.property.test.ts) generates
 500 trees with seed 8912 and depths one through four, turning at most one
@@ -346,27 +348,34 @@ tree. Steps refused by `parallelStepReady` end the trace. It uses the same
 four-second fail-on-interruption limit. The test prints coverage statistics
 with `console.info` and asserts only lower bounds on them. At seed 8912 it
 reported 284 machines with a parallel node, 87 whose regions differ in
-height, 2123 compared steps in traces that ran to completion, 308 steps with
-two or more selections, and 35 steps where conflict removal dropped a
-selection. Refusals cut short 144 of the 284 traces with a parallel node: 114
-at an active-region target, 28 at a targetless reentry among several
-selections, and 2 at comparable domains. Steps compared before a refusal are
+height, 2131 compared steps in traces that ran to completion, 315 steps with
+two or more selections, 38 steps where conflict removal dropped a
+selection, and 3 compared steps with strictly nested kept domains. The last
+count has an asserted positive lower bound. Refusals cut short 143 of the
+284 traces with a parallel node: 114
+at an active-region target and 29 at a targetless reentry among several
+selections. Steps compared before a refusal are
 not counted.
 
 [`runtimeFindings.test.ts`](./runtimeFindings.test.ts) contains direct public-API
-reproductions of four suspected runtime bugs:
+characterizations of four previously reported behaviors:
 
 - Targetless reentry runs entry without exit (statelyai/xstate#5897).
 - A descendant targeting the root without reentry invokes root entry without
   root exit. Seed 8912 discovered this after six cases and 77 shrinks; the named
-  reproduction retains the minimal root/child behavior.
+  reproduction retains the minimal root/child behavior
+  ([statelyai/xstate#5896](https://github.com/statelyai/xstate/issues/5896),
+  also observed in v5).
 - When one region targets a sibling region and another region leaves the
   parallel node in the same step, the runtime exits the parallel node and then
   re-enters the sibling region without its parent, ending in `m, m.P.B, m.X`
   (statelyai/xstate#5895).
 - A targetless reentry in one region beside a reentry of the parallel node in
   another exits region `A` and never re-enters it, while re-entering its leaf
-  `a1`.
+  `a1`. This is already recorded in
+  [statelyai/xstate#5897's follow-up comment](https://github.com/statelyai/xstate/issues/5897#issuecomment-6806469021)
+  and covered by the proposed fix in
+  [statelyai/xstate#5898](https://github.com/statelyai/xstate/pull/5898).
 
 All four assert observed output, so a runtime change requires revisiting these
 characterizations and the model's exit/entry plans.
@@ -392,6 +401,20 @@ pnpm format:check
 pnpm test:core
 pnpm build
 ```
+
+While a verification child is running, the drivers stop its complete process
+group on timeout, SIGINT, SIGTERM, or SIGHUP before removing temporary proof files
+or restoring mutated runtime files. Interrupted CLI runs retain exit statuses
+130, 143, and 129 respectively. SIGKILL cannot be handled; killing the driver
+forcibly or moving descendants into another session/group is outside this cleanup
+guarantee.
+`MACHINE_MODEL_VERIFY_TIMEOUT_MS` overrides the verification driver's default
+180000-millisecond per-command limit. `MACHINE_MODEL_RUNTIME_TIMEOUT_MS`
+overrides the runtime-defect driver's 60000-millisecond limit. Each override must
+be a finite positive number of milliseconds no greater than 2147483647; invalid
+values fail before any checks or mutations. A timeout reports the command and
+its limit and fails the run. `pnpm test:tooling` includes process-tree cleanup
+regressions for these drivers.
 
 The proof driver regenerates into temporary directories, checks exact freshness,
 requires every generated line to remain in order, and checks the declaration
@@ -419,7 +442,9 @@ active, exit the source region in a cross-region transition, and run exits in
 document order. The multi-transition edits let an ancestor source preempt a
 descendant, apply dropped selections' patches and effects, apply a kept
 result twice, apply kept results in reverse order, and keep exited nodes in
-the next active set. It also checks that a
+the next active set. A nested-domain edit incorrectly retains an atomic
+self-target's domain node when another kept plan exits it; `MultiStepMembers`
+rejects it. It also checks that a
 behavior-preserving rewrite changes the generated
 artifact and still proves after regeneration.
 

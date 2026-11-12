@@ -14,6 +14,7 @@ it('compares generated single-parallel trees, targets and event traces', () => {
     steps: 0,
     multiSteps: 0,
     conflictSteps: 0,
+    nestedDomainSteps: 0,
     mixedRegions: 0,
     reasons: {} as Record<string, number>
   };
@@ -110,6 +111,7 @@ it('compares generated single-parallel trees, targets and event traces', () => {
           for (const step of trace) {
             if (step.selections > 1) stats.multiSteps++;
             if (step.kept < step.selections) stats.conflictSteps++;
+            if (step.nestedDomains) stats.nestedDomainSteps++;
           }
         } catch (error) {
           if (
@@ -135,5 +137,6 @@ it('compares generated single-parallel trees, targets and event traces', () => {
   expect(stats.steps).toBeGreaterThan(stats.runs);
   expect(stats.multiSteps).toBeGreaterThan(0);
   expect(stats.conflictSteps).toBeGreaterThan(0);
+  expect(stats.nestedDomainSteps).toBeGreaterThan(0);
   expect(stats.mixedRegions).toBeGreaterThan(0);
 });

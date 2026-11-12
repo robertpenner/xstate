@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { childTimeout, runCommand } from './machine-model-process.mjs';
 import {
   mkdirSync,
   mkdtempSync,
@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const timeoutMs = childTimeout('MACHINE_MODEL_VERIFY_TIMEOUT_MS', 180_000);
 const directory = path.join(root, 'packages/core/test/machine-model');
 const read = (file) => readFileSync(path.join(directory, file), 'utf8');
 const manifest = JSON.parse(read('formal/machineModel.manifest.json'));
@@ -22,20 +23,14 @@ const config = read('lemmascript.json');
 const lsc = process.env.LEMMASCRIPT_LSC;
 assert.ok(lsc, 'Set LEMMASCRIPT_LSC to lemmascript@0.6.6/tools/dist/lsc.js');
 
-function run(command, args, cwd) {
-  const result = spawnSync(command, args, {
-    cwd,
-    encoding: 'utf8',
-    timeout: 180_000,
-    maxBuffer: 8 * 1024 * 1024
-  });
-  if (result.error) throw result.error;
+async function run(command, args, cwd) {
+  const result = await runCommand(command, args, { cwd, timeoutMs });
   assert.equal(
     result.signal,
     null,
     `${command} terminated by ${result.signal}`
   );
-  return { status: result.status, output: result.stdout + result.stderr };
+  return result;
 }
 
 function names(text, pattern) {
@@ -253,77 +248,86 @@ function verified(result) {
   );
 }
 
-const dafny = run('dafny', ['--version'], root);
-assert.equal(dafny.status, 0, dafny.output);
-assert.match(dafny.output, /^4\.11\.0\b/);
-const translator = run(process.execPath, [lsc, 'version'], root);
-assert.equal(translator.status, 0, translator.output);
-assert.equal(translator.output.trim(), '0.6.6');
-checkInventory(generated, proof);
-for (const defect of manifest.proofDefects) {
-  assert.throws(
-    () => checkInventory(generated, replaceOnce(proof, defect)),
-    /Generated declaration contract must remain unchanged/,
-    `Accepted proof weakening: ${defect.name}`
-  );
-  console.log(`Rejected proof weakening: ${defect.name}`);
-}
-const scratch = mkdtempSync(
-  path.join(process.env.TMPDIR ?? tmpdir(), 'xstate-machine-proof-')
-);
 try {
-  const baseline = prepare(scratch, 'baseline', source);
-  const generation = translate('gen', baseline);
-  assert.equal(generation.status, 0, generation.output);
-  assert.equal(
-    readFileSync(path.join(baseline, 'formal/machineModel.dfy.gen'), 'utf8'),
-    generated,
-    'Generated model is stale'
-  );
-  const result = translate('check', baseline);
-  verified(result);
-  console.log(result.output.trim().split('\n').at(-1));
-  for (const [index, defect] of manifest.defects.entries()) {
-    const cwd = prepare(
-      scratch,
-      `defect-${index}`,
-      replaceOnce(source, defect)
+  const dafny = await run('dafny', ['--version'], root);
+  assert.equal(dafny.status, 0, dafny.output);
+  assert.match(dafny.output, /^4\.11\.0\b/);
+  const translator = await run(process.execPath, [lsc, 'version'], root);
+  assert.equal(translator.status, 0, translator.output);
+  assert.equal(translator.output.trim(), '0.6.6');
+  checkInventory(generated, proof);
+  for (const defect of manifest.proofDefects) {
+    assert.throws(
+      () => checkInventory(generated, replaceOnce(proof, defect)),
+      /Generated declaration contract must remain unchanged/,
+      `Accepted proof weakening: ${defect.name}`
     );
-    const rejected = translate('regen', cwd);
-    assert.notEqual(rejected.status, 0, `Accepted defect: ${defect.name}`);
-    assert.match(
-      rejected.output,
-      /a postcondition could not be proved|assertion might not hold|possible violation of postcondition/,
-      `Expected a proof failure, not a tool failure: ${defect.name}\n${rejected.output}`
+    console.log(`Rejected proof weakening: ${defect.name}`);
+  }
+  const scratch = mkdtempSync(
+    path.join(process.env.TMPDIR ?? tmpdir(), 'xstate-machine-proof-')
+  );
+  try {
+    const baseline = prepare(scratch, 'baseline', source);
+    const generation = await translate('gen', baseline);
+    assert.equal(generation.status, 0, generation.output);
+    assert.equal(
+      readFileSync(path.join(baseline, 'formal/machineModel.dfy.gen'), 'utf8'),
+      generated,
+      'Generated model is stale'
+    );
+    const result = await translate('check', baseline);
+    verified(result);
+    console.log(result.output.trim().split('\n').at(-1));
+    for (const [index, defect] of manifest.defects.entries()) {
+      const cwd = prepare(
+        scratch,
+        `defect-${index}`,
+        replaceOnce(source, defect)
+      );
+      const rejected = await translate('regen', cwd);
+      assert.notEqual(rejected.status, 0, `Accepted defect: ${defect.name}`);
+      assert.match(
+        rejected.output,
+        /a postcondition could not be proved|assertion might not hold|possible violation of postcondition/,
+        `Expected a proof failure, not a tool failure: ${defect.name}\n${rejected.output}`
+      );
+      checkInventory(
+        readFileSync(path.join(cwd, 'formal/machineModel.dfy.gen'), 'utf8'),
+        readFileSync(path.join(cwd, 'formal/machineModel.dfy'), 'utf8')
+      );
+      console.log(`Rejected defect: ${defect.name}`);
+    }
+    const refactor = prepare(
+      scratch,
+      'refactor',
+      replaceOnce(source, manifest.refactor)
+    );
+    const regenerated = await translate('regen', refactor);
+    verified(regenerated);
+    const changed = readFileSync(
+      path.join(refactor, 'formal/machineModel.dfy.gen'),
+      'utf8'
+    );
+    assert.notEqual(
+      changed,
+      generated,
+      'Refactor must change generated output'
     );
     checkInventory(
-      readFileSync(path.join(cwd, 'formal/machineModel.dfy.gen'), 'utf8'),
-      readFileSync(path.join(cwd, 'formal/machineModel.dfy'), 'utf8')
+      changed,
+      readFileSync(path.join(refactor, 'formal/machineModel.dfy'), 'utf8')
     );
-    console.log(`Rejected defect: ${defect.name}`);
+    console.log(
+      'Freshness, additions-only inventory, defects and refactor verified.'
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
-  const refactor = prepare(
-    scratch,
-    'refactor',
-    replaceOnce(source, manifest.refactor)
-  );
-  const regenerated = translate('regen', refactor);
-  verified(regenerated);
-  const changed = readFileSync(
-    path.join(refactor, 'formal/machineModel.dfy.gen'),
-    'utf8'
-  );
-  assert.notEqual(changed, generated, 'Refactor must change generated output');
-  checkInventory(
-    changed,
-    readFileSync(path.join(refactor, 'formal/machineModel.dfy'), 'utf8')
-  );
-  console.log(
-    'Freshness, additions-only inventory, defects and refactor verified.'
-  );
-} finally {
-  rmSync(scratch, { recursive: true, force: true });
+  assert.equal(read(manifest.source), source);
+  assert.equal(read('formal/machineModel.dfy.gen'), generated);
+  assert.equal(read('formal/machineModel.dfy'), proof);
+} catch (error) {
+  console.error(error);
+  process.exitCode ||= 1;
 }
-assert.equal(read(manifest.source), source);
-assert.equal(read('formal/machineModel.dfy.gen'), generated);
-assert.equal(read('formal/machineModel.dfy'), proof);

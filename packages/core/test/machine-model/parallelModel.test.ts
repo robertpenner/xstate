@@ -563,6 +563,80 @@ describe('multi-transition parallel steps', () => {
     ]);
   });
 
+  it('keeps an atomic self-target result when another kept domain exits it', () => {
+    const trace = compareParallelTrace(
+      regions(
+        {
+          go: (_, enq) => {
+            enq(record, 'self');
+            return { target: '#m.p.a.a1', context: { count: 1 } };
+          }
+        },
+        {
+          go: (_, enq) => {
+            enq(record, 'leave');
+            return { target: '#m.off', context: { count: 2 } };
+          }
+        }
+      ),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].selections).toBe(2);
+    expect(trace[1].kept).toBe(2);
+    expect(trace[1].nestedDomains).toBe(true);
+    expect(trace[1].value).toBe('off');
+    expect(trace[1].active).toEqual(['m', 'm.off']);
+    expect(trace[1].context).toEqual({ count: 2 });
+    expect(labels(trace[1])).toEqual([
+      'exit c1',
+      'exit c',
+      'exit b1',
+      'exit b',
+      'exit a1',
+      'exit a',
+      'exit p',
+      'self',
+      'leave',
+      'enter off'
+    ]);
+  });
+
+  it('keeps a later atomic self-target result after the earlier region leaves', () => {
+    const trace = compareParallelTrace(
+      regions(
+        {
+          go: (_, enq) => {
+            enq(record, 'leave');
+            return { target: '#m.off', context: { count: 1 } };
+          }
+        },
+        {
+          go: (_, enq) => {
+            enq(record, 'self');
+            return { target: '#m.p.b.b1', context: { count: 2 } };
+          }
+        }
+      ),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].kept).toBe(2);
+    expect(trace[1].nestedDomains).toBe(true);
+    expect(trace[1].active).toEqual(['m', 'm.off']);
+    expect(trace[1].context).toEqual({ count: 2 });
+    expect(labels(trace[1])).toEqual([
+      'exit c1',
+      'exit c',
+      'exit b1',
+      'exit b',
+      'exit a1',
+      'exit a',
+      'exit p',
+      'leave',
+      'self',
+      'enter off'
+    ]);
+  });
+
   it.each([
     [
       'local first',
@@ -603,11 +677,6 @@ describe('multi-transition parallel steps', () => {
       'targetless reentry',
       { go: { reenter: true } },
       { go: { target: '#m.p', reenter: true } }
-    ],
-    [
-      'comparable domains',
-      { go: { target: '#m.p.a.a1' } },
-      { go: { target: '#m.off' } }
     ]
   ] as const)('refuses a %s before running', (reason, aOn, bOn) => {
     expect(() =>

@@ -139,7 +139,9 @@ export function compareParallelTrace(config: Config, events: readonly Event[]) {
       contextReused: expected.contextReused
     };
   }
-  const trace = [{ ...compare(undefined), selections: 0, kept: 0 }];
+  const trace = [
+    { ...compare(undefined), selections: 0, kept: 0, nestedDomains: false }
+  ];
   for (const event of events) {
     const previous = actual;
     const modelEvent = {
@@ -156,14 +158,32 @@ export function compareParallelTrace(config: Config, events: readonly Event[]) {
       modelEvent
     );
     const selections = selected.length;
-    const kept =
+    const keptSelections =
       selections < 2
-        ? selections
-        : model.removeConflicts(machine, expected.snapshot.active, selected, [])
-            .length;
+        ? selected
+        : model.removeConflicts(
+            machine,
+            expected.snapshot.active,
+            selected,
+            []
+          );
+    const kept = keptSelections.length;
+    const plans = model.selectionPlans(
+      machine,
+      expected.snapshot.active,
+      keptSelections
+    );
+    const nestedDomains = plans.some((plan, index) =>
+      plans.some(
+        (other, otherIndex) =>
+          index < otherIndex &&
+          plan.domain.length !== other.domain.length &&
+          model.comparable(plan.domain, other.domain)
+      )
+    );
     expected = model.parallelStep(machine, expected.snapshot, modelEvent);
     [actual, actualEffects] = transition(runtime, actual, event);
-    trace.push({ ...compare(previous), selections, kept });
+    trace.push({ ...compare(previous), selections, kept, nestedDomains });
   }
   return trace;
 }
@@ -172,8 +192,7 @@ export type RefusalReason =
   | 'unknown target'
   | 'active region target'
   | 'targetless reentry'
-  | 'comparable sources'
-  | 'comparable domains';
+  | 'comparable sources';
 
 // Names the first `parallelStepReady` clause that fails, in the order the
 // model checks them.
@@ -195,5 +214,5 @@ export function refusalReason(
     }
   }
   if (!model.sourcesApart(selections)) return 'comparable sources';
-  return 'comparable domains';
+  throw new Error('No refusal reason for an accepted step');
 }
