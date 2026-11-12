@@ -4,7 +4,8 @@
 
 **Branch:** `machine-model-followups-19-21`
 
-**Pull request:** pending first implementation commit.
+**Pull request:** <https://github.com/robertpenner/xstate/pull/22> (draft,
+base `machine-formalized`).
 
 **Started:** 2026-11-12 06:02:35 UTC
 
@@ -14,15 +15,15 @@ robertpenner/xstate#19, robertpenner/xstate#20, and robertpenner/xstate#21.
 
 **Execution:** sequential.
 
-**Verified integration head:** not yet verified.
+**Verified integration head:** `ed94c63` (process cleanup, evidence below).
 
 ### Slice progress
 
-| Issue                  | Slice                       | Status              | Blocked by / reason        | Integration commit          | Verification                |
-| ---------------------- | --------------------------- | ------------------- | -------------------------- | --------------------------- | --------------------------- |
-| robertpenner/xstate#19 | Process-tree cleanup        | integrated/verified |                            | Recorded in next log update | See process-runner evidence |
-| robertpenner/xstate#20 | Nested kept-domain validity | pending             | Verification tooling first |                             |                             |
-| robertpenner/xstate#21 | Refusal converse            | blocked             | robertpenner/xstate#20     |                             |                             |
+| Issue                  | Slice                       | Status               | Blocked by / reason    | Integration commit    | Verification                |
+| ---------------------- | --------------------------- | -------------------- | ---------------------- | --------------------- | --------------------------- |
+| robertpenner/xstate#19 | Process-tree cleanup        | integrated/verified  |                        | `ed94c63`             | See process-runner evidence |
+| robertpenner/xstate#20 | Nested kept-domain validity | verified; committing | None                   | Recorded after commit | See nested-domain evidence  |
+| robertpenner/xstate#21 | Refusal converse            | blocked              | robertpenner/xstate#20 |                       |                             |
 
 ### Verification evidence
 
@@ -60,6 +61,38 @@ Authoritative brief:
   seeded defects and 11 proof weakenings rejected; freshness and the
   behavior-preserving refactor passed. Evidence: `verify-19.log`.
 
+### Nested-domain checks (changes on `ed94c63`)
+
+Authoritative brief:
+<https://github.com/robertpenner/xstate/issues/20#issuecomment-6816447019>.
+
+- Removed only the incomparable-kept-domain readiness restriction. The adapter,
+  comparisons, coverage assertion, generated proof, handwritten proof, inventory,
+  and README describe the resulting accepted domain.
+- The atomic-self-target/ancestor-exit comparison first failed with the old
+  comparable-domain refusal. Both selection orders now compare configuration,
+  context, and ordered effects, retaining both kept results.
+- `pnpm test:machine-model`: 8 files, 117 tests passed. Seed 8912, 500 generated
+  machines: 284 parallel machines, 87 mixed-region-height machines, 2131 compared
+  steps in completed traces, 315 multi-selection steps, 38 conflict-removal steps,
+  and 3 strictly nested kept-domain steps. There were 143 refused traces:
+  114 active-region targets and 29 targetless reentries.
+- `pnpm verify:machine-model`: 474 verified, 0 errors; 148 laws, 22 contracts,
+  all 23 seeded defects and 11 proof weakenings rejected, freshness and the
+  behavior-preserving refactor passed. Evidence: `verify-20.log`.
+- The new nested-domain defect fails the independently stated
+  `MultiStepMembers` equality; a standalone probe confirmed an assertion failure.
+- `pnpm test:tooling`: 20 tests passed.
+- `pnpm test:core`: 189 files, 3063 tests passed, 29 skipped, 3 todo.
+- `pnpm build`, `pnpm typecheck`, `pnpm lint`, `pnpm format:check`: passed.
+  Existing module-type warnings during lint did not fail the check.
+- `pnpm test:machine-model:runtime-defects`: all 7 mutations rejected in a clean
+  sequential rerun after stopping watchers and completing the other checks.
+  Source restoration and the empty production diff against `da64b0a` passed.
+- Explicit Prettier formatting/checks cover the README and run log.
+- Removed only the task-generated `machineModel.dfy.base` translator scratch
+  file. No production changes or unproved assumptions were introduced.
+
 ### Recovery
 
 Not resumed. User corrected the repository from `robertpenner/state` to
@@ -75,6 +108,72 @@ The installed repository-pinned pnpm reports 11.8.0.
 
 Temporary verification evidence:
 `/Users/robertpenner/git/penner-agent-scratch/branch-xstate-afk-19-21/run-F2trAD5Q`.
+
+### Potential bugs and diagnosis
+
+The user requested v6/v5/SCXML diagnosis and checking existing upstream reports
+before recording findings. Queried all issues authored by `robertpenner` in
+`statelyai/xstate`, then read the relevant bodies and every comment. These are
+already reported, so the log keeps their canonical references without repeating
+their reproductions or diagnoses:
+
+| Existing report                                                                                                           | Scope                                                                                 | Status when checked                             |
+| ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| [statelyai/xstate#5895](https://github.com/statelyai/xstate/issues/5895)                                                  | Cross-region conflicts, including the smaller repeated-region-entry case              | Open; fix statelyai/xstate#5899 open            |
+| [statelyai/xstate#5896](https://github.com/statelyai/xstate/issues/5896)                                                  | Root lifecycle shared by v5 and v6; includes the SCXML wrapper qualification          | Open; asks for intended semantics               |
+| [statelyai/xstate#5897](https://github.com/statelyai/xstate/issues/5897)                                                  | Targetless reentry                                                                    | Open; fix statelyai/xstate#5898 open            |
+| [Orphaned-leaf comment on statelyai/xstate#5897](https://github.com/statelyai/xstate/issues/5897#issuecomment-6806469021) | Parallel-region omission, its cause, and regression coverage in statelyai/xstate#5898 | Already covered by the same upstream report/fix |
+| [statelyai/xstate#5901](https://github.com/statelyai/xstate/issues/5901)                                                  | Timer/eventless ordering                                                              | Open; outside this run                          |
+
+The orphaned-leaf case was initially listed separately for investigation. The
+upstream comment establishes that it is already reported and tested in the fix;
+it is not a new finding from this run. No duplicate upstream issue or comment was
+created. Closed FSM reports and the older missing-initial-state report do not
+overlap the current machine-model work.
+
+The v6 reference is `da64b0a`; `git diff da64b0a -- packages/core/src` is empty.
+The isolated npm v5 reference is 5.33.4, whose upstream tag resolves to `bd77717`.
+Nine minimized cross-version probes passed. Seven rechecked the reports above
+and their controls, with no new discrepancy to add to them. The other two
+compare the newly accepted atomic-self-target/ancestor-exit step in both
+selection orders: v5 and v6 agree in active nodes, context, and ordered effects.
+This confirms the model over-refusal addressed by robertpenner/xstate#20.
+
+Evidence: `compare-versions.mjs` and `version-comparison.jsonl` in the scratch
+directory. They use version-correct pure transition APIs. The probe's first
+attempt used v5's second `createMachine` argument on v6 and received E71; that
+was a fixture error and was corrected before the successful comparisons.
+
+**New v6 runtime bugs discovered in this run:** none so far. The verification
+process defect belongs to robertpenner/xstate#19; the accepted-domain defect
+belongs to the model in robertpenner/xstate#20. Production behavior is unchanged.
+
+#### SCXML interpretation relevant to the new accepted domain
+
+Primary sources:
+
+- [SCXML 3.11](https://www.w3.org/TR/2015/REC-scxml-20150901/#LegalStateConfigurations)
+  and [3.13](https://www.w3.org/TR/2015/REC-scxml-20150901/#SelectingTransitions)
+  are normative. Their ancestry, exit/entry, and conflict definitions were
+  checked alongside the upstream reports.
+- [SCXML 3.5, default transition type](https://www.w3.org/TR/2015/REC-scxml-20150901/#transition)
+  is external. An atomic explicit self-target exits/reenters that state even
+  when marked internal, because its source is not compound. XState's default
+  non-reentering self-target is therefore not a literal SCXML self-transition.
+  A targetless SCXML transition is the lifecycle-free analogue for the newly
+  accepted XState step. An explicit self-target beside an ancestor exit would
+  conflict under literal SCXML semantics.
+- [SCXML Appendix D](https://www.w3.org/TR/2015/REC-scxml-20150901/#AlgorithmforSCXMLInterpretation)
+  is informative. Its `getTransitionDomain`/`findLCCA` algorithm agrees with
+  the normative compound-ancestor definition. V5's general least-common-ancestor
+  implementation can choose a parallel domain, so v5 is a comparison reference,
+  not a substitute for the SCXML rules.
+- [V6 source at `da64b0a`](https://github.com/robertpenner/xstate/blob/da64b0a/packages/core/src/stateUtils.ts)
+  and [v5 source at `bd77717`](https://github.com/statelyai/xstate/blob/bd77717/packages/core/src/stateUtils.ts).
+
+No SCXML processor was executed. These SCXML conclusions follow from the cited
+normative definitions and the explicit mappings above. The existing root report
+owns its wrapper/targetability qualification.
 
 ### Publication at stop or handoff
 

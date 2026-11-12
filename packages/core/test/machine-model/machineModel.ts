@@ -953,13 +953,10 @@ export function multiReady(
   selections: readonly Selection[]
 ): boolean {
   //@ verify
-  const kept = removeConflicts(machine, active, selections, []);
   return (
     selections.every((selection) =>
       selectionReady(machine, active, selection)
-    ) &&
-    sourcesApart(selections) &&
-    domainsApart(selectionPlans(machine, active, kept))
+    ) && sourcesApart(selections)
   );
 }
 

@@ -750,8 +750,7 @@ function domainsApart(plans: seq<ParallelPlan>): bool
 
 function multiReady(machine: ParallelMachine, active: seq<string>, selections: seq<Selection>): bool
 {
-  var kept := removeConflicts(machine, active, selections, []);
-  ((SeqAll(selections, (selection: Selection) => selectionReady(machine, active, selection)) && sourcesApart(selections)) && domainsApart(selectionPlans(machine, active, kept)))
+  (SeqAll(selections, (selection: Selection) => selectionReady(machine, active, selection)) && sourcesApart(selections))
 }
 
 function parallelStepReady(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): bool

@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 462,
+  "verifiedCount": 474,
   "functions": [
     "mergePatch",
     "apply",
@@ -113,7 +113,8 @@
     "PlanFrom",
     "PlansApart",
     "Combined",
-    "PlansContext"
+    "PlansContext",
+    "MovingPlans"
   ],
   "laws": [
     "LastPatchCons",
@@ -210,7 +211,7 @@
     "NarrowWithin",
     "DomainWithinTarget",
     "PatternDomainsComparable",
-    "PatternRefused",
+    "PatternDomainsNotApart",
     "PlanDeclared",
     "ParallelStepMeaning",
     "ParallelTargetlessKeepsActive",
@@ -255,7 +256,15 @@
     "MultiStepMembers",
     "MultiStepValid",
     "CombinedLifecycleLists",
-    "MultiStepMeaning"
+    "MultiStepMeaning",
+    "SelectionsReady",
+    "MovingCombined",
+    "AtomicNoDescendants",
+    "DomainEqualTargetIsRegion",
+    "ReadyAtomicPlanExits",
+    "NestedMovingPlansOverlap",
+    "SelectionPlanMembers",
+    "ReadyMovingDomainsApart"
   ],
   "defects": [
     {
@@ -367,6 +376,11 @@
       "name": "parallel step keeps exited nodes",
       "before": "      (active.includes(id) && !plansExit(plans, id)) || plansEnter(plans, id)\n  );\n  const exited",
       "after": "      active.includes(id) || plansEnter(plans, id)\n  );\n  const exited"
+    },
+    {
+      "name": "atomic inner domain survives an outer exit",
+      "before": "      (active.includes(id) && !plansExit(plans, id)) || plansEnter(plans, id)\n  );\n  const exited",
+      "after": "      (active.includes(id) && (!plansExit(plans, id) || plans.some((plan) => plan.domain.length > 0 && plan.domain[plan.domain.length - 1] === id && plan.exits.length === 0))) || plansEnter(plans, id)\n  );\n  const exited"
     }
   ],
   "proofDefects": [
