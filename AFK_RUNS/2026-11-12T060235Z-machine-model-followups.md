@@ -1,11 +1,11 @@
 # AFK Run: machine-model follow-ups
 
-**Status:** active
+**Status:** completed
 
 **Branch:** `machine-model-followups-19-21`
 
-**Pull request:** <https://github.com/robertpenner/xstate/pull/22> (draft,
-base `machine-formalized`).
+**Pull request:** <https://github.com/robertpenner/xstate/pull/22>
+(base `machine-formalized`).
 
 **Started:** 2026-11-12 06:02:35 UTC
 
@@ -15,7 +15,7 @@ robertpenner/xstate#19, robertpenner/xstate#20, and robertpenner/xstate#21.
 
 **Execution:** sequential.
 
-**Verified integration head:** `976c4a3` (all issue outcomes, evidence below).
+**Verified integration head:** `656c070` (all issue outcomes and review improvement).
 
 ### Slice progress
 
@@ -193,11 +193,15 @@ owns its wrapper/targetability qualification.
 
 ### Publication at stop or handoff
 
-**Published head:** pending.
+**Published code/test head:** `656c070`. This final documentation commit follows
+it. Its exact SHA and the final PR-check result are recorded in the parent-issue
+summary after readiness. Resolve the log commit locally with
+`git log -1 --format='%h %cI' -- AFK_RUNS/2026-11-12T060235Z-machine-model-followups.md`.
 
 **Unverified checkpoint:** none.
 
-**Remaining local work:** active implementation.
+**Remaining local work:** none after publishing this final log commit. Staged,
+unstaged, untracked, and remote-head checks are required immediately after push.
 
 ### Final series review
 
@@ -232,14 +236,28 @@ that remain in the process group. No claim covers deliberate session/group
 escape. Formal proofs concern the translated model; differential evidence is
 sampled. No SCXML processor or proposed upstream fix was executed.
 
-**Remaining blockers:** final publication and PR checks.
+**Remaining blockers:** none in implementation or review. The final PR-check
+result is reported after the ready transition in the parent-issue summary.
 
-**Completed:** not measured.
+**Completed:** 2026-11-12 07:15:11 UTC.
 
-**Duration:** not measured.
+**Duration:** 1 hour, 12 minutes, 36 seconds (4356 seconds), measured as this
+commit's committer timestamp minus the start timestamp.
 
-**Final verification:** pending.
+**Final verification:** `pnpm verify:machine-model` passed 474 obligations,
+all 23 model defects and 11 proof weakenings; `pnpm test:core` passed 3063
+tests; `pnpm test:machine-model` passed 117 tests; the sequential
+`pnpm test:machine-model:runtime-defects` rejected all 7 mutations.
+Build and typecheck passed on the unchanged model/package code at `587ddcd`.
+After the review's test-only improvement, `pnpm test:tooling` passed all 20 tests,
+and lint and full formatting checks passed. Explicit changed-Markdown checks
+passed before the final documentation commit. No required local check failed.
 
-**Result:** active.
+**Result:** robertpenner/xstate#19, robertpenner/xstate#20, and
+robertpenner/xstate#21 are integrated and verified in the series PR. Independent
+review found no confirmed defect or material unresolved question; its optional
+test improvement is implemented. Issues remain open until merge. The run log
+links existing upstream reports instead of duplicating their diagnoses; no new
+v6 runtime bug or production behavior change is claimed.
 
 **Pre-existing unrelated failure(s):** none observed.
