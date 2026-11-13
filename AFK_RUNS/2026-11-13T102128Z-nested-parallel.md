@@ -16,7 +16,7 @@ Dafny laws, seeded model defects, differential tests, and runtime mutations.
 
 **Execution:** sequential.
 
-**Verified integration head:** `c2fb9fa` (#27).
+**Verified integration head:** `c519d25` (#27 plus review fixes).
 
 ### Slice progress
 
@@ -53,7 +53,9 @@ Checks ran on the exact uncommitted tree committed as those two commits.
 - New property at seed 2541, 300 runs: 182 machines with more than one active
   parallel node, 86 with active parallel nodes on separate branches, maximum 4
   parallel nodes on one path, 51 with an inactive parallel node, 105 refused
-  steps.
+  steps. (Refused under #25's rule, which refused every step on a machine with
+  more than one parallel node; #27 reports the 87 of these steps with two or
+  more selections.)
 - `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm build`: exit 0.
 - `pnpm test:tooling`: 28 tests passed.
 - `pnpm test:core`: 3078 passed, 32 skipped, 3 todo; 1 failed file,
@@ -127,7 +129,7 @@ Not resumed.
 
 ### Publication at stop or handoff
 
-**Published head:** `c2fb9fa`.
+**Published head:** `c519d25`.
 
 **Unverified checkpoint:** none.
 
@@ -135,12 +137,60 @@ Not resumed.
 
 ### Final series review
 
-**Base/head:** pending.
+**Base/head:** `886402a` (`origin/machine-formalized`, merge base) to
+`148135e`; 11 changed files, 9 commits. Artifacts materialized under the run's
+scratch `review/` directory with `provenance.txt`; every child quoted the head
+ref and file count from it.
 
-**Contracts:** pending.
+**Contracts:** parent PRD #23; newest just-in-time briefs on #25, #26, and #27;
+xstate `AGENTS.md`/`CONTRIBUTING.md`; penner `CODING_STANDARDS.md` as guidance;
+the code-review skill's Ideas and evidence procedure.
 
-**Evidence:** pending.
+**Evidence:** three separate `review-axis` agents (Standards, Spec, Ideas and
+evidence) read only the materialized artifacts. The coordinator validated each
+finding against the worktree before acting.
 
-**Findings:** pending until reviewed.
+**Findings and resolutions** (`c8643d4` tests, `c519d25` README):
 
-**Remaining blockers:** final review pending.
+- README overstated `AncestorResetsSubtree` for any ancestor; the lemma
+  requires a non-parallel source, and a parallel ancestor narrows. Qualified.
+- README's SCXML comparison still described single-parallel region-first
+  selection. Restated for the recursive rule.
+- README presented `comparable sources` as a live refusal; `SelectedSourcesApart`
+  makes it unreachable. Documented, and the nested property now asserts that
+  `active region target` is the only refusal reason seen.
+- No named case moved two sibling inner parallel nodes independently. Added
+  `moves two sibling inner parallel nodes independently` (region sources and
+  an inner parallel fallback that narrows).
+- #26 property did not lower-bound several transition classes. Added
+  `deepDomains` (55), `reenteredParallels` (71), and `stoppedFallback` (224)
+  with lower bounds, plus a bound on `narrowedSteps` (105). A probe showed
+  `reenteredParallels` and `deepEntries` differ on 52 steps despite equal
+  totals.
+- The initialization property never gave the root its `go` handler because
+  `config` was copied before handlers were set. Fixed; seed results unchanged.
+- The nested self-target case did not assert `nestedDomains`; it now does.
+- README misstated the nested fixture, said "two levels deeper" (one level),
+  omitted #26/#27 from the issue list, claimed all three runtime region loops
+  were tried (two were), described a defect as "nested" when it triggers on
+  more than one parallel node, and said "single-parallel models". Corrected.
+- Run log: the #25 "105 refused steps" and #27 "87" counts measure different
+  things; clarified above.
+
+Not changed, with reasons: `SelectSource` has no remaining callers but is an
+inventoried law about compound `select` and still verifies; `Distinct` restates
+the inline distinctness clause of the generated `ParallelWellFormed`, which
+cannot be edited without changing generated code; `parallelReady` and
+`selectionReady` share a clause in generated code and laws such as
+`ParallelStepDelegates` depend on both; `parallelFallback` keeps its name and
+gains a comment stating that it counts declined descendant handlers.
+
+**Verification after fixes** (uncommitted tree later committed as `c8643d4`,
+`c519d25`): `pnpm test:machine-model` 154 passed;
+`pnpm test:machine-model:runtime-defects` (alone) 13 mutations rejected;
+`pnpm test:core` 3108 passed, 29 skipped, 3 todo; `pnpm typecheck`,
+`pnpm lint`, `pnpm format:check`, `pnpm build` exit 0. `machineModel.ts`,
+the Dafny files, and the manifest are unchanged since `1d2b483`, whose
+`pnpm verify:machine-model` run reported 492 verified, 0 errors.
+
+**Remaining blockers:** none.
