@@ -361,39 +361,23 @@ describe('single parallel subtree model', () => {
     expect(trace[1].value).toEqual({ p: { a: 'a1', b: 'b1' } });
   });
 
-  it('refuses nested or multiple parallel nodes and parallel initial before running', () => {
-    expect(() =>
-      compareParallelTrace(
-        {
-          context: {},
-          type: 'parallel',
-          states: {
-            a: { type: 'parallel', states: { x: {}, y: {} } },
-            b: {}
-          }
-        },
-        []
-      )
-    ).toThrow(/Unsupported second parallel state/);
-    expect(() =>
-      compareParallelTrace(
-        {
-          context: {},
-          initial: 'a',
-          states: {
-            a: { type: 'parallel', states: { x: {} } },
-            b: { type: 'parallel', states: { y: {} } }
-          }
-        },
-        []
-      )
-    ).toThrow(/Unsupported second parallel state/);
+  it('refuses parallel initial and parallel nodes without regions before running', () => {
     expect(() =>
       compareParallelTrace(
         { context: {}, type: 'parallel', initial: 'a', states: { a: {} } },
         []
       )
     ).toThrow(/Unsupported parallel initial/);
+    expect(() =>
+      compareParallelTrace(
+        {
+          context: {},
+          type: 'parallel',
+          states: { a: { type: 'parallel', states: {} }, b: {} }
+        },
+        []
+      )
+    ).toThrow(/Unsupported parallel state without regions/);
   });
 
   it('refuses array targets before running', () => {
@@ -484,6 +468,772 @@ const patch =
     ...(reenter === undefined ? {} : { reenter }),
     context: { count: Number(context.count) * 10 + count }
   });
+
+// Each entry callback appends its digit to `trail`, so the final context records
+// the order in which entries ran and each callback sees its predecessors' patches.
+function traced(digit: number, state: Logged = {}): Logged {
+  return {
+    ...state,
+    entry: ({ context }, enq) => {
+      enq(record, `enter ${digit}`, context.trail);
+      return { context: { trail: Number(context.trail) * 10 + digit } };
+    }
+  };
+}
+
+describe('multiple and nested parallel initialization', () => {
+  it('enters a nested parallel region of a parallel root in document order', () => {
+    const trace = compareParallelTrace(
+      {
+        id: 'root',
+        type: 'parallel',
+        context: {},
+        states: {
+          a: logged('a', {
+            type: 'parallel',
+            states: {
+              x: logged('x', {
+                initial: 'x1',
+                states: { x1: logged('x1'), x2: logged('x2') }
+              }),
+              y: logged('y')
+            }
+          }),
+          b: logged('b', {
+            initial: 'b1',
+            states: { b1: logged('b1'), b2: logged('b2') }
+          })
+        }
+      },
+      []
+    );
+    expect(trace[0].value).toEqual({ a: { x: 'x1', y: {} }, b: 'b1' });
+    expect(labels(trace[0])).toEqual([
+      'enter a',
+      'enter x',
+      'enter x1',
+      'enter y',
+      'enter b',
+      'enter b1'
+    ]);
+  });
+
+  it('enters parallel nodes nested below compound ancestors and inside regions', () => {
+    const trace = compareParallelTrace(
+      {
+        id: 'root',
+        context: {},
+        initial: 'outer',
+        states: {
+          outer: logged('outer', {
+            initial: 'p',
+            states: {
+              p: logged('p', {
+                type: 'parallel',
+                states: {
+                  r1: logged('r1', {
+                    initial: 'q',
+                    states: {
+                      q: logged('q', {
+                        type: 'parallel',
+                        states: {
+                          q1: logged('q1'),
+                          q2: logged('q2', {
+                            initial: 'deep',
+                            states: { deep: logged('deep') }
+                          })
+                        }
+                      }),
+                      other: logged('other')
+                    }
+                  }),
+                  r2: logged('r2')
+                }
+              })
+            }
+          })
+        }
+      },
+      []
+    );
+    expect(trace[0].value).toEqual({
+      outer: { p: { r1: { q: { q1: {}, q2: 'deep' } }, r2: {} } }
+    });
+    expect(labels(trace[0])).toEqual([
+      'enter outer',
+      'enter p',
+      'enter r1',
+      'enter q',
+      'enter q1',
+      'enter q2',
+      'enter deep',
+      'enter r2'
+    ]);
+  });
+
+  it('enters parallel subtrees through different compound branches and skips an inactive branch', () => {
+    const trace = compareParallelTrace(
+      {
+        id: 'root',
+        type: 'parallel',
+        context: {},
+        states: {
+          left: logged('left', {
+            initial: 'lp',
+            states: {
+              lp: logged('lp', {
+                type: 'parallel',
+                states: { l1: logged('l1'), l2: logged('l2') }
+              }),
+              idle: logged('idle')
+            }
+          }),
+          right: logged('right', {
+            initial: 'idle',
+            states: {
+              idle: logged('right idle'),
+              rp: logged('rp', {
+                type: 'parallel',
+                states: { r1: logged('r1'), r2: logged('r2') }
+              })
+            }
+          }),
+          shallow: logged('shallow')
+        }
+      },
+      []
+    );
+    expect(trace[0].value).toEqual({
+      left: { lp: { l1: {}, l2: {} } },
+      right: 'idle',
+      shallow: {}
+    });
+    expect(trace[0].active).not.toContain('root.right.rp');
+    expect(labels(trace[0])).toEqual([
+      'enter left',
+      'enter lp',
+      'enter l1',
+      'enter l2',
+      'enter right',
+      'enter right idle',
+      'enter shallow'
+    ]);
+  });
+
+  it('runs nested entry callbacks in document order on the context patched by earlier entries', () => {
+    const trace = compareParallelTrace(
+      {
+        id: 'root',
+        context: { trail: 0 },
+        ...traced(1, {
+          type: 'parallel',
+          states: {
+            a: traced(2, {
+              type: 'parallel',
+              states: {
+                a1: traced(3, { initial: 'deep', states: { deep: traced(4) } }),
+                a2: traced(5)
+              }
+            }),
+            b: traced(6, {
+              initial: 'c',
+              states: {
+                c: traced(7, {
+                  type: 'parallel',
+                  states: { c1: traced(8), c2: traced(9) }
+                })
+              }
+            })
+          }
+        })
+      },
+      []
+    );
+    expect(trace[0].context).toEqual({ trail: 123456789 });
+    expect(trace[0].effects.map((effect) => effect.args)).toEqual([
+      ['enter 1', 0],
+      ['enter 2', 1],
+      ['enter 3', 12],
+      ['enter 4', 123],
+      ['enter 5', 1234],
+      ['enter 6', 12345],
+      ['enter 7', 123456],
+      ['enter 8', 1234567],
+      ['enter 9', 12345678]
+    ]);
+  });
+
+  it('takes simultaneous selections on a machine with more than one parallel node', () => {
+    const config: Config = {
+      context: {},
+      type: 'parallel',
+      states: {
+        a: {
+          type: 'parallel',
+          states: {
+            x: { on: { go: { reenter: true } } },
+            y: { on: { go: { reenter: true } } }
+          }
+        },
+        b: {}
+      }
+    };
+    const trace = compareParallelTrace(config, [{ type: 'go' }]);
+    expect(trace[1].selections).toBe(2);
+    expect(trace[1].kept).toBe(2);
+    expect(
+      compareParallelTrace(config, [{ type: 'unhandled' }])[1].snapshotReused
+    ).toBe(true);
+  });
+});
+
+type NestedOn = Partial<
+  Record<'p' | 'a' | 'q' | 'x' | 'x1' | 'y' | 'y1' | 'b' | 'b1' | 'off', On>
+>;
+
+// An outer parallel node `p` whose region `a` holds an inner parallel node `q`
+// below a compound node, beside a plain region `b`.
+function nested(on: NestedOn = {}, initial = 'p'): Config {
+  return {
+    id: 'm',
+    context: { count: 0 },
+    initial,
+    states: {
+      p: logged('p', {
+        type: 'parallel',
+        on: on.p,
+        states: {
+          a: logged('a', {
+            initial: 'q',
+            on: on.a,
+            states: {
+              q: logged('q', {
+                type: 'parallel',
+                on: on.q,
+                states: {
+                  x: logged('x', {
+                    initial: 'x1',
+                    on: on.x,
+                    states: {
+                      x1: logged('x1', {
+                        on: { next: { target: 'x2' }, ...on.x1 }
+                      }),
+                      x2: logged('x2')
+                    }
+                  }),
+                  y: logged('y', {
+                    initial: 'y1',
+                    on: on.y,
+                    states: {
+                      y1: logged('y1', { on: on.y1 }),
+                      y2: logged('y2')
+                    }
+                  })
+                }
+              }),
+              r: logged('r')
+            }
+          }),
+          b: logged('b', {
+            initial: 'b1',
+            on: on.b,
+            states: { b1: logged('b1', { on: on.b1 }), b2: logged('b2') }
+          })
+        }
+      }),
+      off: logged('off', { on: on.off })
+    }
+  };
+}
+
+const innerEntries = ['enter q', 'enter x', 'enter x1', 'enter y', 'enter y1'];
+
+describe('single-selection steps through nested parallel structure', () => {
+  it('moves inside an inner region without touching other regions', () => {
+    const trace = compareParallelTrace(nested(), [{ type: 'next' }]);
+    expect(trace[1].value).toEqual({
+      p: { a: { q: { x: 'x2', y: 'y1' } }, b: 'b1' }
+    });
+    expect(labels(trace[1])).toEqual(['exit x1', 'enter x2']);
+  });
+
+  it.each([
+    ['between inner regions', '#m.p.a.q.y.y2', 'y', ['exit y1', 'enter y2']],
+    ['between outer branches', '#m.p.b.b2', 'b', ['exit b1', 'enter b2']]
+  ] as const)(
+    'narrows a transition %s to the target region',
+    (_, target, region, expected) => {
+      const trace = compareParallelTrace(nested({ x1: { go: { target } } }), [
+        { type: 'go' }
+      ]);
+      expect(labels(trace[1])).toEqual(expected);
+      expect(trace[1].value).toEqual({
+        p: {
+          a: { q: { x: 'x1', y: region === 'y' ? 'y2' : 'y1' } },
+          b: region === 'b' ? 'b2' : 'b1'
+        }
+      });
+    }
+  );
+
+  it('enters a deep target inside nested parallel nodes from outside', () => {
+    const trace = compareParallelTrace(
+      nested({ off: { start: { target: '#m.p.a.q.y.y2' } } }, 'off'),
+      [{ type: 'start' }]
+    );
+    expect(trace[1].value).toEqual({
+      p: { a: { q: { x: 'x1', y: 'y2' } }, b: 'b1' }
+    });
+    expect(labels(trace[1])).toEqual([
+      'exit off',
+      'enter p',
+      'enter a',
+      'enter q',
+      'enter x',
+      'enter x1',
+      'enter y',
+      'enter y2',
+      'enter b',
+      'enter b1'
+    ]);
+  });
+
+  it('leaves the inner parallel node for a sibling while the outer branch stays', () => {
+    const trace = compareParallelTrace(
+      nested({ x1: { go: { target: '#m.p.a.r' } } }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].value).toEqual({ p: { a: 'r', b: 'b1' } });
+    expect(labels(trace[1])).toEqual([
+      'exit y1',
+      'exit y',
+      'exit x1',
+      'exit x',
+      'exit q',
+      'enter r'
+    ]);
+  });
+
+  it('leaves every nested parallel ancestor in reverse document order', () => {
+    const trace = compareParallelTrace(
+      nested({ x1: { go: { target: '#m.off' } } }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].value).toBe('off');
+    expect(labels(trace[1])).toEqual([
+      'exit b1',
+      'exit b',
+      'exit y1',
+      'exit y',
+      'exit x1',
+      'exit x',
+      'exit q',
+      'exit a',
+      'exit p',
+      'enter off'
+    ]);
+  });
+
+  it('reenters the inner parallel node without touching the outer branch', () => {
+    const trace = compareParallelTrace(
+      nested({ q: { again: { target: '#m.p.a.q', reenter: true } } }),
+      [{ type: 'next' }, { type: 'again' }]
+    );
+    expect(trace[2].value).toEqual({
+      p: { a: { q: { x: 'x1', y: 'y1' } }, b: 'b1' }
+    });
+    expect(labels(trace[2])).toEqual([
+      'exit y1',
+      'exit y',
+      'exit x2',
+      'exit x',
+      'exit q',
+      ...innerEntries
+    ]);
+  });
+
+  it('reenters the outer parallel node and every nested region', () => {
+    const trace = compareParallelTrace(
+      nested({ p: { again: { target: '#m.p', reenter: true } } }),
+      [{ type: 'next' }, { type: 'again' }]
+    );
+    expect(trace[2].value).toEqual({
+      p: { a: { q: { x: 'x1', y: 'y1' } }, b: 'b1' }
+    });
+    expect(labels(trace[2])).toEqual([
+      'exit b1',
+      'exit b',
+      'exit y1',
+      'exit y',
+      'exit x2',
+      'exit x',
+      'exit q',
+      'exit a',
+      'exit p',
+      'enter p',
+      'enter a',
+      ...innerEntries,
+      'enter b',
+      'enter b1'
+    ]);
+  });
+
+  it.each(['block', 'decline', 'effect'] as const)(
+    'lets an inner region %s control fallback to nested ancestors',
+    (kind) => {
+      const trace = compareParallelTrace(
+        nested({
+          x1: {
+            event:
+              kind === 'block'
+                ? undefined
+                : (_, enq) => {
+                    if (kind === 'effect') enq(record, 'handled');
+                  }
+          },
+          q: { event: { target: '#m.p.a.r' } },
+          p: { event: { target: '#m.off' } }
+        }),
+        [{ type: 'event' }]
+      );
+      expect(trace[1].selections).toBe(1);
+      expect(trace[1].value).toEqual(
+        kind === 'decline' ? { p: { a: 'r', b: 'b1' } } : trace[0].value
+      );
+      expect(labels(trace[1])).toEqual(
+        kind === 'decline'
+          ? ['exit y1', 'exit y', 'exit x1', 'exit x', 'exit q', 'enter r']
+          : kind === 'effect'
+            ? ['handled']
+            : []
+      );
+    }
+  );
+
+  it('falls back to the outer parallel node only when every nested region declines', () => {
+    const trace = compareParallelTrace(
+      nested({
+        x1: { event: (): undefined => undefined },
+        a: { event: (): undefined => undefined },
+        p: { event: { target: '#m.off' } }
+      }),
+      [{ type: 'event' }]
+    );
+    expect(trace[1].selections).toBe(1);
+    expect(trace[1].value).toBe('off');
+  });
+
+  it.each([
+    [
+      'parallel source narrows to the target region',
+      { q: { jump: { target: '.y.y2' } } },
+      { x: 'x2', y: 'y2' },
+      ['exit y1', 'enter y2']
+    ],
+    [
+      'compound ancestor source resets the inner parallel node',
+      { a: { jump: { target: '.q.y.y2' } } },
+      { x: 'x1', y: 'y2' },
+      [
+        'exit y1',
+        'exit y',
+        'exit x2',
+        'exit x',
+        'exit q',
+        'enter q',
+        'enter x',
+        'enter x1',
+        'enter y',
+        'enter y2'
+      ]
+    ]
+  ] as const)('%s', (_, on, inner, expected) => {
+    const trace = compareParallelTrace(nested(on), [
+      { type: 'next' },
+      { type: 'jump' }
+    ]);
+    expect(trace[2].value).toEqual({ p: { a: { q: inner }, b: 'b1' } });
+    expect(labels(trace[2])).toEqual(expected);
+  });
+
+  it('narrows through a parallel region that is itself parallel', () => {
+    const trace = compareParallelTrace(
+      {
+        id: 'm',
+        context: {},
+        type: 'parallel',
+        on: { jump: { target: '.a.y.y2' } },
+        states: {
+          a: logged('a', {
+            type: 'parallel',
+            states: {
+              x: logged('x', {
+                initial: 'x1',
+                states: {
+                  x1: logged('x1', { on: { next: { target: 'x2' } } }),
+                  x2: logged('x2')
+                }
+              }),
+              y: logged('y', {
+                initial: 'y1',
+                states: { y1: logged('y1'), y2: logged('y2') }
+              })
+            }
+          }),
+          b: logged('b')
+        }
+      },
+      [{ type: 'next' }, { type: 'jump' }]
+    );
+    expect(trace[2].value).toEqual({ a: { x: 'x2', y: 'y2' }, b: {} });
+    expect(labels(trace[2])).toEqual(['exit y1', 'enter y2']);
+  });
+});
+
+// A handler that records what it saw and patches `count` from the pre-step
+// context, optionally moving to `target`.
+const seen =
+  (name: string, count: number, target?: string) =>
+  (
+    { context }: { context: Record<string, unknown> },
+    enq: Parameters<NonNullable<Logged['entry']>>[1]
+  ) => {
+    enq(record, `${name} saw ${String(context.count)}`);
+    return {
+      ...(target === undefined ? {} : { target }),
+      context: { count: Number(context.count) * 10 + count }
+    };
+  };
+
+describe('simultaneous transitions through nested parallel structure', () => {
+  it('moves two inner regions and an outer region together', () => {
+    const trace = compareParallelTrace(
+      nested({
+        x1: { go: { target: 'x2' } },
+        y1: { go: { target: 'y2' } },
+        b1: { go: { target: 'b2' } }
+      }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].selections).toBe(3);
+    expect(trace[1].kept).toBe(3);
+    expect(trace[1].value).toEqual({
+      p: { a: { q: { x: 'x2', y: 'y2' } }, b: 'b2' }
+    });
+    expect(labels(trace[1])).toEqual([
+      'exit b1',
+      'exit y1',
+      'exit x1',
+      'enter x2',
+      'enter y2',
+      'enter b2'
+    ]);
+  });
+
+  it.each([
+    ['a region source', undefined, { go: { target: 'a1y' } }, 0],
+    ['an inner parallel fallback', { go: { target: '#m.a.a1.a1y' } }, {}, 1]
+  ] as const)(
+    'moves two sibling inner parallel nodes independently (%s)',
+    (_, aOn, a1xOn, narrowing) => {
+      const trace = compareParallelTrace(
+        {
+          id: 'm',
+          type: 'parallel',
+          context: {},
+          states: {
+            a: logged('a', {
+              type: 'parallel',
+              on: aOn,
+              states: {
+                a1: logged('a1', {
+                  initial: 'a1x',
+                  states: {
+                    a1x: logged('a1x', { on: a1xOn }),
+                    a1y: logged('a1y')
+                  }
+                }),
+                a2: logged('a2')
+              }
+            }),
+            b: logged('b', {
+              type: 'parallel',
+              states: {
+                b1: logged('b1', {
+                  initial: 'b1x',
+                  states: {
+                    b1x: logged('b1x', { on: { go: { target: 'b1y' } } }),
+                    b1y: logged('b1y')
+                  }
+                }),
+                b2: logged('b2')
+              }
+            })
+          }
+        },
+        [{ type: 'go' }]
+      );
+      expect(trace[1].selections).toBe(2);
+      expect(trace[1].kept).toBe(2);
+      expect(trace[1].movingPlans).toBe(2);
+      expect(trace[1].narrowing).toBe(narrowing);
+      expect(trace[1].value).toEqual({
+        a: { a1: 'a1y', a2: {} },
+        b: { b1: 'b1y', b2: {} }
+      });
+      expect(labels(trace[1])).toEqual([
+        'exit b1x',
+        'exit a1x',
+        'enter a1y',
+        'enter b1y'
+      ]);
+    }
+  );
+
+  it('suppresses inner and outer parallel fallbacks when a region below handles', () => {
+    const trace = compareParallelTrace(
+      nested({
+        p: { go: patch(7, '#m.off') },
+        q: { go: patch(8, '#m.p.a.r') },
+        x1: { go: patch(1, 'x2') },
+        b1: { go: patch(2, 'b2') }
+      }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].selections).toBe(2);
+    expect(trace[1].context).toEqual({ count: 2 });
+    expect(trace[1].value).toEqual({
+      p: { a: { q: { x: 'x2', y: 'y1' } }, b: 'b2' }
+    });
+  });
+
+  it('falls back to the inner parallel node while an outer region handles locally', () => {
+    const trace = compareParallelTrace(
+      nested({
+        q: { go: patch(1, '#m.p.a.r') },
+        b1: { go: patch(2, 'b2') }
+      }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].selections).toBe(2);
+    expect(trace[1].kept).toBe(2);
+    expect(trace[1].parallelFallback).toBe(false);
+    expect(trace[1].value).toEqual({ p: { a: 'r', b: 'b2' } });
+    expect(labels(trace[1])).toEqual([
+      'exit b1',
+      'exit y1',
+      'exit y',
+      'exit x1',
+      'exit x',
+      'exit q',
+      'enter r',
+      'enter b2'
+    ]);
+  });
+
+  it.each([
+    [
+      'inner exit first',
+      { go: patch(1, '#m.p.a.r') },
+      { go: patch(2, '#m.off') },
+      { p: { a: 'r', b: 'b1' } }
+    ],
+    [
+      'outer exit first',
+      { go: patch(1, '#m.off') },
+      { go: patch(2, '#m.p.a.r') },
+      'off'
+    ]
+  ] as const)(
+    'keeps the earlier region when results leave the inner and the outer parallel node (%s)',
+    (_, x1, y1, value) => {
+      const trace = compareParallelTrace(nested({ x1, y1 }), [{ type: 'go' }]);
+      expect(trace[1].selections).toBe(2);
+      expect(trace[1].kept).toBe(1);
+      expect(trace[1].context).toEqual({ count: 1 });
+      expect(trace[1].value).toEqual(value);
+    }
+  );
+
+  it('keeps an earlier shallow fallback over a later deeper conflicting source', () => {
+    const trace = compareParallelTrace(
+      nested({ a: { go: patch(1, '#m.off') }, b1: { go: patch(2, 'b2') } }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].selections).toBe(2);
+    expect(trace[1].kept).toBe(1);
+    expect(trace[1].context).toEqual({ count: 1 });
+    expect(trace[1].value).toBe('off');
+  });
+
+  it.each([true, false])(
+    'keeps a lifecycle-free atomic self-target beside a plan leaving both parallel nodes (self-target first: %s)',
+    (selfFirst) => {
+      const self = { go: seen('self', 1, '#m.p.a.q.x.x1') };
+      const leave = { go: seen('leave', 2, '#m.off') };
+      const trace = compareParallelTrace(
+        nested(
+          selfFirst
+            ? { x1: self, y1: leave }
+            : { x1: leave, y1: { go: seen('self', 1, '#m.p.a.q.y.y1') } }
+        ),
+        [{ type: 'go' }]
+      );
+      expect(trace[1].selections).toBe(2);
+      expect(trace[1].kept).toBe(2);
+      expect(trace[1].nestedDomains).toBe(true);
+      expect(trace[1].value).toBe('off');
+      expect(trace[1].context).toEqual({ count: selfFirst ? 2 : 1 });
+      expect(labels(trace[1])).toEqual([
+        'exit b1',
+        'exit b',
+        'exit y1',
+        'exit y',
+        'exit x1',
+        'exit x',
+        'exit q',
+        'exit a',
+        'exit p',
+        ...(selfFirst
+          ? ['self saw 0', 'leave saw 0']
+          : ['leave saw 0', 'self saw 0']),
+        'enter off'
+      ]);
+    }
+  );
+
+  it('runs kept callbacks on the pre-step context and drops a losing result', () => {
+    const trace = compareParallelTrace(
+      nested({
+        x1: { go: seen('inner', 1, '#m.p.a.r') },
+        y1: {
+          go: (_, enq) => {
+            enq(record, 'lost');
+            return { target: '#m.off', context: { lost: 1 } };
+          }
+        },
+        b1: { go: seen('outer', 3, 'b2') }
+      }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].selections).toBe(3);
+    expect(trace[1].kept).toBe(2);
+    expect(trace[1].context).toEqual({ count: 3 });
+    expect(trace[1].value).toEqual({ p: { a: 'r', b: 'b2' } });
+    expect(labels(trace[1])).toEqual([
+      'exit b1',
+      'exit y1',
+      'exit y',
+      'exit x1',
+      'exit x',
+      'exit q',
+      'inner saw 0',
+      'outer saw 0',
+      'enter r',
+      'enter b2'
+    ]);
+  });
+});
 
 describe('multi-transition parallel steps', () => {
   it('takes independent region transitions together, exiting in reverse document order', () => {

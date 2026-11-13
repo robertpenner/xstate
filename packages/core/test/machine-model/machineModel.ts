@@ -414,7 +414,7 @@ export type ParallelMachine = {
   context: Record<string, number>;
   nodes: Record<string, CompoundNode>;
   order: readonly string[];
-  parallel: string | undefined;
+  parallels: readonly string[];
 };
 export type ParallelSnapshot = {
   active: readonly string[];
@@ -446,7 +446,7 @@ export function samePath(a: readonly string[], b: readonly string[]): boolean {
 
 export function completes(
   nodes: Record<string, CompoundNode>,
-  parallel: string | undefined,
+  parallels: readonly string[],
   target: readonly string[],
   path: readonly string[]
 ): boolean {
@@ -459,16 +459,16 @@ export function completes(
   const node = lookupNode(nodes, id);
   const child = path[1];
   const allowed =
-    id === parallel ||
+    parallels.includes(id) ||
     (below(target, node.path)
       ? child === target[node.path.length]
       : child === node.initial);
-  return allowed && completes(nodes, parallel, target, path.slice(1));
+  return allowed && completes(nodes, parallels, target, path.slice(1));
 }
 
 export function entering(
   nodes: Record<string, CompoundNode>,
-  parallel: string | undefined,
+  parallels: readonly string[],
   target: readonly string[],
   domain: readonly string[],
   extra: string | undefined,
@@ -482,7 +482,7 @@ export function entering(
     below(path, domain) &&
     completes(
       nodes,
-      parallel,
+      parallels,
       target,
       path.slice(domain.length === 0 ? 0 : domain.length - 1)
     )
@@ -502,32 +502,33 @@ export function exiting(
 }
 
 export function narrow(
-  parallel: string | undefined,
+  parallels: readonly string[],
   target: readonly string[],
   domain: readonly string[]
 ): readonly string[] {
   //@ verify
+  //@ decreases target.length - domain.length
   if (domain.length === 0 || !below(target, domain)) return domain;
-  if (domain[domain.length - 1] !== parallel) return domain;
-  return target.slice(0, domain.length + 1);
+  if (!parallels.includes(domain[domain.length - 1])) return domain;
+  return narrow(parallels, target, target.slice(0, domain.length + 1));
 }
 
 export function transitionDomain(
-  parallel: string | undefined,
+  parallels: readonly string[],
   source: readonly string[],
   target: readonly string[],
   reenter: boolean
 ): readonly string[] {
   //@ verify
   if (commonPrefix(source, target) === source.length) {
-    return reenter ? source : narrow(parallel, target, source);
+    return reenter ? source : narrow(parallels, target, source);
   }
   if (target.length === 0) return [];
   const ancestors = target.slice(0, target.length - 1);
   const lca = commonPrefix(source, ancestors);
   if (reenter) return source.slice(0, lca);
   return narrow(
-    parallel,
+    parallels,
     target,
     lca === 0 ? target.slice(0, 1) : source.slice(0, lca)
   );
@@ -545,52 +546,64 @@ export function runLifecycle(
   return lifecycle(nodes, path, context, event, exiting);
 }
 
-export function leafSelection(
+export function ownSelection(
   nodes: Record<string, CompoundNode>,
   id: string,
-  base: number,
   context: Record<string, number>,
   event: Event
 ): Selection | undefined {
   //@ verify
   if (!(id in nodes)) return undefined;
-  const node = lookupNode(nodes, id);
-  if (node.children.length > 0 || base < 0 || base > node.path.length)
-    return undefined;
-  const path = node.path.slice(base);
-  if (!declaredPath(nodes, path)) return undefined;
-  return select(nodes, path, context, event);
+  return select(nodes, [id], context, event);
 }
 
-export function regionSelections(
+export function handledBelow(
   nodes: Record<string, CompoundNode>,
   active: readonly string[],
-  base: number,
+  path: readonly string[],
+  context: Record<string, number>,
+  event: Event
+): boolean {
+  //@ verify
+  return active.some(
+    (id) =>
+      id in nodes &&
+      below(lookupNode(nodes, id).path, path) &&
+      ownSelection(nodes, id, context, event) !== undefined
+  );
+}
+
+// The runtime selects recursively: a compound node defers to its active
+// child and a parallel node to all of its regions, falling back to its own
+// handler only when nothing below it handles the event. The result is every
+// active handler with no handling active descendant, in document order.
+export function enabledSelections(
+  nodes: Record<string, CompoundNode>,
+  active: readonly string[],
+  candidates: readonly string[],
   context: Record<string, number>,
   event: Event
 ): readonly Selection[] {
   //@ verify
-  //@ ensures active.length === 0 ==> \result.length === 0
-  //@ decreases active.length
-  if (active.length === 0) return [];
-  const first = leafSelection(nodes, active[0], base, context, event);
-  const rest = regionSelections(nodes, active.slice(1), base, context, event);
-  return first === undefined ? rest : [first, ...rest];
-}
-
-export function activeParallel(
-  machine: ParallelMachine,
-  active: readonly string[]
-): readonly string[] {
-  //@ verify
-  const parallel = machine.parallel;
+  //@ ensures candidates.length === 0 ==> \result.length === 0
+  //@ decreases candidates.length
+  if (candidates.length === 0) return [];
+  const rest = enabledSelections(
+    nodes,
+    active,
+    candidates.slice(1),
+    context,
+    event
+  );
+  const id = candidates[0];
+  if (!(id in nodes)) return rest;
+  const own = ownSelection(nodes, id, context, event);
   if (
-    parallel === undefined ||
-    !active.includes(parallel) ||
-    !(parallel in machine.nodes)
+    own === undefined ||
+    handledBelow(nodes, active, lookupNode(nodes, id).path, context, event)
   )
-    return [];
-  return lookupNode(machine.nodes, parallel).path;
+    return rest;
+  return [own, ...rest];
 }
 
 export function parallelSelections(
@@ -599,18 +612,13 @@ export function parallelSelections(
   event: Event
 ): readonly Selection[] {
   //@ verify
-  const parallelPath = activeParallel(machine, snapshot.active);
-  const regions = regionSelections(
+  return enabledSelections(
     machine.nodes,
     snapshot.active,
-    parallelPath.length,
+    snapshot.active,
     snapshot.context,
     event
   );
-  if (regions.length > 0 || !declaredPath(machine.nodes, parallelPath))
-    return regions;
-  const fallback = select(machine.nodes, parallelPath, snapshot.context, event);
-  return fallback === undefined ? [] : [fallback];
 }
 
 export function parallelReady(
@@ -630,7 +638,7 @@ export function parallelReady(
   const targetPath = lookupNode(machine.nodes, target).path;
   if (targetPath.length < 2) return true;
   return !(
-    targetPath[targetPath.length - 2] === machine.parallel &&
+    machine.parallels.includes(targetPath[targetPath.length - 2]) &&
     snapshot.active.includes(target)
   );
 }
@@ -642,11 +650,11 @@ export function parallelInitialTransition(
   //@ verify
   //@ ensures !\result.snapshotReused
   const nodes = machine.nodes;
-  const parallel = machine.parallel;
+  const parallels = machine.parallels;
   const target =
     machine.root in nodes ? lookupNode(nodes, machine.root).path : [];
   const entries = machine.order.filter((id) =>
-    entering(nodes, parallel, target, [], undefined, id)
+    entering(nodes, parallels, target, [], undefined, id)
   );
   const entered = runLifecycle(nodes, entries, machine.context, event, false);
   return {
@@ -675,10 +683,10 @@ export function parallelPlan(
 ): ParallelPlan {
   //@ verify
   const nodes = machine.nodes;
-  const parallel = machine.parallel;
+  const parallels = machine.parallels;
   const sourcePath = source in nodes ? lookupNode(nodes, source).path : [];
   const targetPath = target in nodes ? lookupNode(nodes, target).path : [];
-  const domain = transitionDomain(parallel, sourcePath, targetPath, reenter);
+  const domain = transitionDomain(parallels, sourcePath, targetPath, reenter);
   const reentered =
     reenter && samePath(domain, sourcePath) ? source : undefined;
   const extra =
@@ -691,12 +699,12 @@ export function parallelPlan(
     active.filter((id) => exiting(nodes, domain, reentered, id))
   );
   const entries = machine.order.filter((id) =>
-    entering(nodes, parallel, targetPath, domain, extra, id)
+    entering(nodes, parallels, targetPath, domain, extra, id)
   );
   const next = machine.order.filter(
     (id) =>
       (active.includes(id) && !exiting(nodes, domain, reentered, id)) ||
-      entering(nodes, parallel, targetPath, domain, extra, id)
+      entering(nodes, parallels, targetPath, domain, extra, id)
   );
   return { domain, reentered, extra, exits, entries, active: next };
 }
@@ -887,7 +895,7 @@ export function selectionReady(
   const targetPath = lookupNode(machine.nodes, target).path;
   if (targetPath.length < 2) return true;
   return !(
-    targetPath[targetPath.length - 2] === machine.parallel &&
+    machine.parallels.includes(targetPath[targetPath.length - 2]) &&
     active.includes(target)
   );
 }

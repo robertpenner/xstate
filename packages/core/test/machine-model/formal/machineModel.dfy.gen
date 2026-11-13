@@ -48,7 +48,7 @@ datatype Selection = Selection(id: string, node: CompoundNode, evaluation: Evalu
 
 datatype CompoundStep = CompoundStep(snapshot: CompoundSnapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>)
 
-datatype ParallelMachine = ParallelMachine(root: string, context: map<string, int>, nodes: map<string, CompoundNode>, order: seq<string>, parallel: Option<string>)
+datatype ParallelMachine = ParallelMachine(root: string, context: map<string, int>, nodes: map<string, CompoundNode>, order: seq<string>, parallels: seq<string>)
 
 datatype ParallelSnapshot = ParallelSnapshot(active: seq<string>, context: map<string, int>)
 
@@ -387,23 +387,23 @@ lemma samePath_ensures(a: seq<string>, b: seq<string>)
 {
 }
 
-function completes(nodes: map<string, CompoundNode>, parallel: Option<string>, target: seq<string>, path: seq<string>): bool
+function completes(nodes: map<string, CompoundNode>, parallels: seq<string>, target: seq<string>, path: seq<string>): bool
   decreases |path|
 {
-  ((|path| < 2) || (var id := path[0]; (if !((id in nodes)) then false else (var node := lookupNode(nodes, id); (var child := path[1]; (var allowed := ((match parallel { case Some(i_value) => (i_value == id) case None => false }) || (if below(target, node.path) then (child == target[|node.path|]) else (match node.initial { case Some(i_value) => (i_value == child) case None => false }))); (allowed && completes(nodes, parallel, target, path[1..]))))))))
+  ((|path| < 2) || (var id := path[0]; (if !((id in nodes)) then false else (var node := lookupNode(nodes, id); (var child := path[1]; (var allowed := ((id in parallels) || (if below(target, node.path) then (child == target[|node.path|]) else (match node.initial { case Some(i_value) => (i_value == child) case None => false }))); (allowed && completes(nodes, parallels, target, path[1..]))))))))
 }
 
-lemma completes_ensures(nodes: map<string, CompoundNode>, parallel: Option<string>, target: seq<string>, path: seq<string>)
-  ensures ((|path| < 2) ==> completes(nodes, parallel, target, path))
+lemma completes_ensures(nodes: map<string, CompoundNode>, parallels: seq<string>, target: seq<string>, path: seq<string>)
+  ensures ((|path| < 2) ==> completes(nodes, parallels, target, path))
 {
 }
 
-function entering(nodes: map<string, CompoundNode>, parallel: Option<string>, target: seq<string>, domain: seq<string>, extra: Option<string>, id: string): bool
+function entering(nodes: map<string, CompoundNode>, parallels: seq<string>, target: seq<string>, domain: seq<string>, extra: Option<string>, id: string): bool
 {
   if !((id in nodes)) then
     false
   else
-    ((match extra { case Some(i_value) => (i_value == id) case None => false }) || (var path := lookupNode(nodes, id).path; (below(path, domain) && completes(nodes, parallel, target, path[(if (|domain| == 0) then 0 else (|domain| - 1))..]))))
+    ((match extra { case Some(i_value) => (i_value == id) case None => false }) || (var path := lookupNode(nodes, id).path; (below(path, domain) && completes(nodes, parallels, target, path[(if (|domain| == 0) then 0 else (|domain| - 1))..]))))
 }
 
 function exiting(nodes: map<string, CompoundNode>, domain: seq<string>, reentered: Option<string>, id: string): bool
@@ -414,24 +414,25 @@ function exiting(nodes: map<string, CompoundNode>, domain: seq<string>, reentere
     ((match reentered { case Some(i_value) => (i_value == id) case None => false }) || below(lookupNode(nodes, id).path, domain))
 }
 
-function narrow(parallel: Option<string>, target: seq<string>, domain: seq<string>): seq<string>
+function narrow(parallels: seq<string>, target: seq<string>, domain: seq<string>): seq<string>
+  decreases (|target| - |domain|)
 {
   if ((|domain| == 0) || !(below(target, domain))) then
     domain
   else
-    if (match parallel { case Some(i_value) => (i_value != domain[(|domain| - 1)]) case None => true }) then
+    if !((domain[(|domain| - 1)] in parallels)) then
       domain
     else
-      target[0..(|domain| + 1)]
+      narrow(parallels, target, target[0..(|domain| + 1)])
 }
 
-function transitionDomain(parallel: Option<string>, source: seq<string>, target: seq<string>, reenter: bool): seq<string>
+function transitionDomain(parallels: seq<string>, source: seq<string>, target: seq<string>, reenter: bool): seq<string>
 {
   if (commonPrefix(source, target) == |source|) then
     if reenter then
       source
     else
-      narrow(parallel, target, source)
+      narrow(parallels, target, source)
   else
     if (|target| == 0) then
       []
@@ -441,7 +442,7 @@ function transitionDomain(parallel: Option<string>, source: seq<string>, target:
       if reenter then
         source[0..lca]
       else
-        narrow(parallel, target, (if (lca == 0) then target[0..1] else source[0..lca]))
+        narrow(parallels, target, (if (lca == 0) then target[0..1] else source[0..lca]))
 }
 
 function runLifecycle(nodes: map<string, CompoundNode>, path: seq<string>, context: map<string, int>, event: Event, exiting: bool): Applied
@@ -452,85 +453,64 @@ function runLifecycle(nodes: map<string, CompoundNode>, path: seq<string>, conte
     lifecycle(nodes, path, context, event, exiting)
 }
 
-function leafSelection(nodes: map<string, CompoundNode>, id: string, base: int, context: map<string, int>, event: Event): Option<Selection>
+function ownSelection(nodes: map<string, CompoundNode>, id: string, context: map<string, int>, event: Event): Option<Selection>
 {
   if !((id in nodes)) then
     None
   else
-    var node := lookupNode(nodes, id);
-    if (((|node.children| > 0) || (base < 0)) || (base > |node.path|)) then
-      None
-    else
-      var path := node.path[base..];
-      if !(declaredPath(nodes, path)) then
-        None
-      else
-        select(nodes, path, context, event)
+    select(nodes, [id], context, event)
 }
 
-function regionSelections(nodes: map<string, CompoundNode>, active: seq<string>, base: int, context: map<string, int>, event: Event): seq<Selection>
-  decreases |active|
+function handledBelow(nodes: map<string, CompoundNode>, active: seq<string>, path: seq<string>, context: map<string, int>, event: Event): bool
 {
-  if (|active| == 0) then
+  (exists id :: id in active && (((id in nodes) && below(lookupNode(nodes, id).path, path)) && (match ownSelection(nodes, id, context, event) { case Some(i_) => true case None => false })))
+}
+
+function enabledSelections(nodes: map<string, CompoundNode>, active: seq<string>, candidates: seq<string>, context: map<string, int>, event: Event): seq<Selection>
+  decreases |candidates|
+{
+  if (|candidates| == 0) then
     []
   else
-    var first := leafSelection(nodes, active[0], base, context, event);
-    var rest := regionSelections(nodes, active[1..], base, context, event);
-    match first {
-      case Some(i_first_val) =>
-        ([i_first_val] + rest)
-      case None =>
-        rest
-    }
+    var rest := enabledSelections(nodes, active, candidates[1..], context, event);
+    var id := candidates[0];
+    if !((id in nodes)) then
+      rest
+    else
+      var own := ownSelection(nodes, id, context, event);
+      match own {
+        case Some(i_own_val) =>
+          if handledBelow(nodes, active, lookupNode(nodes, id).path, context, event) then
+            rest
+          else
+            ([i_own_val] + rest)
+        case None =>
+          rest
+      }
 }
 
-lemma regionSelections_ensures(nodes: map<string, CompoundNode>, active: seq<string>, base: int, context: map<string, int>, event: Event)
-  ensures ((|active| == 0) ==> (|regionSelections(nodes, active, base, context, event)| == 0))
+lemma enabledSelections_ensures(nodes: map<string, CompoundNode>, active: seq<string>, candidates: seq<string>, context: map<string, int>, event: Event)
+  ensures ((|candidates| == 0) ==> (|enabledSelections(nodes, active, candidates, context, event)| == 0))
 {
-}
-
-function activeParallel(machine: ParallelMachine, active: seq<string>): seq<string>
-{
-  var parallel := machine.parallel;
-  match parallel {
-    case Some(i_parallel_val) =>
-      if (!((i_parallel_val in active)) || !((i_parallel_val in machine.nodes))) then
-        []
-      else
-        lookupNode(machine.nodes, i_parallel_val).path
-    case None =>
-      []
-  }
 }
 
 function parallelSelections(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): seq<Selection>
 {
-  var parallelPath := activeParallel(machine, snapshot.active);
-  var regions := regionSelections(machine.nodes, snapshot.active, |parallelPath|, snapshot.context, event);
-  if ((|regions| > 0) || !(declaredPath(machine.nodes, parallelPath))) then
-    regions
-  else
-    var fallback := select(machine.nodes, parallelPath, snapshot.context, event);
-    match fallback {
-      case Some(i_fallback_val) =>
-        [i_fallback_val]
-      case None =>
-        []
-    }
+  enabledSelections(machine.nodes, snapshot.active, snapshot.active, snapshot.context, event)
 }
 
 function parallelReady(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): bool
 {
   var selections := parallelSelections(machine, snapshot, event);
-  ((|selections| == 0) || (if (|selections| > 1) then false else (var result := selections[0].evaluation.result; (match result { case Some(i_result_val) => (var target := i_result_val.target; (match target { case Some(i_target_val) => (if !((i_target_val in machine.nodes)) then false else (var targetPath := lookupNode(machine.nodes, i_target_val).path; ((|targetPath| < 2) || !(((match machine.parallel { case Some(i_value) => (i_value == targetPath[(|targetPath| - 2)]) case None => false }) && (i_target_val in snapshot.active)))))) case None => true })) case None => true }))))
+  ((|selections| == 0) || (if (|selections| > 1) then false else (var result := selections[0].evaluation.result; (match result { case Some(i_result_val) => (var target := i_result_val.target; (match target { case Some(i_target_val) => (if !((i_target_val in machine.nodes)) then false else (var targetPath := lookupNode(machine.nodes, i_target_val).path; ((|targetPath| < 2) || !(((targetPath[(|targetPath| - 2)] in machine.parallels) && (i_target_val in snapshot.active)))))) case None => true })) case None => true }))))
 }
 
 function parallelInitialTransition(machine: ParallelMachine, event: Event): ParallelStep
 {
   var nodes := machine.nodes;
-  var parallel := machine.parallel;
+  var parallels := machine.parallels;
   var target := (if (machine.root in nodes) then lookupNode(nodes, machine.root).path else []);
-  var entries := SeqFilter((id: string) => entering(nodes, parallel, target, [], None, id), machine.order);
+  var entries := SeqFilter((id: string) => entering(nodes, parallels, target, [], None, id), machine.order);
   var entered := runLifecycle(nodes, entries, machine.context, event, false);
   ParallelStep(ParallelSnapshot(entries, entered.context), false, entered.reused, entered.effects)
 }
@@ -543,15 +523,15 @@ lemma parallelInitialTransition_ensures(machine: ParallelMachine, event: Event)
 function parallelPlan(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool): ParallelPlan
 {
   var nodes := machine.nodes;
-  var parallel := machine.parallel;
+  var parallels := machine.parallels;
   var sourcePath := (if (source in nodes) then lookupNode(nodes, source).path else []);
   var targetPath := (if (target in nodes) then lookupNode(nodes, target).path else []);
-  var domain := transitionDomain(parallel, sourcePath, targetPath, reenter);
+  var domain := transitionDomain(parallels, sourcePath, targetPath, reenter);
   var reentered := (if (reenter && samePath(domain, sourcePath)) then Option.Some(source) else Option.None);
   var extra := (match reentered { case Some(i_reentered_val) => Option.Some(i_reentered_val) case None => (if (samePath(domain, targetPath) && (target != source)) then Option.Some(target) else Option.None) });
   var exits := reverse(SeqFilter((id: string) => exiting(nodes, domain, reentered, id), active));
-  var entries := SeqFilter((id: string) => entering(nodes, parallel, targetPath, domain, extra, id), machine.order);
-  var next := SeqFilter((id: string) => (((id in active) && !(exiting(nodes, domain, reentered, id))) || entering(nodes, parallel, targetPath, domain, extra, id)), machine.order);
+  var entries := SeqFilter((id: string) => entering(nodes, parallels, targetPath, domain, extra, id), machine.order);
+  var next := SeqFilter((id: string) => (((id in active) && !(exiting(nodes, domain, reentered, id))) || entering(nodes, parallels, targetPath, domain, extra, id)), machine.order);
   ParallelPlan(domain, reentered, extra, exits, entries, next)
 }
 
@@ -713,7 +693,7 @@ function selectionReady(machine: ParallelMachine, active: seq<string>, selection
             false
           else
             var targetPath := lookupNode(machine.nodes, i_target_val).path;
-            ((|targetPath| < 2) || !(((match machine.parallel { case Some(i_value) => (i_value == targetPath[(|targetPath| - 2)]) case None => false }) && (i_target_val in active))))
+            ((|targetPath| < 2) || !(((targetPath[(|targetPath| - 2)] in machine.parallels) && (i_target_val in active))))
         case None =>
           true
       }

@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 462,
+  "verifiedCount": 492,
   "functions": [
     "mergePatch",
     "apply",
@@ -27,9 +27,9 @@
     "narrow",
     "transitionDomain",
     "runLifecycle",
-    "leafSelection",
-    "regionSelections",
-    "activeParallel",
+    "ownSelection",
+    "handledBelow",
+    "enabledSelections",
     "parallelSelections",
     "parallelReady",
     "parallelInitialTransition",
@@ -72,7 +72,7 @@
     "below_ensures",
     "samePath_ensures",
     "completes_ensures",
-    "regionSelections_ensures",
+    "enabledSelections_ensures",
     "parallelInitialTransition_ensures",
     "parallelTransition_ensures",
     "selectionPlans_ensures",
@@ -114,7 +114,9 @@
     "PlansApart",
     "Combined",
     "PlansContext",
-    "MovingPlans"
+    "MovingPlans",
+    "Distinct",
+    "DistinctIds"
   ],
   "laws": [
     "LastPatchCons",
@@ -168,7 +170,6 @@
     "PathPrefixes",
     "AncestorsActive",
     "SelectSource",
-    "RegionSourcesActive",
     "SelectionSourcesActive",
     "NarrowActive",
     "DomainActive",
@@ -265,7 +266,25 @@
     "ReadyAtomicPlanExits",
     "NestedMovingPlansOverlap",
     "SelectionPlanMembers",
-    "ReadyMovingDomainsApart"
+    "ReadyMovingDomainsApart",
+    "InitialChildren",
+    "NarrowMeaning",
+    "OwnSelectionMeaning",
+    "EnabledSelectionMeaning",
+    "HandledBelowMeaning",
+    "DistinctTail",
+    "EnabledSelectionsDistinct",
+    "SelectedConflictsGreedy",
+    "SelectedIdsDistinct",
+    "SelectedNotBelow",
+    "SelectedPairApart",
+    "SelectedSourcesApart",
+    "SelectionsReadyConverse",
+    "SimultaneousReadyMeaning",
+    "SourceApartMeaning",
+    "SourcesApartMeaning",
+    "SubseqDistinct",
+    "SubseqMembers"
   ],
   "defects": [
     {
@@ -355,8 +374,8 @@
     },
     {
       "name": "parallel enters only its first region",
-      "before": "    id === parallel ||\n",
-      "after": "    (id === parallel && node.children.length > 0 && child === node.children[0]) ||\n"
+      "before": "    parallels.includes(id) ||\n",
+      "after": "    (parallels.includes(id) && node.children.length > 0 && child === node.children[0]) ||\n"
     },
     {
       "name": "atomic descendants stay active after their parallel ancestor exits",
@@ -365,8 +384,8 @@
     },
     {
       "name": "cross-region transition exits the source region",
-      "before": "  return narrow(\n    parallel,\n    target,\n    lca === 0",
-      "after": "  return narrow(\n    undefined,\n    target,\n    lca === 0"
+      "before": "  return narrow(\n    parallels,\n    target,\n    lca === 0",
+      "after": "  return narrow(\n    [],\n    target,\n    lca === 0"
     },
     {
       "name": "parallel exits run in document order",
@@ -402,6 +421,51 @@
       "name": "atomic inner domain survives an outer exit",
       "before": "      (active.includes(id) && !plansExit(plans, id)) || plansEnter(plans, id)\n  );\n  const exited",
       "after": "      (active.includes(id) && (!plansExit(plans, id) || plans.some((plan) => plan.domain.length > 0 && plan.domain[plan.domain.length - 1] === id && plan.exits.length === 0))) || plansEnter(plans, id)\n  );\n  const exited"
+    },
+    {
+      "name": "nested parallel enters only its first region",
+      "before": "    parallels.includes(id) ||\n",
+      "after": "    (parallels.includes(id) && (id === parallels[0] || child === node.children[0])) ||\n"
+    },
+    {
+      "name": "multiple parallels enter every compound child",
+      "before": "      : child === node.initial);",
+      "after": "      : child === node.initial || parallels.length > 1);"
+    },
+    {
+      "name": "nested parallel initialization enters in reverse document order",
+      "before": "  const entries = machine.order.filter((id) =>\n    entering(nodes, parallels, target, [], undefined, id)\n  );",
+      "after": "  const entries = (\n    parallels.length > 1 ? reverse(machine.order) : machine.order\n  ).filter((id) => entering(nodes, parallels, target, [], undefined, id));"
+    },
+    {
+      "name": "narrowing stops after one parallel level",
+      "before": "  return narrow(parallels, target, target.slice(0, domain.length + 1));",
+      "after": "  return target.slice(0, domain.length + 1);"
+    },
+    {
+      "name": "selection ignores handlers below the candidate",
+      "before": "    own === undefined ||\n    handledBelow(nodes, active, lookupNode(nodes, id).path, context, event)\n  )",
+      "after": "    own === undefined\n  )"
+    },
+    {
+      "name": "selection defers to handlers above the candidate",
+      "before": "      below(lookupNode(nodes, id).path, path) &&\n      ownSelection(nodes, id, context, event) !== undefined",
+      "after": "      below(path, lookupNode(nodes, id).path) &&\n      ownSelection(nodes, id, context, event) !== undefined"
+    },
+    {
+      "name": "simultaneous steps on several parallel nodes are refused",
+      "before": "  if (selections.length < 2) return parallelReady(machine, snapshot, event);\n  return multiReady(",
+      "after": "  if (selections.length < 2) return parallelReady(machine, snapshot, event);\n  if (machine.parallels.length > 1) return false;\n  return multiReady("
+    },
+    {
+      "name": "selection visits each active node twice",
+      "before": "  return enabledSelections(\n    machine.nodes,\n    snapshot.active,\n    snapshot.active,\n",
+      "after": "  return enabledSelections(\n    machine.nodes,\n    snapshot.active,\n    [...snapshot.active, ...snapshot.active],\n"
+    },
+    {
+      "name": "a later conflicting selection replaces an earlier one",
+      "before": "  if (anyPreempts(machine, active, first, kept)) {",
+      "after": "  if (anyPreempts(machine, active, first, [])) {"
     }
   ],
   "proofDefects": [

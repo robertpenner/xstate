@@ -51,6 +51,19 @@ const defects = [
     test: 'enters every region of a root-level parallel machine in document order'
   },
   {
+    name: 'compound regions of nested parallel nodes enter every child',
+    file: 'packages/core/src/stateUtils.ts',
+    before: `    if (descStateNode.type === 'compound') {
+      for (const target of descStateNode.initial.target ?? []) {`,
+    after: `    if (descStateNode.type === 'compound') {
+      for (const target of descStateNode.parent?.type === 'parallel' &&
+      descStateNode.parent.parent?.type === 'parallel'
+        ? getChildren(descStateNode)
+        : (descStateNode.initial.target ?? [])) {`,
+    testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
+    test: 'enters a nested parallel region of a parallel root in document order'
+  },
+  {
     name: 'a later conflicting transition preempts an earlier one',
     file: 'packages/core/src/stateUtils.ts',
     before: 'if (isDescendant(t1.source, t2.source)) {',
@@ -65,6 +78,40 @@ const defects = [
     after: 'for (const t of [...filteredTransitions].reverse()) {',
     testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
     test: 'merges patches in region order'
+  },
+  {
+    name: 'parallel domain narrows only one level',
+    file: 'packages/core/src/stateUtils.ts',
+    before: "while (narrowed.type === 'parallel') {",
+    after:
+      "for (let level = 0; level < 1 && narrowed.type === 'parallel'; level++) {",
+    testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
+    test: 'narrows through a parallel region that is itself parallel'
+  },
+  {
+    name: 'a parallel node overrides a single selected region',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'if (!allInnerTransitions.length) {',
+    after: 'if (allInnerTransitions.length < 2) {',
+    testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
+    test: 'lets an inner region block control fallback to nested ancestors'
+  },
+  {
+    name: 'inner parallel regions select in reverse order',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'for (const subStateKey of subStateKeys) {',
+    after:
+      'for (const subStateKey of stateNode.parent?.parent ? [...subStateKeys].reverse() : subStateKeys) {',
+    testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
+    test: 'keeps the earlier region when results leave the inner and the outer parallel node'
+  },
+  {
+    name: 'a deeper conflicting source preempts a shallower one',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'if (isDescendant(t1.source, t2.source)) {',
+    after: 'if (t1.source.path.length > t2.source.path.length) {',
+    testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
+    test: 'keeps an earlier shallow fallback over a later deeper conflicting source'
   },
   {
     name: 'targetless reentry runs entry again',
