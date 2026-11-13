@@ -157,7 +157,10 @@ export function compareParallelTrace(
       exitedParallels: 0,
       movingPlans: 0,
       sourceDepths: 0,
-      sourceParallels: 0
+      sourceParallels: 0,
+      domainParallels: 0,
+      reenteredParallels: 0,
+      stoppedFallback: false
     }
   ];
   for (const event of events) {
@@ -223,6 +226,8 @@ export function compareParallelTrace(
         );
       })
     );
+    // A parallel node was selected although an active node below it declares a
+    // handler for the event, so that handler declined.
     const parallelFallback = selected.some(
       (selection) =>
         parallels.includes(selection.id) &&
@@ -255,6 +260,29 @@ export function compareParallelTrace(
         countParallels(nodes[selection.id].path.slice(0, -1))
       )
     );
+    // The most parallel nodes strictly above a moving plan's domain.
+    const domainParallels = Math.max(
+      0,
+      ...plans
+        .filter((plan) => plan.exits.length > 0 || plan.entries.length > 0)
+        .map((plan) => countParallels(plan.domain.slice(0, -1)))
+    );
+    // The most parallel nodes one plan both exits and reenters.
+    const reenteredParallels = Math.max(
+      0,
+      ...plans.map((plan) =>
+        countParallels(plan.exits.filter((id) => plan.entries.includes(id)))
+      )
+    );
+    // A selected block or effect-only handler kept an active ancestor's
+    // handler for the same event from being selected.
+    const stoppedFallback = selected.some(
+      (selection) =>
+        selection.evaluation.result?.target === undefined &&
+        nodes[selection.id].path
+          .slice(0, -1)
+          .some((id) => nodes[id].on.has(event.type))
+    );
     expected = model.parallelStep(machine, expected.snapshot, modelEvent);
     [actual, actualEffects] = transition(runtime, actual, event);
     trace.push({
@@ -268,7 +296,10 @@ export function compareParallelTrace(
       exitedParallels,
       movingPlans,
       sourceDepths,
-      sourceParallels
+      sourceParallels,
+      domainParallels,
+      reenteredParallels,
+      stoppedFallback
     });
   }
   return trace;

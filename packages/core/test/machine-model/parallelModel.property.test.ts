@@ -192,8 +192,8 @@ it('compares generated initialization of multiple and nested parallel trees', ()
           return node;
         }
         const root = tree(0);
-        const config: Config = { ...root, context: { trail: 0 } };
         for (const node of all) node.on = { go: { target: '#id0' } };
+        const config: Config = { ...root, context: { trail: 0 } };
         stats.runs++;
         const trace = compareParallelTrace(
           config,
@@ -254,6 +254,9 @@ it('compares generated event traces through multiple and nested parallel trees',
     narrowedSteps: 0,
     deepNarrowing: 0,
     parallelFallback: 0,
+    stoppedFallback: 0,
+    deepDomains: 0,
+    reenteredParallels: 0,
     deepEntries: 0,
     deepExits: 0,
     simultaneous: 0,
@@ -370,6 +373,9 @@ it('compares generated event traces through multiple and nested parallel trees',
           if (step.narrowing > 0) stats.narrowedSteps++;
           if (step.narrowing > 1) stats.deepNarrowing++;
           if (step.parallelFallback) stats.parallelFallback++;
+          if (step.stoppedFallback) stats.stoppedFallback++;
+          if (step.domainParallels > 1) stats.deepDomains++;
+          if (step.reenteredParallels > 0) stats.reenteredParallels++;
           if (step.enteredParallels > 1) stats.deepEntries++;
           if (step.exitedParallels > 1) stats.deepExits++;
           if (!multi || step.selections < 2) continue;
@@ -392,8 +398,12 @@ it('compares generated event traces through multiple and nested parallel trees',
   console.info('nested parallel step coverage', stats);
   expect(stats.multiParallel).toBeGreaterThan(stats.runs / 4);
   expect(stats.nestedSteps).toBeGreaterThan(stats.runs / 2);
+  expect(stats.narrowedSteps).toBeGreaterThan(stats.runs / 10);
   expect(stats.deepNarrowing).toBeGreaterThan(0);
   expect(stats.parallelFallback).toBeGreaterThan(0);
+  expect(stats.stoppedFallback).toBeGreaterThan(0);
+  expect(stats.deepDomains).toBeGreaterThan(0);
+  expect(stats.reenteredParallels).toBeGreaterThan(0);
   expect(stats.deepEntries).toBeGreaterThan(0);
   expect(stats.deepExits).toBeGreaterThan(0);
   expect(stats.simultaneous).toBeGreaterThan(stats.runs / 4);
@@ -401,5 +411,5 @@ it('compares generated event traces through multiple and nested parallel trees',
   expect(stats.deepSources).toBeGreaterThan(0);
   expect(stats.conflicting).toBeGreaterThan(0);
   expect(stats.independentMoves).toBeGreaterThan(0);
-  expect(stats.reasons['active region target']).toBeGreaterThan(0);
+  expect(Object.keys(stats.reasons)).toEqual(['active region target']);
 });

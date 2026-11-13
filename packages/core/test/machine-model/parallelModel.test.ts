@@ -1030,6 +1030,66 @@ describe('simultaneous transitions through nested parallel structure', () => {
     ]);
   });
 
+  it.each([
+    ['a region source', undefined, { go: { target: 'a1y' } }, 0],
+    ['an inner parallel fallback', { go: { target: '#m.a.a1.a1y' } }, {}, 1]
+  ] as const)(
+    'moves two sibling inner parallel nodes independently (%s)',
+    (_, aOn, a1xOn, narrowing) => {
+      const trace = compareParallelTrace(
+        {
+          id: 'm',
+          type: 'parallel',
+          context: {},
+          states: {
+            a: logged('a', {
+              type: 'parallel',
+              on: aOn,
+              states: {
+                a1: logged('a1', {
+                  initial: 'a1x',
+                  states: {
+                    a1x: logged('a1x', { on: a1xOn }),
+                    a1y: logged('a1y')
+                  }
+                }),
+                a2: logged('a2')
+              }
+            }),
+            b: logged('b', {
+              type: 'parallel',
+              states: {
+                b1: logged('b1', {
+                  initial: 'b1x',
+                  states: {
+                    b1x: logged('b1x', { on: { go: { target: 'b1y' } } }),
+                    b1y: logged('b1y')
+                  }
+                }),
+                b2: logged('b2')
+              }
+            })
+          }
+        },
+        [{ type: 'go' }]
+      );
+      expect(trace[1].selections).toBe(2);
+      expect(trace[1].kept).toBe(2);
+      expect(trace[1].movingPlans).toBe(2);
+      expect(trace[1].narrowing).toBe(narrowing);
+      expect(trace[1].value).toEqual({
+        a: { a1: 'a1y', a2: {} },
+        b: { b1: 'b1y', b2: {} }
+      });
+      expect(labels(trace[1])).toEqual([
+        'exit b1x',
+        'exit a1x',
+        'enter a1y',
+        'enter b1y'
+      ]);
+    }
+  );
+
   it('suppresses inner and outer parallel fallbacks when a region below handles', () => {
     const trace = compareParallelTrace(
       nested({
@@ -1121,6 +1181,7 @@ describe('simultaneous transitions through nested parallel structure', () => {
       );
       expect(trace[1].selections).toBe(2);
       expect(trace[1].kept).toBe(2);
+      expect(trace[1].nestedDomains).toBe(true);
       expect(trace[1].value).toBe('off');
       expect(trace[1].context).toEqual({ count: selfFirst ? 2 : 1 });
       expect(labels(trace[1])).toEqual([
