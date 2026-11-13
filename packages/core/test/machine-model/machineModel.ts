@@ -507,9 +507,10 @@ export function narrow(
   domain: readonly string[]
 ): readonly string[] {
   //@ verify
+  //@ decreases target.length - domain.length
   if (domain.length === 0 || !below(target, domain)) return domain;
   if (!parallels.includes(domain[domain.length - 1])) return domain;
-  return target.slice(0, domain.length + 1);
+  return narrow(parallels, target, target.slice(0, domain.length + 1));
 }
 
 export function transitionDomain(
@@ -545,50 +546,64 @@ export function runLifecycle(
   return lifecycle(nodes, path, context, event, exiting);
 }
 
-export function leafSelection(
+export function ownSelection(
   nodes: Record<string, CompoundNode>,
   id: string,
-  base: number,
   context: Record<string, number>,
   event: Event
 ): Selection | undefined {
   //@ verify
   if (!(id in nodes)) return undefined;
-  const node = lookupNode(nodes, id);
-  if (node.children.length > 0 || base < 0 || base > node.path.length)
-    return undefined;
-  const path = node.path.slice(base);
-  if (!declaredPath(nodes, path)) return undefined;
-  return select(nodes, path, context, event);
+  return select(nodes, [id], context, event);
 }
 
-export function regionSelections(
+export function handledBelow(
   nodes: Record<string, CompoundNode>,
   active: readonly string[],
-  base: number,
+  path: readonly string[],
+  context: Record<string, number>,
+  event: Event
+): boolean {
+  //@ verify
+  return active.some(
+    (id) =>
+      id in nodes &&
+      below(lookupNode(nodes, id).path, path) &&
+      ownSelection(nodes, id, context, event) !== undefined
+  );
+}
+
+// The runtime selects recursively: a compound node defers to its active
+// child and a parallel node to all of its regions, falling back to its own
+// handler only when nothing below it handles the event. The result is every
+// active handler with no handling active descendant, in document order.
+export function enabledSelections(
+  nodes: Record<string, CompoundNode>,
+  active: readonly string[],
+  candidates: readonly string[],
   context: Record<string, number>,
   event: Event
 ): readonly Selection[] {
   //@ verify
-  //@ ensures active.length === 0 ==> \result.length === 0
-  //@ decreases active.length
-  if (active.length === 0) return [];
-  const first = leafSelection(nodes, active[0], base, context, event);
-  const rest = regionSelections(nodes, active.slice(1), base, context, event);
-  return first === undefined ? rest : [first, ...rest];
-}
-
-export function activeParallel(
-  machine: ParallelMachine,
-  active: readonly string[]
-): readonly string[] {
-  //@ verify
-  // Region-first selection is defined only for a sole parallel node; steps on
-  // machines with several parallel nodes are refused by `parallelStepReady`.
-  if (machine.parallels.length !== 1) return [];
-  const parallel = machine.parallels[0];
-  if (!active.includes(parallel) || !(parallel in machine.nodes)) return [];
-  return lookupNode(machine.nodes, parallel).path;
+  //@ ensures candidates.length === 0 ==> \result.length === 0
+  //@ decreases candidates.length
+  if (candidates.length === 0) return [];
+  const rest = enabledSelections(
+    nodes,
+    active,
+    candidates.slice(1),
+    context,
+    event
+  );
+  const id = candidates[0];
+  if (!(id in nodes)) return rest;
+  const own = ownSelection(nodes, id, context, event);
+  if (
+    own === undefined ||
+    handledBelow(nodes, active, lookupNode(nodes, id).path, context, event)
+  )
+    return rest;
+  return [own, ...rest];
 }
 
 export function parallelSelections(
@@ -597,18 +612,13 @@ export function parallelSelections(
   event: Event
 ): readonly Selection[] {
   //@ verify
-  const parallelPath = activeParallel(machine, snapshot.active);
-  const regions = regionSelections(
+  return enabledSelections(
     machine.nodes,
     snapshot.active,
-    parallelPath.length,
+    snapshot.active,
     snapshot.context,
     event
   );
-  if (regions.length > 0 || !declaredPath(machine.nodes, parallelPath))
-    return regions;
-  const fallback = select(machine.nodes, parallelPath, snapshot.context, event);
-  return fallback === undefined ? [] : [fallback];
 }
 
 export function parallelReady(
@@ -952,9 +962,10 @@ export function parallelStepReady(
   event: Event
 ): boolean {
   //@ verify
-  if (machine.parallels.length > 1) return false;
   const selections = parallelSelections(machine, snapshot, event);
   if (selections.length < 2) return parallelReady(machine, snapshot, event);
+  // Simultaneous selections are supported only with a single parallel node.
+  if (machine.parallels.length > 1) return false;
   return multiReady(machine, snapshot.active, selections);
 }
 

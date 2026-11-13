@@ -663,25 +663,322 @@ describe('multiple and nested parallel initialization', () => {
     ]);
   });
 
-  it('refuses every event step once a machine has more than one parallel node', () => {
+  it('refuses simultaneous selections once a machine has more than one parallel node', () => {
     const config: Config = {
       context: {},
       type: 'parallel',
       states: {
         a: {
           type: 'parallel',
-          states: { x: { on: { go: { target: 'y' } } }, y: {} }
+          states: {
+            x: { on: { go: { reenter: true } } },
+            y: { on: { go: { reenter: true } } }
+          }
         },
         b: {}
       }
     };
-    expect(compareParallelTrace(config, [])).toHaveLength(1);
     expect(() => compareParallelTrace(config, [{ type: 'go' }])).toThrow(
-      'Unsupported step: go (multiple parallel nodes)'
+      'Unsupported step: go (simultaneous selections with several parallel nodes)'
     );
-    expect(() => compareParallelTrace(config, [{ type: 'unhandled' }])).toThrow(
-      'Unsupported step: unhandled (multiple parallel nodes)'
+    expect(
+      compareParallelTrace(config, [{ type: 'unhandled' }])[1].snapshotReused
+    ).toBe(true);
+  });
+});
+
+type NestedOn = Partial<Record<'p' | 'a' | 'q' | 'x1' | 'off', On>>;
+
+// An outer parallel node `p` whose region `a` holds an inner parallel node `q`
+// below a compound node, beside a plain region `b`.
+function nested(on: NestedOn = {}, initial = 'p'): Config {
+  return {
+    id: 'm',
+    context: { count: 0 },
+    initial,
+    states: {
+      p: logged('p', {
+        type: 'parallel',
+        on: on.p,
+        states: {
+          a: logged('a', {
+            initial: 'q',
+            on: on.a,
+            states: {
+              q: logged('q', {
+                type: 'parallel',
+                on: on.q,
+                states: {
+                  x: logged('x', {
+                    initial: 'x1',
+                    states: {
+                      x1: logged('x1', {
+                        on: { next: { target: 'x2' }, ...on.x1 }
+                      }),
+                      x2: logged('x2')
+                    }
+                  }),
+                  y: logged('y', {
+                    initial: 'y1',
+                    states: { y1: logged('y1'), y2: logged('y2') }
+                  })
+                }
+              }),
+              r: logged('r')
+            }
+          }),
+          b: logged('b', {
+            initial: 'b1',
+            states: { b1: logged('b1'), b2: logged('b2') }
+          })
+        }
+      }),
+      off: logged('off', { on: on.off })
+    }
+  };
+}
+
+const innerEntries = ['enter q', 'enter x', 'enter x1', 'enter y', 'enter y1'];
+
+describe('single-selection steps through nested parallel structure', () => {
+  it('moves inside an inner region without touching other regions', () => {
+    const trace = compareParallelTrace(nested(), [{ type: 'next' }]);
+    expect(trace[1].value).toEqual({
+      p: { a: { q: { x: 'x2', y: 'y1' } }, b: 'b1' }
+    });
+    expect(labels(trace[1])).toEqual(['exit x1', 'enter x2']);
+  });
+
+  it.each([
+    ['between inner regions', '#m.p.a.q.y.y2', 'y', ['exit y1', 'enter y2']],
+    ['between outer branches', '#m.p.b.b2', 'b', ['exit b1', 'enter b2']]
+  ] as const)(
+    'narrows a transition %s to the target region',
+    (_, target, region, expected) => {
+      const trace = compareParallelTrace(nested({ x1: { go: { target } } }), [
+        { type: 'go' }
+      ]);
+      expect(labels(trace[1])).toEqual(expected);
+      expect(trace[1].value).toEqual({
+        p: {
+          a: { q: { x: 'x1', y: region === 'y' ? 'y2' : 'y1' } },
+          b: region === 'b' ? 'b2' : 'b1'
+        }
+      });
+    }
+  );
+
+  it('enters a deep target inside nested parallel nodes from outside', () => {
+    const trace = compareParallelTrace(
+      nested({ off: { start: { target: '#m.p.a.q.y.y2' } } }, 'off'),
+      [{ type: 'start' }]
     );
+    expect(trace[1].value).toEqual({
+      p: { a: { q: { x: 'x1', y: 'y2' } }, b: 'b1' }
+    });
+    expect(labels(trace[1])).toEqual([
+      'exit off',
+      'enter p',
+      'enter a',
+      'enter q',
+      'enter x',
+      'enter x1',
+      'enter y',
+      'enter y2',
+      'enter b',
+      'enter b1'
+    ]);
+  });
+
+  it('leaves the inner parallel node for a sibling while the outer branch stays', () => {
+    const trace = compareParallelTrace(
+      nested({ x1: { go: { target: '#m.p.a.r' } } }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].value).toEqual({ p: { a: 'r', b: 'b1' } });
+    expect(labels(trace[1])).toEqual([
+      'exit y1',
+      'exit y',
+      'exit x1',
+      'exit x',
+      'exit q',
+      'enter r'
+    ]);
+  });
+
+  it('leaves every nested parallel ancestor in reverse document order', () => {
+    const trace = compareParallelTrace(
+      nested({ x1: { go: { target: '#m.off' } } }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].value).toBe('off');
+    expect(labels(trace[1])).toEqual([
+      'exit b1',
+      'exit b',
+      'exit y1',
+      'exit y',
+      'exit x1',
+      'exit x',
+      'exit q',
+      'exit a',
+      'exit p',
+      'enter off'
+    ]);
+  });
+
+  it('reenters the inner parallel node without touching the outer branch', () => {
+    const trace = compareParallelTrace(
+      nested({ q: { again: { target: '#m.p.a.q', reenter: true } } }),
+      [{ type: 'next' }, { type: 'again' }]
+    );
+    expect(trace[2].value).toEqual({
+      p: { a: { q: { x: 'x1', y: 'y1' } }, b: 'b1' }
+    });
+    expect(labels(trace[2])).toEqual([
+      'exit y1',
+      'exit y',
+      'exit x2',
+      'exit x',
+      'exit q',
+      ...innerEntries
+    ]);
+  });
+
+  it('reenters the outer parallel node and every nested region', () => {
+    const trace = compareParallelTrace(
+      nested({ p: { again: { target: '#m.p', reenter: true } } }),
+      [{ type: 'next' }, { type: 'again' }]
+    );
+    expect(trace[2].value).toEqual({
+      p: { a: { q: { x: 'x1', y: 'y1' } }, b: 'b1' }
+    });
+    expect(labels(trace[2])).toEqual([
+      'exit b1',
+      'exit b',
+      'exit y1',
+      'exit y',
+      'exit x2',
+      'exit x',
+      'exit q',
+      'exit a',
+      'exit p',
+      'enter p',
+      'enter a',
+      ...innerEntries,
+      'enter b',
+      'enter b1'
+    ]);
+  });
+
+  it.each(['block', 'decline', 'effect'] as const)(
+    'lets an inner region %s control fallback to nested ancestors',
+    (kind) => {
+      const trace = compareParallelTrace(
+        nested({
+          x1: {
+            event:
+              kind === 'block'
+                ? undefined
+                : (_, enq) => {
+                    if (kind === 'effect') enq(record, 'handled');
+                  }
+          },
+          q: { event: { target: '#m.p.a.r' } },
+          p: { event: { target: '#m.off' } }
+        }),
+        [{ type: 'event' }]
+      );
+      expect(trace[1].selections).toBe(1);
+      expect(trace[1].value).toEqual(
+        kind === 'decline' ? { p: { a: 'r', b: 'b1' } } : trace[0].value
+      );
+      expect(labels(trace[1])).toEqual(
+        kind === 'decline'
+          ? ['exit y1', 'exit y', 'exit x1', 'exit x', 'exit q', 'enter r']
+          : kind === 'effect'
+            ? ['handled']
+            : []
+      );
+    }
+  );
+
+  it('falls back to the outer parallel node only when every nested region declines', () => {
+    const trace = compareParallelTrace(
+      nested({
+        x1: { event: (): undefined => undefined },
+        a: { event: (): undefined => undefined },
+        p: { event: { target: '#m.off' } }
+      }),
+      [{ type: 'event' }]
+    );
+    expect(trace[1].selections).toBe(1);
+    expect(trace[1].value).toBe('off');
+  });
+
+  it.each([
+    [
+      'parallel source narrows to the target region',
+      { q: { jump: { target: '.y.y2' } } },
+      { x: 'x2', y: 'y2' },
+      ['exit y1', 'enter y2']
+    ],
+    [
+      'compound ancestor source resets the inner parallel node',
+      { a: { jump: { target: '.q.y.y2' } } },
+      { x: 'x1', y: 'y2' },
+      [
+        'exit y1',
+        'exit y',
+        'exit x2',
+        'exit x',
+        'exit q',
+        'enter q',
+        'enter x',
+        'enter x1',
+        'enter y',
+        'enter y2'
+      ]
+    ]
+  ] as const)('%s', (_, on, inner, expected) => {
+    const trace = compareParallelTrace(nested(on), [
+      { type: 'next' },
+      { type: 'jump' }
+    ]);
+    expect(trace[2].value).toEqual({ p: { a: { q: inner }, b: 'b1' } });
+    expect(labels(trace[2])).toEqual(expected);
+  });
+
+  it('narrows through a parallel region that is itself parallel', () => {
+    const trace = compareParallelTrace(
+      {
+        id: 'm',
+        context: {},
+        type: 'parallel',
+        on: { jump: { target: '.a.y.y2' } },
+        states: {
+          a: logged('a', {
+            type: 'parallel',
+            states: {
+              x: logged('x', {
+                initial: 'x1',
+                states: {
+                  x1: logged('x1', { on: { next: { target: 'x2' } } }),
+                  x2: logged('x2')
+                }
+              }),
+              y: logged('y', {
+                initial: 'y1',
+                states: { y1: logged('y1'), y2: logged('y2') }
+              })
+            }
+          }),
+          b: logged('b')
+        }
+      },
+      [{ type: 'next' }, { type: 'jump' }]
+    );
+    expect(trace[2].value).toEqual({ a: { x: 'x2', y: 'y2' }, b: {} });
+    expect(labels(trace[2])).toEqual(['exit y1', 'enter y2']);
   });
 });
 

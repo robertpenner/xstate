@@ -80,6 +80,23 @@ const defects = [
     test: 'merges patches in region order'
   },
   {
+    name: 'parallel domain narrows only one level',
+    file: 'packages/core/src/stateUtils.ts',
+    before: "while (narrowed.type === 'parallel') {",
+    after:
+      "for (let level = 0; level < 1 && narrowed.type === 'parallel'; level++) {",
+    testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
+    test: 'narrows through a parallel region that is itself parallel'
+  },
+  {
+    name: 'a parallel node overrides a single selected region',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'if (!allInnerTransitions.length) {',
+    after: 'if (allInnerTransitions.length < 2) {',
+    testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
+    test: 'lets an inner region block control fallback to nested ancestors'
+  },
+  {
     name: 'targetless reentry runs entry again',
     file: 'packages/core/src/stateUtils.ts',
     before: 'if (targets?.length && reenter && domain === transition.source) {',

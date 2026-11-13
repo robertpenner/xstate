@@ -202,14 +202,14 @@ it('compares generated initialization of multiple and nested parallel trees', ()
             if (
               !step ||
               !(error instanceof Error) ||
-              error.message !== 'Unsupported step: go (multiple parallel nodes)'
+              error.message !==
+                'Unsupported step: go (simultaneous selections with several parallel nodes)'
             )
               throw error;
             stats.refusedSteps++;
             return compareParallelTrace(config, []);
           }
         })();
-        if (step && parallelIds.size > 1) expect(trace).toHaveLength(1);
         const active = new Set(trace[0].active);
         const activeParallel = [...parallelIds].filter((id) => active.has(id));
         if (activeParallel.length < parallelIds.size) stats.inactiveParallel++;
@@ -253,4 +253,155 @@ it('compares generated initialization of multiple and nested parallel trees', ()
   expect(stats.maxNestedParallelDepth).toBeGreaterThan(2);
   expect(stats.inactiveParallel).toBeGreaterThan(0);
   expect(stats.refusedSteps).toBeGreaterThan(0);
+});
+
+it('compares generated event traces through multiple and nested parallel trees', () => {
+  const stats = {
+    runs: 0,
+    multiParallel: 0,
+    nestedSteps: 0,
+    narrowedSteps: 0,
+    deepNarrowing: 0,
+    parallelFallback: 0,
+    deepEntries: 0,
+    deepExits: 0,
+    refused: 0,
+    reasons: {} as Record<string, number>
+  };
+  fc.assert(
+    fc.property(
+      fc.integer({ min: 2, max: 4 }),
+      fc.array(fc.integer({ min: 0, max: 100 }), {
+        minLength: 80,
+        maxLength: 80
+      }),
+      fc.array(fc.constantFrom('a', 'b', 'c', 'missing'), {
+        minLength: 1,
+        maxLength: 12
+      }),
+      (depth, numbers, events) => {
+        const all: State[] = [];
+        const parallelIds = new Set<string>();
+        const at = (index: number) => numbers[index % numbers.length];
+        function tree(level: number): State {
+          const index = all.length;
+          const node: State = {
+            id: `id${index}`,
+            entry: ({ context }, enq) => {
+              enq(effect, 'entry', index, context.trail);
+              return {
+                context: { trail: (Number(context.trail) * 7 + index) % 1e9 }
+              };
+            },
+            exit: ({ context }, enq) => {
+              enq(effect, 'exit', index, context.trail);
+              return {
+                context: { trail: (Number(context.trail) * 5 + index) % 1e9 }
+              };
+            }
+          };
+          all.push(node);
+          const n = at(index);
+          if (level < depth && (level === 0 || n % 4 !== 0)) {
+            const states: Record<string, State> = { x: tree(level + 1) };
+            if (n % 2 === 0 || n % 3 !== 1) states.y = tree(level + 1);
+            if (n % 5 === 0) states.z = tree(level + 1);
+            node.states = states;
+            if (n % 3 !== 1) {
+              node.type = 'parallel';
+              parallelIds.add(node.id!);
+            } else {
+              node.initial = n % 7 === 0 && states.y ? 'y' : 'x';
+            }
+          }
+          return node;
+        }
+        const config: Config = { ...tree(0), context: { trail: 0 } };
+        all[0] = config;
+        // Leaf targets reach through every parallel level above them.
+        const leaves = all.filter((node) => node.states === undefined);
+        for (const [index, node] of all.entries()) {
+          node.on = {};
+          for (const [offset, type] of ['a', 'b', 'c'].entries()) {
+            const n = at(3 * index + offset + 11);
+            const m = at(5 * index + offset + 29);
+            // Handler density falls with machine width so that many events
+            // still select exactly one handler.
+            if ((n + 13 * index + 7 * offset) % (2 + leaves.length) > 1)
+              continue;
+            const pick = (m * 7 + index + offset) % 1000;
+            const result = {
+              target:
+                m % 9 === 0
+                  ? undefined
+                  : m % 2 === 0
+                    ? leaves[pick % leaves.length].id
+                    : all[pick % all.length].id,
+              reenter: m % 4 === 1,
+              context: { trail: m }
+            };
+            if (result.target !== undefined)
+              result.target = `#${result.target}`;
+            if (m % 8 === 0) node.on[type] = undefined;
+            else if (m % 8 === 1) node.on[type] = () => undefined;
+            else if (m % 8 === 2)
+              node.on[type] = (_, enq) => {
+                enq(effect, 'effect-only');
+              };
+            else if (m % 8 < 5) node.on[type] = result;
+            else
+              node.on[type] = ({ context }, enq) => {
+                enq(effect, 'transition', index, context.trail);
+                return result;
+              };
+          }
+        }
+        stats.runs++;
+        const multi = parallelIds.size > 1;
+        if (multi) stats.multiParallel++;
+        // A refused event is dropped so the rest of the trace still runs.
+        const accepted: { type: string }[] = [];
+        let trace = compareParallelTrace(config, []);
+        for (const type of events) {
+          try {
+            trace = compareParallelTrace(config, [...accepted, { type }]);
+            accepted.push({ type });
+          } catch (error) {
+            if (
+              !(error instanceof Error) ||
+              !/^Unsupported step/.test(error.message)
+            )
+              throw error;
+            stats.refused++;
+            const reason = /\((.*)\)$/.exec(error.message)?.[1] ?? 'single';
+            stats.reasons[reason] = (stats.reasons[reason] ?? 0) + 1;
+          }
+        }
+        for (const step of trace.slice(1)) {
+          if (multi && step.selections > 0) stats.nestedSteps++;
+          if (step.narrowing > 0) stats.narrowedSteps++;
+          if (step.narrowing > 1) stats.deepNarrowing++;
+          if (step.parallelFallback) stats.parallelFallback++;
+          if (step.enteredParallels > 1) stats.deepEntries++;
+          if (step.exitedParallels > 1) stats.deepExits++;
+        }
+      }
+    ),
+    {
+      seed: 6113,
+      numRuns: 400,
+      interruptAfterTimeLimit: 4000,
+      markInterruptAsFailure: true
+    }
+  );
+  console.info('nested parallel step coverage', stats);
+  expect(stats.multiParallel).toBeGreaterThan(stats.runs / 4);
+  expect(stats.nestedSteps).toBeGreaterThan(stats.runs / 2);
+  expect(stats.deepNarrowing).toBeGreaterThan(0);
+  expect(stats.parallelFallback).toBeGreaterThan(0);
+  expect(stats.deepEntries).toBeGreaterThan(0);
+  expect(stats.deepExits).toBeGreaterThan(0);
+  expect(
+    stats.reasons['simultaneous selections with several parallel nodes']
+  ).toBeGreaterThan(0);
 });

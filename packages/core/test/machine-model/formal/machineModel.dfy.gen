@@ -415,6 +415,7 @@ function exiting(nodes: map<string, CompoundNode>, domain: seq<string>, reentere
 }
 
 function narrow(parallels: seq<string>, target: seq<string>, domain: seq<string>): seq<string>
+  decreases (|target| - |domain|)
 {
   if ((|domain| == 0) || !(below(target, domain))) then
     domain
@@ -422,7 +423,7 @@ function narrow(parallels: seq<string>, target: seq<string>, domain: seq<string>
     if !((domain[(|domain| - 1)] in parallels)) then
       domain
     else
-      target[0..(|domain| + 1)]
+      narrow(parallels, target, target[0..(|domain| + 1)])
 }
 
 function transitionDomain(parallels: seq<string>, source: seq<string>, target: seq<string>, reenter: bool): seq<string>
@@ -452,69 +453,50 @@ function runLifecycle(nodes: map<string, CompoundNode>, path: seq<string>, conte
     lifecycle(nodes, path, context, event, exiting)
 }
 
-function leafSelection(nodes: map<string, CompoundNode>, id: string, base: int, context: map<string, int>, event: Event): Option<Selection>
+function ownSelection(nodes: map<string, CompoundNode>, id: string, context: map<string, int>, event: Event): Option<Selection>
 {
   if !((id in nodes)) then
     None
   else
-    var node := lookupNode(nodes, id);
-    if (((|node.children| > 0) || (base < 0)) || (base > |node.path|)) then
-      None
-    else
-      var path := node.path[base..];
-      if !(declaredPath(nodes, path)) then
-        None
-      else
-        select(nodes, path, context, event)
+    select(nodes, [id], context, event)
 }
 
-function regionSelections(nodes: map<string, CompoundNode>, active: seq<string>, base: int, context: map<string, int>, event: Event): seq<Selection>
-  decreases |active|
+function handledBelow(nodes: map<string, CompoundNode>, active: seq<string>, path: seq<string>, context: map<string, int>, event: Event): bool
 {
-  if (|active| == 0) then
+  (exists id :: id in active && (((id in nodes) && below(lookupNode(nodes, id).path, path)) && (match ownSelection(nodes, id, context, event) { case Some(i_) => true case None => false })))
+}
+
+function enabledSelections(nodes: map<string, CompoundNode>, active: seq<string>, candidates: seq<string>, context: map<string, int>, event: Event): seq<Selection>
+  decreases |candidates|
+{
+  if (|candidates| == 0) then
     []
   else
-    var first := leafSelection(nodes, active[0], base, context, event);
-    var rest := regionSelections(nodes, active[1..], base, context, event);
-    match first {
-      case Some(i_first_val) =>
-        ([i_first_val] + rest)
-      case None =>
-        rest
-    }
-}
-
-lemma regionSelections_ensures(nodes: map<string, CompoundNode>, active: seq<string>, base: int, context: map<string, int>, event: Event)
-  ensures ((|active| == 0) ==> (|regionSelections(nodes, active, base, context, event)| == 0))
-{
-}
-
-function activeParallel(machine: ParallelMachine, active: seq<string>): seq<string>
-{
-  if (|machine.parallels| != 1) then
-    []
-  else
-    var parallel := machine.parallels[0];
-    if (!((parallel in active)) || !((parallel in machine.nodes))) then
-      []
+    var rest := enabledSelections(nodes, active, candidates[1..], context, event);
+    var id := candidates[0];
+    if !((id in nodes)) then
+      rest
     else
-      lookupNode(machine.nodes, parallel).path
+      var own := ownSelection(nodes, id, context, event);
+      match own {
+        case Some(i_own_val) =>
+          if handledBelow(nodes, active, lookupNode(nodes, id).path, context, event) then
+            rest
+          else
+            ([i_own_val] + rest)
+        case None =>
+          rest
+      }
+}
+
+lemma enabledSelections_ensures(nodes: map<string, CompoundNode>, active: seq<string>, candidates: seq<string>, context: map<string, int>, event: Event)
+  ensures ((|candidates| == 0) ==> (|enabledSelections(nodes, active, candidates, context, event)| == 0))
+{
 }
 
 function parallelSelections(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): seq<Selection>
 {
-  var parallelPath := activeParallel(machine, snapshot.active);
-  var regions := regionSelections(machine.nodes, snapshot.active, |parallelPath|, snapshot.context, event);
-  if ((|regions| > 0) || !(declaredPath(machine.nodes, parallelPath))) then
-    regions
-  else
-    var fallback := select(machine.nodes, parallelPath, snapshot.context, event);
-    match fallback {
-      case Some(i_fallback_val) =>
-        [i_fallback_val]
-      case None =>
-        []
-    }
+  enabledSelections(machine.nodes, snapshot.active, snapshot.active, snapshot.context, event)
 }
 
 function parallelReady(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): bool
@@ -751,12 +733,12 @@ function multiReady(machine: ParallelMachine, active: seq<string>, selections: s
 
 function parallelStepReady(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): bool
 {
-  if (|machine.parallels| > 1) then
-    false
+  var selections := parallelSelections(machine, snapshot, event);
+  if (|selections| < 2) then
+    parallelReady(machine, snapshot, event)
   else
-    var selections := parallelSelections(machine, snapshot, event);
-    if (|selections| < 2) then
-      parallelReady(machine, snapshot, event)
+    if (|machine.parallels| > 1) then
+      false
     else
       multiReady(machine, snapshot.active, selections)
 }

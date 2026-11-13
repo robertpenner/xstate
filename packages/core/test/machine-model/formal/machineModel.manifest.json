@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 465,
+  "verifiedCount": 472,
   "functions": [
     "mergePatch",
     "apply",
@@ -27,9 +27,9 @@
     "narrow",
     "transitionDomain",
     "runLifecycle",
-    "leafSelection",
-    "regionSelections",
-    "activeParallel",
+    "ownSelection",
+    "handledBelow",
+    "enabledSelections",
     "parallelSelections",
     "parallelReady",
     "parallelInitialTransition",
@@ -72,7 +72,7 @@
     "below_ensures",
     "samePath_ensures",
     "completes_ensures",
-    "regionSelections_ensures",
+    "enabledSelections_ensures",
     "parallelInitialTransition_ensures",
     "parallelTransition_ensures",
     "selectionPlans_ensures",
@@ -168,7 +168,6 @@
     "PathPrefixes",
     "AncestorsActive",
     "SelectSource",
-    "RegionSourcesActive",
     "SelectionSourcesActive",
     "NarrowActive",
     "DomainActive",
@@ -267,7 +266,11 @@
     "SelectionPlanMembers",
     "ReadyMovingDomainsApart",
     "InitialChildren",
-    "MultipleParallelStepsRefused"
+    "MultipleParallelSelectionsRefused",
+    "NarrowMeaning",
+    "OwnSelectionMeaning",
+    "EnabledSelectionMeaning",
+    "HandledBelowMeaning"
   ],
   "defects": [
     {
@@ -419,6 +422,21 @@
       "name": "nested parallel initialization enters in reverse document order",
       "before": "  const entries = machine.order.filter((id) =>\n    entering(nodes, parallels, target, [], undefined, id)\n  );",
       "after": "  const entries = (\n    parallels.length > 1 ? reverse(machine.order) : machine.order\n  ).filter((id) => entering(nodes, parallels, target, [], undefined, id));"
+    },
+    {
+      "name": "narrowing stops after one parallel level",
+      "before": "  return narrow(parallels, target, target.slice(0, domain.length + 1));",
+      "after": "  return target.slice(0, domain.length + 1);"
+    },
+    {
+      "name": "selection ignores handlers below the candidate",
+      "before": "    own === undefined ||\n    handledBelow(nodes, active, lookupNode(nodes, id).path, context, event)\n  )",
+      "after": "    own === undefined\n  )"
+    },
+    {
+      "name": "selection defers to handlers above the candidate",
+      "before": "      below(lookupNode(nodes, id).path, path) &&\n      ownSelection(nodes, id, context, event) !== undefined",
+      "after": "      below(path, lookupNode(nodes, id).path) &&\n      ownSelection(nodes, id, context, event) !== undefined"
     }
   ],
   "proofDefects": [

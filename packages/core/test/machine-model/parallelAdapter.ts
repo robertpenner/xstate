@@ -140,7 +140,16 @@ export function compareParallelTrace(config: Config, events: readonly Event[]) {
     };
   }
   const trace = [
-    { ...compare(undefined), selections: 0, kept: 0, nestedDomains: false }
+    {
+      ...compare(undefined),
+      selections: 0,
+      kept: 0,
+      nestedDomains: false,
+      narrowing: 0,
+      parallelFallback: false,
+      enteredParallels: 0,
+      exitedParallels: 0
+    }
   ];
   for (const event of events) {
     const previous = actual;
@@ -181,15 +190,63 @@ export function compareParallelTrace(config: Config, events: readonly Event[]) {
           model.comparable(plan.domain, other.domain)
       )
     );
+    const { nodes, parallels } = machine;
+    const active = expected.snapshot.active;
+    // How many parallel levels a domain descends below the lowest common
+    // compound ancestor of source and target.
+    const narrowing = Math.max(
+      0,
+      ...keptSelections.map((selection) => {
+        const result = selection.evaluation.result;
+        const target = result?.target;
+        if (result === undefined || target === undefined || !(target in nodes))
+          return 0;
+        const source = nodes[selection.id].path;
+        const targetPath = nodes[target].path;
+        return (
+          model.transitionDomain(parallels, source, targetPath, result.reenter)
+            .length -
+          model.transitionDomain([], source, targetPath, result.reenter).length
+        );
+      })
+    );
+    const parallelFallback = selected.some(
+      (selection) =>
+        parallels.includes(selection.id) &&
+        active.some(
+          (id) =>
+            model.below(nodes[id].path, nodes[selection.id].path) &&
+            nodes[id].on.has(event.type)
+        )
+    );
+    const countParallels = (ids: readonly string[]) =>
+      ids.filter((id) => parallels.includes(id)).length;
+    const enteredParallels = Math.max(
+      0,
+      ...plans.map((plan) => countParallels(plan.entries))
+    );
+    const exitedParallels = Math.max(
+      0,
+      ...plans.map((plan) => countParallels(plan.exits))
+    );
     expected = model.parallelStep(machine, expected.snapshot, modelEvent);
     [actual, actualEffects] = transition(runtime, actual, event);
-    trace.push({ ...compare(previous), selections, kept, nestedDomains });
+    trace.push({
+      ...compare(previous),
+      selections,
+      kept,
+      nestedDomains,
+      narrowing,
+      parallelFallback,
+      enteredParallels,
+      exitedParallels
+    });
   }
   return trace;
 }
 
 export type RefusalReason =
-  | 'multiple parallel nodes'
+  | 'simultaneous selections with several parallel nodes'
   | 'unknown target'
   | 'active region target'
   | 'comparable sources';
@@ -201,8 +258,9 @@ export function refusalReason(
   snapshot: model.ParallelSnapshot,
   event: model.Event
 ): RefusalReason {
-  if (machine.parallels.length > 1) return 'multiple parallel nodes';
   const selections = model.parallelSelections(machine, snapshot, event);
+  if (selections.length > 1 && machine.parallels.length > 1)
+    return 'simultaneous selections with several parallel nodes';
   for (const selection of selections) {
     const result = selection.evaluation.result;
     const target = result?.target;
