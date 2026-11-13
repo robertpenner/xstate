@@ -205,6 +205,9 @@ the Dafny files, and the manifest are unchanged since `1d2b483`, whose
 Dafny, and manifest unchanged since. `gh pr checks 29`: `build` passed
 (10m47s) on `32d26f4` after the PR was marked ready.
 
+**Elapsed:** 4h 30m 30s, from `Started:` (10:21:28 UTC) to the completion
+commit `361d434` (`git log -1 --format=%cI`: 2026-11-13T09:51:58-05:00).
+
 **Pre-existing failures:** none observed in the final runs. Earlier,
 `declarations.test.ts` hit a 60-second hook timeout once in `pnpm test:core`
 under load and passed when rerun alone (recorded under #25).
