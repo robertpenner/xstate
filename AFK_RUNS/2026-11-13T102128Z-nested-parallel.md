@@ -5,7 +5,7 @@
 **Branch:** `machine-nested-parallel-25-27`, in the sibling worktree
 `xstate-nested-parallel`, based on `machine-formalized` at `886402a`.
 
-**Pull request:** not yet created
+**Pull request:** [robertpenner/xstate#29](https://github.com/robertpenner/xstate/pull/29) (draft)
 
 **Started:** 2026-11-13 10:21:28 UTC
 
@@ -16,14 +16,14 @@ Dafny laws, seeded model defects, differential tests, and runtime mutations.
 
 **Execution:** sequential.
 
-**Verified integration head:** `95e824d` (#25).
+**Verified integration head:** `58455e3` (#26).
 
 ### Slice progress
 
 | Issue                                                   | Slice                                    | Status      | Blocked by / reason | Integration commit | Verification       |
 | ------------------------------------------------------- | ---------------------------------------- | ----------- | ------------------- | ------------------ | ------------------ |
 | [#25](https://github.com/robertpenner/xstate/issues/25) | Initialization                           | integrated/verified |                     | `773e55c`, `95e824d` | see evidence below |
-| [#26](https://github.com/robertpenner/xstate/issues/26) | Single-selection transitions             | pending     | #25                 |                    |                    |
+| [#26](https://github.com/robertpenner/xstate/issues/26) | Single-selection transitions             | integrated/verified |                     | `5e692fc`, `58455e3` | see evidence below |
 | [#27](https://github.com/robertpenner/xstate/issues/27) | Simultaneous transitions across regions  | pending     | #26                 |                    |                    |
 
 ### Verification evidence
@@ -61,13 +61,41 @@ Checks ran on the exact uncommitted tree committed as those two commits.
   20 tests passed. The file emits TypeScript declarations and does not use the
   machine model.
 
+**#26 (`5e692fc` model, proofs, adapter, tests, mutations; `58455e3` README).**
+Brief: [#26 comment](https://github.com/robertpenner/xstate/issues/26#issuecomment-6852049072).
+Checks ran on the exact uncommitted tree committed as those two commits,
+except that the property 3 run count was then lowered from 800 to 400 (below)
+and `pnpm test:machine-model`, `pnpm test:core`, and `pnpm format:check`
+were rerun on the final tree. The property change does not touch the Dafny
+inputs.
+
+- `pnpm verify:machine-model` (`MACHINE_MODEL_VERIFY_TIMEOUT_MS=600000`, run
+  alone): 472 verified, 0 errors; 11 proof weakenings and 33 defects
+  rejected; freshness, additions-only inventory and refactor verified; exit 0.
+- `pnpm test:machine-model:runtime-defects` (run alone): all 11 runtime
+  mutations rejected, exit 0.
+- `pnpm test:machine-model`: 143 tests passed.
+- New property 3 at seed 6113, 400 runs: 319 machines with more than one
+  parallel node, 346 compared steps with a selection on such machines, 50
+  narrowed steps (9 through two or more parallel levels), 10 parallel
+  fallbacks, 39 deep entries, 31 deep exits, 1112 dropped events (744
+  simultaneous selections with several parallel nodes, 368 active-region
+  targets). At 800 runs it took 1.7 s alone, but in the full suite under a
+  machine load average near 90 fast-check interrupted it at its 4000 ms limit
+  after 146 runs (and after 202 in `test:core`); at 400 runs it took 990 ms
+  alone and passed in both suites.
+- `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm build`: exit 0.
+- `pnpm test:tooling`: 28 tests passed.
+- `pnpm test:core`: 3097 passed, 29 skipped, 3 todo; exit 0. The first run
+  also hit the known `test/declarations.test.ts` hook timeout.
+
 ### Recovery
 
 Not resumed.
 
 ### Publication at stop or handoff
 
-**Published head:** not yet published.
+**Published head:** `58455e3`.
 
 **Unverified checkpoint:** none.
 
@@ -83,4 +111,4 @@ Not resumed.
 
 **Findings:** pending until reviewed.
 
-**Remaining blockers:** #26 and #27 not started.
+**Remaining blockers:** #27 not started.
