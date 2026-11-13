@@ -414,7 +414,7 @@ export type ParallelMachine = {
   context: Record<string, number>;
   nodes: Record<string, CompoundNode>;
   order: readonly string[];
-  parallel: string | undefined;
+  parallels: readonly string[];
 };
 export type ParallelSnapshot = {
   active: readonly string[];
@@ -446,7 +446,7 @@ export function samePath(a: readonly string[], b: readonly string[]): boolean {
 
 export function completes(
   nodes: Record<string, CompoundNode>,
-  parallel: string | undefined,
+  parallels: readonly string[],
   target: readonly string[],
   path: readonly string[]
 ): boolean {
@@ -459,16 +459,16 @@ export function completes(
   const node = lookupNode(nodes, id);
   const child = path[1];
   const allowed =
-    id === parallel ||
+    parallels.includes(id) ||
     (below(target, node.path)
       ? child === target[node.path.length]
       : child === node.initial);
-  return allowed && completes(nodes, parallel, target, path.slice(1));
+  return allowed && completes(nodes, parallels, target, path.slice(1));
 }
 
 export function entering(
   nodes: Record<string, CompoundNode>,
-  parallel: string | undefined,
+  parallels: readonly string[],
   target: readonly string[],
   domain: readonly string[],
   extra: string | undefined,
@@ -482,7 +482,7 @@ export function entering(
     below(path, domain) &&
     completes(
       nodes,
-      parallel,
+      parallels,
       target,
       path.slice(domain.length === 0 ? 0 : domain.length - 1)
     )
@@ -502,32 +502,32 @@ export function exiting(
 }
 
 export function narrow(
-  parallel: string | undefined,
+  parallels: readonly string[],
   target: readonly string[],
   domain: readonly string[]
 ): readonly string[] {
   //@ verify
   if (domain.length === 0 || !below(target, domain)) return domain;
-  if (domain[domain.length - 1] !== parallel) return domain;
+  if (!parallels.includes(domain[domain.length - 1])) return domain;
   return target.slice(0, domain.length + 1);
 }
 
 export function transitionDomain(
-  parallel: string | undefined,
+  parallels: readonly string[],
   source: readonly string[],
   target: readonly string[],
   reenter: boolean
 ): readonly string[] {
   //@ verify
   if (commonPrefix(source, target) === source.length) {
-    return reenter ? source : narrow(parallel, target, source);
+    return reenter ? source : narrow(parallels, target, source);
   }
   if (target.length === 0) return [];
   const ancestors = target.slice(0, target.length - 1);
   const lca = commonPrefix(source, ancestors);
   if (reenter) return source.slice(0, lca);
   return narrow(
-    parallel,
+    parallels,
     target,
     lca === 0 ? target.slice(0, 1) : source.slice(0, lca)
   );
@@ -583,13 +583,11 @@ export function activeParallel(
   active: readonly string[]
 ): readonly string[] {
   //@ verify
-  const parallel = machine.parallel;
-  if (
-    parallel === undefined ||
-    !active.includes(parallel) ||
-    !(parallel in machine.nodes)
-  )
-    return [];
+  // Region-first selection is defined only for a sole parallel node; steps on
+  // machines with several parallel nodes are refused by `parallelStepReady`.
+  if (machine.parallels.length !== 1) return [];
+  const parallel = machine.parallels[0];
+  if (!active.includes(parallel) || !(parallel in machine.nodes)) return [];
   return lookupNode(machine.nodes, parallel).path;
 }
 
@@ -630,7 +628,7 @@ export function parallelReady(
   const targetPath = lookupNode(machine.nodes, target).path;
   if (targetPath.length < 2) return true;
   return !(
-    targetPath[targetPath.length - 2] === machine.parallel &&
+    machine.parallels.includes(targetPath[targetPath.length - 2]) &&
     snapshot.active.includes(target)
   );
 }
@@ -642,11 +640,11 @@ export function parallelInitialTransition(
   //@ verify
   //@ ensures !\result.snapshotReused
   const nodes = machine.nodes;
-  const parallel = machine.parallel;
+  const parallels = machine.parallels;
   const target =
     machine.root in nodes ? lookupNode(nodes, machine.root).path : [];
   const entries = machine.order.filter((id) =>
-    entering(nodes, parallel, target, [], undefined, id)
+    entering(nodes, parallels, target, [], undefined, id)
   );
   const entered = runLifecycle(nodes, entries, machine.context, event, false);
   return {
@@ -675,10 +673,10 @@ export function parallelPlan(
 ): ParallelPlan {
   //@ verify
   const nodes = machine.nodes;
-  const parallel = machine.parallel;
+  const parallels = machine.parallels;
   const sourcePath = source in nodes ? lookupNode(nodes, source).path : [];
   const targetPath = target in nodes ? lookupNode(nodes, target).path : [];
-  const domain = transitionDomain(parallel, sourcePath, targetPath, reenter);
+  const domain = transitionDomain(parallels, sourcePath, targetPath, reenter);
   const reentered =
     reenter && samePath(domain, sourcePath) ? source : undefined;
   const extra =
@@ -691,12 +689,12 @@ export function parallelPlan(
     active.filter((id) => exiting(nodes, domain, reentered, id))
   );
   const entries = machine.order.filter((id) =>
-    entering(nodes, parallel, targetPath, domain, extra, id)
+    entering(nodes, parallels, targetPath, domain, extra, id)
   );
   const next = machine.order.filter(
     (id) =>
       (active.includes(id) && !exiting(nodes, domain, reentered, id)) ||
-      entering(nodes, parallel, targetPath, domain, extra, id)
+      entering(nodes, parallels, targetPath, domain, extra, id)
   );
   return { domain, reentered, extra, exits, entries, active: next };
 }
@@ -887,7 +885,7 @@ export function selectionReady(
   const targetPath = lookupNode(machine.nodes, target).path;
   if (targetPath.length < 2) return true;
   return !(
-    targetPath[targetPath.length - 2] === machine.parallel &&
+    machine.parallels.includes(targetPath[targetPath.length - 2]) &&
     active.includes(target)
   );
 }
@@ -954,6 +952,7 @@ export function parallelStepReady(
   event: Event
 ): boolean {
   //@ verify
+  if (machine.parallels.length > 1) return false;
   const selections = parallelSelections(machine, snapshot, event);
   if (selections.length < 2) return parallelReady(machine, snapshot, event);
   return multiReady(machine, snapshot.active, selections);

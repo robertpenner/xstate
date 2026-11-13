@@ -140,3 +140,117 @@ it('compares generated single-parallel trees, targets and event traces', () => {
   expect(stats.nestedDomainSteps).toBeGreaterThan(0);
   expect(stats.mixedRegions).toBeGreaterThan(0);
 });
+
+it('compares generated initialization of multiple and nested parallel trees', () => {
+  const stats = {
+    runs: 0,
+    multipleActiveParallel: 0,
+    siblingActiveParallel: 0,
+    maxNestedParallelDepth: 0,
+    inactiveParallel: 0,
+    refusedSteps: 0
+  };
+  fc.assert(
+    fc.property(
+      fc.integer({ min: 2, max: 4 }),
+      fc.array(fc.integer({ min: 0, max: 100 }), {
+        minLength: 80,
+        maxLength: 80
+      }),
+      fc.boolean(),
+      (depth, numbers, step) => {
+        const all: State[] = [];
+        const parallelIds = new Set<string>();
+        const parentOf = new Map<string, string>();
+        function tree(level: number, parent?: string): State {
+          const index = all.length;
+          const id = `id${index}`;
+          if (parent !== undefined) parentOf.set(id, parent);
+          const node: State = {
+            id,
+            entry: ({ context }, enq) => {
+              enq(effect, 'entry', index, context.trail);
+              return {
+                context: { trail: (Number(context.trail) * 7 + index) % 1e9 }
+              };
+            }
+          };
+          all.push(node);
+          const n = numbers[index % numbers.length];
+          if (level < depth && (level === 0 || n % 4 !== 0)) {
+            const states: Record<string, State> = { x: tree(level + 1, id) };
+            if (n % 2 === 0) states.y = tree(level + 1, id);
+            if (n % 5 === 0) states.z = tree(level + 1, id);
+            node.states = states;
+            if (n % 3 !== 1) {
+              node.type = 'parallel';
+              parallelIds.add(id);
+            } else {
+              node.initial = n % 2 === 0 && n % 7 === 0 ? 'y' : 'x';
+            }
+          }
+          return node;
+        }
+        const root = tree(0);
+        const config: Config = { ...root, context: { trail: 0 } };
+        for (const node of all) node.on = { go: { target: '#id0' } };
+        stats.runs++;
+        const trace = (() => {
+          try {
+            return compareParallelTrace(config, step ? [{ type: 'go' }] : []);
+          } catch (error) {
+            if (
+              !step ||
+              !(error instanceof Error) ||
+              error.message !== 'Unsupported step: go (multiple parallel nodes)'
+            )
+              throw error;
+            stats.refusedSteps++;
+            return compareParallelTrace(config, []);
+          }
+        })();
+        if (step && parallelIds.size > 1) expect(trace).toHaveLength(1);
+        const active = new Set(trace[0].active);
+        const activeParallel = [...parallelIds].filter((id) => active.has(id));
+        if (activeParallel.length < parallelIds.size) stats.inactiveParallel++;
+        if (activeParallel.length > 1) stats.multipleActiveParallel++;
+        let deepest = 0;
+        for (const id of activeParallel) {
+          let nested = 1;
+          for (let p = parentOf.get(id); p !== undefined; p = parentOf.get(p))
+            if (parallelIds.has(p)) nested++;
+          deepest = Math.max(deepest, nested);
+        }
+        const isAncestor = (ancestor: string, id: string): boolean => {
+          for (let p = parentOf.get(id); p !== undefined; p = parentOf.get(p))
+            if (p === ancestor) return true;
+          return false;
+        };
+        if (
+          activeParallel.some((a) =>
+            activeParallel.some(
+              (b) => a < b && !isAncestor(a, b) && !isAncestor(b, a)
+            )
+          )
+        )
+          stats.siblingActiveParallel++;
+        stats.maxNestedParallelDepth = Math.max(
+          stats.maxNestedParallelDepth,
+          deepest
+        );
+      }
+    ),
+    {
+      seed: 2541,
+      numRuns: 300,
+      interruptAfterTimeLimit: 4000,
+      markInterruptAsFailure: true
+    }
+  );
+  console.info('nested parallel initialization coverage', stats);
+  expect(stats.multipleActiveParallel).toBeGreaterThan(stats.runs / 4);
+  expect(stats.siblingActiveParallel).toBeGreaterThan(stats.runs / 20);
+  expect(stats.maxNestedParallelDepth).toBeGreaterThan(2);
+  expect(stats.inactiveParallel).toBeGreaterThan(0);
+  expect(stats.refusedSteps).toBeGreaterThan(0);
+});

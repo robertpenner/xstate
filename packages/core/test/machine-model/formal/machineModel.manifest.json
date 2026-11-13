@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 462,
+  "verifiedCount": 465,
   "functions": [
     "mergePatch",
     "apply",
@@ -265,7 +265,9 @@
     "ReadyAtomicPlanExits",
     "NestedMovingPlansOverlap",
     "SelectionPlanMembers",
-    "ReadyMovingDomainsApart"
+    "ReadyMovingDomainsApart",
+    "InitialChildren",
+    "MultipleParallelStepsRefused"
   ],
   "defects": [
     {
@@ -355,8 +357,8 @@
     },
     {
       "name": "parallel enters only its first region",
-      "before": "    id === parallel ||\n",
-      "after": "    (id === parallel && node.children.length > 0 && child === node.children[0]) ||\n"
+      "before": "    parallels.includes(id) ||\n",
+      "after": "    (parallels.includes(id) && node.children.length > 0 && child === node.children[0]) ||\n"
     },
     {
       "name": "atomic descendants stay active after their parallel ancestor exits",
@@ -365,8 +367,8 @@
     },
     {
       "name": "cross-region transition exits the source region",
-      "before": "  return narrow(\n    parallel,\n    target,\n    lca === 0",
-      "after": "  return narrow(\n    undefined,\n    target,\n    lca === 0"
+      "before": "  return narrow(\n    parallels,\n    target,\n    lca === 0",
+      "after": "  return narrow(\n    [],\n    target,\n    lca === 0"
     },
     {
       "name": "parallel exits run in document order",
@@ -402,6 +404,21 @@
       "name": "atomic inner domain survives an outer exit",
       "before": "      (active.includes(id) && !plansExit(plans, id)) || plansEnter(plans, id)\n  );\n  const exited",
       "after": "      (active.includes(id) && (!plansExit(plans, id) || plans.some((plan) => plan.domain.length > 0 && plan.domain[plan.domain.length - 1] === id && plan.exits.length === 0))) || plansEnter(plans, id)\n  );\n  const exited"
+    },
+    {
+      "name": "nested parallel enters only its first region",
+      "before": "    parallels.includes(id) ||\n",
+      "after": "    (parallels.includes(id) && (id === parallels[0] || child === node.children[0])) ||\n"
+    },
+    {
+      "name": "multiple parallels enter every compound child",
+      "before": "      : child === node.initial);",
+      "after": "      : child === node.initial || parallels.length > 1);"
+    },
+    {
+      "name": "nested parallel initialization enters in reverse document order",
+      "before": "  const entries = machine.order.filter((id) =>\n    entering(nodes, parallels, target, [], undefined, id)\n  );",
+      "after": "  const entries = (\n    parallels.length > 1 ? reverse(machine.order) : machine.order\n  ).filter((id) => entering(nodes, parallels, target, [], undefined, id));"
     }
   ],
   "proofDefects": [

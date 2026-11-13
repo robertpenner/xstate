@@ -48,7 +48,7 @@ datatype Selection = Selection(id: string, node: CompoundNode, evaluation: Evalu
 
 datatype CompoundStep = CompoundStep(snapshot: CompoundSnapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>)
 
-datatype ParallelMachine = ParallelMachine(root: string, context: map<string, int>, nodes: map<string, CompoundNode>, order: seq<string>, parallel: Option<string>)
+datatype ParallelMachine = ParallelMachine(root: string, context: map<string, int>, nodes: map<string, CompoundNode>, order: seq<string>, parallels: seq<string>)
 
 datatype ParallelSnapshot = ParallelSnapshot(active: seq<string>, context: map<string, int>)
 
@@ -974,23 +974,23 @@ lemma samePath_ensures(a: seq<string>, b: seq<string>)
 {
 }
 
-function completes(nodes: map<string, CompoundNode>, parallel: Option<string>, target: seq<string>, path: seq<string>): bool
+function completes(nodes: map<string, CompoundNode>, parallels: seq<string>, target: seq<string>, path: seq<string>): bool
   decreases |path|
 {
-  ((|path| < 2) || (var id := path[0]; (if !((id in nodes)) then false else (var node := lookupNode(nodes, id); (var child := path[1]; (var allowed := ((match parallel { case Some(i_value) => (i_value == id) case None => false }) || (if below(target, node.path) then (child == target[|node.path|]) else (match node.initial { case Some(i_value) => (i_value == child) case None => false }))); (allowed && completes(nodes, parallel, target, path[1..]))))))))
+  ((|path| < 2) || (var id := path[0]; (if !((id in nodes)) then false else (var node := lookupNode(nodes, id); (var child := path[1]; (var allowed := ((id in parallels) || (if below(target, node.path) then (child == target[|node.path|]) else (match node.initial { case Some(i_value) => (i_value == child) case None => false }))); (allowed && completes(nodes, parallels, target, path[1..]))))))))
 }
 
-lemma completes_ensures(nodes: map<string, CompoundNode>, parallel: Option<string>, target: seq<string>, path: seq<string>)
-  ensures ((|path| < 2) ==> completes(nodes, parallel, target, path))
+lemma completes_ensures(nodes: map<string, CompoundNode>, parallels: seq<string>, target: seq<string>, path: seq<string>)
+  ensures ((|path| < 2) ==> completes(nodes, parallels, target, path))
 {
 }
 
-function entering(nodes: map<string, CompoundNode>, parallel: Option<string>, target: seq<string>, domain: seq<string>, extra: Option<string>, id: string): bool
+function entering(nodes: map<string, CompoundNode>, parallels: seq<string>, target: seq<string>, domain: seq<string>, extra: Option<string>, id: string): bool
 {
   if !((id in nodes)) then
     false
   else
-    ((match extra { case Some(i_value) => (i_value == id) case None => false }) || (var path := lookupNode(nodes, id).path; (below(path, domain) && completes(nodes, parallel, target, path[(if (|domain| == 0) then 0 else (|domain| - 1))..]))))
+    ((match extra { case Some(i_value) => (i_value == id) case None => false }) || (var path := lookupNode(nodes, id).path; (below(path, domain) && completes(nodes, parallels, target, path[(if (|domain| == 0) then 0 else (|domain| - 1))..]))))
 }
 
 function exiting(nodes: map<string, CompoundNode>, domain: seq<string>, reentered: Option<string>, id: string): bool
@@ -1001,24 +1001,24 @@ function exiting(nodes: map<string, CompoundNode>, domain: seq<string>, reentere
     ((match reentered { case Some(i_value) => (i_value == id) case None => false }) || below(lookupNode(nodes, id).path, domain))
 }
 
-function narrow(parallel: Option<string>, target: seq<string>, domain: seq<string>): seq<string>
+function narrow(parallels: seq<string>, target: seq<string>, domain: seq<string>): seq<string>
 {
   if ((|domain| == 0) || !(below(target, domain))) then
     domain
   else
-    if (match parallel { case Some(i_value) => (i_value != domain[(|domain| - 1)]) case None => true }) then
+    if !((domain[(|domain| - 1)] in parallels)) then
       domain
     else
       target[0..(|domain| + 1)]
 }
 
-function transitionDomain(parallel: Option<string>, source: seq<string>, target: seq<string>, reenter: bool): seq<string>
+function transitionDomain(parallels: seq<string>, source: seq<string>, target: seq<string>, reenter: bool): seq<string>
 {
   if (commonPrefix(source, target) == |source|) then
     if reenter then
       source
     else
-      narrow(parallel, target, source)
+      narrow(parallels, target, source)
   else
     if (|target| == 0) then
       []
@@ -1028,7 +1028,7 @@ function transitionDomain(parallel: Option<string>, source: seq<string>, target:
       if reenter then
         source[0..lca]
       else
-        narrow(parallel, target, (if (lca == 0) then target[0..1] else source[0..lca]))
+        narrow(parallels, target, (if (lca == 0) then target[0..1] else source[0..lca]))
 }
 
 function runLifecycle(nodes: map<string, CompoundNode>, path: seq<string>, context: map<string, int>, event: Event, exiting: bool): Applied
@@ -1078,16 +1078,14 @@ lemma regionSelections_ensures(nodes: map<string, CompoundNode>, active: seq<str
 
 function activeParallel(machine: ParallelMachine, active: seq<string>): seq<string>
 {
-  var parallel := machine.parallel;
-  match parallel {
-    case Some(i_parallel_val) =>
-      if (!((i_parallel_val in active)) || !((i_parallel_val in machine.nodes))) then
-        []
-      else
-        lookupNode(machine.nodes, i_parallel_val).path
-    case None =>
+  if (|machine.parallels| != 1) then
+    []
+  else
+    var parallel := machine.parallels[0];
+    if (!((parallel in active)) || !((parallel in machine.nodes))) then
       []
-  }
+    else
+      lookupNode(machine.nodes, parallel).path
 }
 
 function parallelSelections(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): seq<Selection>
@@ -1109,15 +1107,15 @@ function parallelSelections(machine: ParallelMachine, snapshot: ParallelSnapshot
 function parallelReady(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): bool
 {
   var selections := parallelSelections(machine, snapshot, event);
-  ((|selections| == 0) || (if (|selections| > 1) then false else (var result := selections[0].evaluation.result; (match result { case Some(i_result_val) => (var target := i_result_val.target; (match target { case Some(i_target_val) => (if !((i_target_val in machine.nodes)) then false else (var targetPath := lookupNode(machine.nodes, i_target_val).path; ((|targetPath| < 2) || !(((match machine.parallel { case Some(i_value) => (i_value == targetPath[(|targetPath| - 2)]) case None => false }) && (i_target_val in snapshot.active)))))) case None => true })) case None => true }))))
+  ((|selections| == 0) || (if (|selections| > 1) then false else (var result := selections[0].evaluation.result; (match result { case Some(i_result_val) => (var target := i_result_val.target; (match target { case Some(i_target_val) => (if !((i_target_val in machine.nodes)) then false else (var targetPath := lookupNode(machine.nodes, i_target_val).path; ((|targetPath| < 2) || !(((targetPath[(|targetPath| - 2)] in machine.parallels) && (i_target_val in snapshot.active)))))) case None => true })) case None => true }))))
 }
 
 function parallelInitialTransition(machine: ParallelMachine, event: Event): ParallelStep
 {
   var nodes := machine.nodes;
-  var parallel := machine.parallel;
+  var parallels := machine.parallels;
   var target := (if (machine.root in nodes) then lookupNode(nodes, machine.root).path else []);
-  var entries := SeqFilter((id: string) => entering(nodes, parallel, target, [], None, id), machine.order);
+  var entries := SeqFilter((id: string) => entering(nodes, parallels, target, [], None, id), machine.order);
   var entered := runLifecycle(nodes, entries, machine.context, event, false);
   ParallelStep(ParallelSnapshot(entries, entered.context), false, entered.reused, entered.effects)
 }
@@ -1130,15 +1128,15 @@ lemma parallelInitialTransition_ensures(machine: ParallelMachine, event: Event)
 function parallelPlan(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool): ParallelPlan
 {
   var nodes := machine.nodes;
-  var parallel := machine.parallel;
+  var parallels := machine.parallels;
   var sourcePath := (if (source in nodes) then lookupNode(nodes, source).path else []);
   var targetPath := (if (target in nodes) then lookupNode(nodes, target).path else []);
-  var domain := transitionDomain(parallel, sourcePath, targetPath, reenter);
+  var domain := transitionDomain(parallels, sourcePath, targetPath, reenter);
   var reentered := (if (reenter && samePath(domain, sourcePath)) then Option.Some(source) else Option.None);
   var extra := (match reentered { case Some(i_reentered_val) => Option.Some(i_reentered_val) case None => (if (samePath(domain, targetPath) && (target != source)) then Option.Some(target) else Option.None) });
   var exits := reverse(SeqFilter((id: string) => exiting(nodes, domain, reentered, id), active));
-  var entries := SeqFilter((id: string) => entering(nodes, parallel, targetPath, domain, extra, id), machine.order);
-  var next := SeqFilter((id: string) => (((id in active) && !(exiting(nodes, domain, reentered, id))) || entering(nodes, parallel, targetPath, domain, extra, id)), machine.order);
+  var entries := SeqFilter((id: string) => entering(nodes, parallels, targetPath, domain, extra, id), machine.order);
+  var next := SeqFilter((id: string) => (((id in active) && !(exiting(nodes, domain, reentered, id))) || entering(nodes, parallels, targetPath, domain, extra, id)), machine.order);
   ParallelPlan(domain, reentered, extra, exits, entries, next)
 }
 
@@ -1300,7 +1298,7 @@ function selectionReady(machine: ParallelMachine, active: seq<string>, selection
             false
           else
             var targetPath := lookupNode(machine.nodes, i_target_val).path;
-            ((|targetPath| < 2) || !(((match machine.parallel { case Some(i_value) => (i_value == targetPath[(|targetPath| - 2)]) case None => false }) && (i_target_val in active))))
+            ((|targetPath| < 2) || !(((targetPath[(|targetPath| - 2)] in machine.parallels) && (i_target_val in active))))
         case None =>
           true
       }
@@ -1340,11 +1338,14 @@ function multiReady(machine: ParallelMachine, active: seq<string>, selections: s
 
 function parallelStepReady(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): bool
 {
-  var selections := parallelSelections(machine, snapshot, event);
-  if (|selections| < 2) then
-    parallelReady(machine, snapshot, event)
+  if (|machine.parallels| > 1) then
+    false
   else
-    multiReady(machine, snapshot.active, selections)
+    var selections := parallelSelections(machine, snapshot, event);
+    if (|selections| < 2) then
+      parallelReady(machine, snapshot, event)
+    else
+      multiReady(machine, snapshot.active, selections)
 }
 
 function parallelStep(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): ParallelStep
@@ -1383,7 +1384,7 @@ ghost predicate ParallelNodeShape(machine: ParallelMachine, id: string)
     id in machine.nodes[path[|path| - 2]].children) &&
   (forall child :: child in node.children ==>
     child in machine.nodes && machine.nodes[child].path == path + [child]) &&
-  (if machine.parallel == Some(id) then node.initial == None && |node.children| > 0
+  (if id in machine.parallels then node.initial == None && |node.children| > 0
    else (node.initial == None <==> |node.children| == 0) &&
         (node.initial.Some? ==> node.initial.value in node.children))
 }
@@ -1392,7 +1393,7 @@ ghost predicate ParallelWellFormed(machine: ParallelMachine)
 {
   machine.root in machine.nodes && machine.nodes[machine.root].path == [machine.root] &&
   (forall id :: id in machine.nodes ==> ParallelNodeShape(machine, id)) &&
-  (machine.parallel.Some? ==> machine.parallel.value in machine.nodes) &&
+  (forall p :: p in machine.parallels ==> p in machine.nodes) &&
   (forall i, j :: 0 <= i < j < |machine.order| ==> machine.order[i] != machine.order[j]) &&
   (forall id :: id in machine.order <==> id in machine.nodes)
 }
@@ -1407,7 +1408,7 @@ ghost predicate ChildrenActive(machine: ParallelMachine, active: seq<string>, id
   requires id in machine.nodes
 {
   var children := machine.nodes[id].children;
-  if machine.parallel == Some(id) then (forall child :: child in children ==> child in active)
+  if id in machine.parallels then (forall child :: child in children ==> child in active)
   else (|children| == 0 ||
     exists child :: child in children && child in active &&
       forall other :: other in children && other in active ==> other == child)
@@ -1430,11 +1431,11 @@ ghost predicate ActiveNodePath(machine: ParallelMachine, active: seq<string>, pa
    path[|path| - 1] in active)
 }
 
-ghost predicate Allowed(nodes: map<string, CompoundNode>, parallel: Option<string>,
+ghost predicate Allowed(nodes: map<string, CompoundNode>, parallels: seq<string>,
                         target: seq<string>, id: string, child: string)
   requires id in nodes
 {
-  parallel == Some(id) ||
+  id in parallels ||
   (if below(target, nodes[id].path) then child == target[|nodes[id].path|]
    else nodes[id].initial == Some(child))
 }
@@ -1584,19 +1585,19 @@ lemma BelowChild(parent: seq<string>, child: string, domain: seq<string>)
   }
 }
 
-lemma {:induction false} CompletesSnoc(nodes: map<string, CompoundNode>, parallel: Option<string>,
+lemma {:induction false} CompletesSnoc(nodes: map<string, CompoundNode>, parallels: seq<string>,
                                        target: seq<string>, path: seq<string>, child: string)
   requires |path| > 0
-  ensures completes(nodes, parallel, target, path + [child]) <==>
-    completes(nodes, parallel, target, path) && path[|path| - 1] in nodes &&
-    Allowed(nodes, parallel, target, path[|path| - 1], child)
+  ensures completes(nodes, parallels, target, path + [child]) <==>
+    completes(nodes, parallels, target, path) && path[|path| - 1] in nodes &&
+    Allowed(nodes, parallels, target, path[|path| - 1], child)
   decreases |path|
 {
   if |path| == 1 {
     assert (path + [child])[1..] == [child];
   } else {
     assert (path + [child])[1..] == path[1..] + [child];
-    CompletesSnoc(nodes, parallel, target, path[1..], child);
+    CompletesSnoc(nodes, parallels, target, path[1..], child);
     assert path[1..][|path| - 2] == path[|path| - 1];
   }
 }
@@ -1681,12 +1682,12 @@ lemma SelectionSourcesActive(machine: ParallelMachine, snapshot: ParallelSnapsho
 {
   var parallelPath := activeParallel(machine, snapshot.active);
   RegionSourcesActive(machine, snapshot.active, snapshot.active, |parallelPath|, snapshot.context, event);
-  if machine.parallel.Some? && machine.parallel.value in snapshot.active && declaredPath(machine.nodes, parallelPath) {
+  if |machine.parallels| == 1 && machine.parallels[0] in snapshot.active && declaredPath(machine.nodes, parallelPath) {
     SelectSource(machine.nodes, parallelPath, snapshot.context, event);
     var fallback := select(machine.nodes, parallelPath, snapshot.context, event);
     if fallback.Some? {
       var j :| 0 <= j < |parallelPath| && parallelPath[j] == fallback.value.id;
-      AncestorsActive(machine, snapshot.active, machine.parallel.value, j);
+      AncestorsActive(machine, snapshot.active, machine.parallels[0], j);
     }
   }
 }
@@ -1694,10 +1695,10 @@ lemma SelectionSourcesActive(machine: ParallelMachine, snapshot: ParallelSnapsho
 lemma NarrowActive(machine: ParallelMachine, active: seq<string>, target: string, domain: seq<string>)
   requires ParallelWellFormed(machine) && ParallelValid(machine, active) && target in machine.nodes
   requires ActiveNodePath(machine, active, domain)
-  ensures ActiveNodePath(machine, active, narrow(machine.parallel, machine.nodes[target].path, domain))
+  ensures ActiveNodePath(machine, active, narrow(machine.parallels, machine.nodes[target].path, domain))
 {
   var path := machine.nodes[target].path;
-  if |domain| > 0 && below(path, domain) && machine.parallel == Some(domain[|domain| - 1]) {
+  if |domain| > 0 && below(path, domain) && domain[|domain| - 1] in machine.parallels {
     var k := |domain|;
     var parallel := domain[k - 1];
     BelowMeaning(path, domain);
@@ -1716,7 +1717,7 @@ lemma DomainActive(machine: ParallelMachine, active: seq<string>, source: string
   requires ParallelWellFormed(machine) && ParallelValid(machine, active)
   requires source in active && target in machine.nodes
   ensures ActiveNodePath(machine, active,
-    transitionDomain(machine.parallel, machine.nodes[source].path, machine.nodes[target].path, reenter))
+    transitionDomain(machine.parallels, machine.nodes[source].path, machine.nodes[target].path, reenter))
 {
   var sourcePath := machine.nodes[source].path;
   var targetPath := machine.nodes[target].path;
@@ -1724,10 +1725,10 @@ lemma DomainActive(machine: ParallelMachine, active: seq<string>, source: string
   assert ParallelNodeShape(machine, target);
   assert ParallelNodeShape(machine, machine.root);
   assert ActiveNodePath(machine, active, sourcePath);
-  var domain := transitionDomain(machine.parallel, sourcePath, targetPath, reenter);
+  var domain := transitionDomain(machine.parallels, sourcePath, targetPath, reenter);
   if commonPrefix(sourcePath, targetPath) == |sourcePath| {
     if !reenter {
-      assert domain == narrow(machine.parallel, targetPath, sourcePath);
+      assert domain == narrow(machine.parallels, targetPath, sourcePath);
       NarrowActive(machine, active, target, sourcePath);
     }
   } else {
@@ -1740,13 +1741,13 @@ lemma DomainActive(machine: ParallelMachine, active: seq<string>, source: string
       assert sourcePath[0..lca] == sourcePath[..lca];
       assert ActiveNodePath(machine, active, sourcePath[0..lca]);
       if !reenter {
-        assert domain == narrow(machine.parallel, targetPath, sourcePath[0..lca]);
+        assert domain == narrow(machine.parallels, targetPath, sourcePath[0..lca]);
         NarrowActive(machine, active, target, sourcePath[0..lca]);
       }
     } else if !reenter {
       assert targetPath[0..1] == [machine.root];
       assert ActiveNodePath(machine, active, [machine.root]);
-      assert domain == narrow(machine.parallel, targetPath, targetPath[0..1]);
+      assert domain == narrow(machine.parallels, targetPath, targetPath[0..1]);
       NarrowActive(machine, active, target, targetPath[0..1]);
     }
   }
@@ -1763,7 +1764,7 @@ ghost predicate PlanDomainFacts(machine: ParallelMachine, active: seq<string>, s
   requires source in machine.nodes && target in machine.nodes
 {
   var nodes := machine.nodes;
-  plan.domain == transitionDomain(machine.parallel, nodes[source].path, nodes[target].path, reenter) &&
+  plan.domain == transitionDomain(machine.parallels, nodes[source].path, nodes[target].path, reenter) &&
   ActiveNodePath(machine, active, plan.domain) &&
   (plan.reentered.Some? ==> plan.reentered.value == source && nodes[source].path == plan.domain) &&
   (plan.reentered.Some? ==> plan.extra == plan.reentered) &&
@@ -1780,10 +1781,10 @@ ghost predicate PlanMemberFacts(machine: ParallelMachine, active: seq<string>, t
   (forall id :: id in plan.active <==>
     (id in nodes &&
      ((id in active && !exiting(nodes, plan.domain, plan.reentered, id)) ||
-      entering(nodes, machine.parallel, targetPath, plan.domain, plan.extra, id)))) &&
+      entering(nodes, machine.parallels, targetPath, plan.domain, plan.extra, id)))) &&
   (forall id :: id in plan.exits <==> id in active && exiting(nodes, plan.domain, plan.reentered, id)) &&
   (forall id :: id in plan.entries <==>
-    entering(nodes, machine.parallel, targetPath, plan.domain, plan.extra, id))
+    entering(nodes, machine.parallels, targetPath, plan.domain, plan.extra, id))
 }
 
 ghost predicate PlanOrderFacts(machine: ParallelMachine, active: seq<string>, plan: ParallelPlan)
@@ -1889,7 +1890,7 @@ ghost predicate NextShape(machine: ParallelMachine, active: seq<string>, next: s
   ActiveNodePath(machine, active, domain) &&
   (forall id :: id in next ==> id in nodes) &&
   (forall id :: id in nodes && below(nodes[id].path, domain) ==>
-    (id in next <==> completes(nodes, machine.parallel, targetPath, nodes[id].path[DomainStart(domain)..]))) &&
+    (id in next <==> completes(nodes, machine.parallels, targetPath, nodes[id].path[DomainStart(domain)..]))) &&
   (forall id :: id in nodes && nodes[id].path == domain ==> id in next) &&
   (forall id :: id in nodes && !below(nodes[id].path, domain) && nodes[id].path != domain ==>
     (id in next <==> id in active))
@@ -1924,14 +1925,14 @@ lemma PlanShape(machine: ParallelMachine, active: seq<string>, source: string, t
     BelowMeaning(nodes[id].path, domain);
     if plan.reentered.Some? {
       PathEnds(machine, source);
-      assert entering(nodes, machine.parallel, targetPath, domain, plan.extra, id);
+      assert entering(nodes, machine.parallels, targetPath, domain, plan.extra, id);
     } else {
       assert !exiting(nodes, domain, plan.reentered, id);
     }
   }
   forall id | id in nodes && below(nodes[id].path, domain)
     ensures id in plan.active <==>
-      completes(nodes, machine.parallel, targetPath, nodes[id].path[DomainStart(domain)..])
+      completes(nodes, machine.parallels, targetPath, nodes[id].path[DomainStart(domain)..])
   {
     BelowMeaning(nodes[id].path, domain);
     assert exiting(nodes, domain, plan.reentered, id);
@@ -1943,7 +1944,7 @@ lemma PlanShape(machine: ParallelMachine, active: seq<string>, source: string, t
     assert plan.reentered != Some(id);
     assert plan.extra != Some(id);
     assert !exiting(nodes, domain, plan.reentered, id);
-    assert !entering(nodes, machine.parallel, targetPath, domain, plan.extra, id);
+    assert !entering(nodes, machine.parallels, targetPath, domain, plan.extra, id);
   }
 }
 
@@ -1954,7 +1955,7 @@ lemma InitialShape(machine: ParallelMachine, event: Event)
   var nodes := machine.nodes;
   var entries := parallelInitialTransition(machine, event).snapshot.active;
   forall id | id in nodes
-    ensures id in entries <==> completes(nodes, machine.parallel, [machine.root], nodes[id].path)
+    ensures id in entries <==> completes(nodes, machine.parallels, [machine.root], nodes[id].path)
   {
     assert ParallelNodeShape(machine, id);
     BelowMeaning(nodes[id].path, []);
@@ -1970,7 +1971,7 @@ lemma InitialShape(machine: ParallelMachine, event: Event)
 lemma AllowedChildren(machine: ParallelMachine, next: seq<string>, target: string, id: string)
   requires ParallelWellFormed(machine) && target in machine.nodes && id in machine.nodes
   requires forall child :: child in machine.nodes[id].children ==>
-    (child in next <==> Allowed(machine.nodes, machine.parallel, machine.nodes[target].path, id, child))
+    (child in next <==> Allowed(machine.nodes, machine.parallels, machine.nodes[target].path, id, child))
   ensures ChildrenActive(machine, next, id)
 {
   var nodes := machine.nodes;
@@ -1978,7 +1979,7 @@ lemma AllowedChildren(machine: ParallelMachine, next: seq<string>, target: strin
   var targetPath := nodes[target].path;
   var children := nodes[id].children;
   assert ParallelNodeShape(machine, id);
-  if machine.parallel != Some(id) && |children| > 0 {
+  if id !in machine.parallels && |children| > 0 {
     var chosen;
     if below(targetPath, path) {
       BelowMeaning(targetPath, path);
@@ -2001,7 +2002,7 @@ lemma ShapeAt(machine: ParallelMachine, active: seq<string>, next: seq<string>,
   requires target in machine.nodes && id in machine.nodes
   requires NextShape(machine, active, next, target, domain)
   ensures below(machine.nodes[id].path, domain) ==>
-    (id in next <==> completes(machine.nodes, machine.parallel, machine.nodes[target].path,
+    (id in next <==> completes(machine.nodes, machine.parallels, machine.nodes[target].path,
       machine.nodes[id].path[DomainStart(domain)..]))
   ensures machine.nodes[id].path == domain ==> id in next
   ensures !below(machine.nodes[id].path, domain) && machine.nodes[id].path != domain ==>
@@ -2027,17 +2028,17 @@ lemma ShapeChildrenInside(machine: ParallelMachine, active: seq<string>, next: s
   var tail := path[start..];
   assert |tail| > 0 && tail[|tail| - 1] == id;
   if path == domain {
-    completes_ensures(nodes, machine.parallel, targetPath, tail);
+    completes_ensures(nodes, machine.parallels, targetPath, tail);
   }
-  assert completes(nodes, machine.parallel, targetPath, tail);
+  assert completes(nodes, machine.parallels, targetPath, tail);
   forall child | child in children
-    ensures child in next <==> Allowed(nodes, machine.parallel, targetPath, id, child)
+    ensures child in next <==> Allowed(nodes, machine.parallels, targetPath, id, child)
   {
     BelowChild(path, child, domain);
     assert child in nodes && nodes[child].path == path + [child];
     ShapeAt(machine, active, next, target, domain, child);
     assert (path + [child])[start..] == tail + [child];
-    CompletesSnoc(nodes, machine.parallel, targetPath, tail, child);
+    CompletesSnoc(nodes, machine.parallels, targetPath, tail, child);
   }
   AllowedChildren(machine, next, target, id);
 }
@@ -2064,7 +2065,7 @@ lemma ShapeChildrenOutside(machine: ParallelMachine, active: seq<string>, next: 
       assert domain[|domain| - 1] == child;
     }
   }
-  if machine.parallel != Some(id) && |children| > 0 {
+  if id !in machine.parallels && |children| > 0 {
     var chosen :| chosen in children && chosen in active &&
       forall other :: other in children && other in active ==> other == chosen;
     assert chosen in next;
@@ -2108,7 +2109,7 @@ lemma ShapeParentInside(machine: ParallelMachine, active: seq<string>, next: seq
     BelowMeaning(parentPath, domain);
     var start := DomainStart(domain);
     assert path[start..] == parentPath[start..] + [id];
-    CompletesSnoc(nodes, machine.parallel, targetPath, parentPath[start..], id);
+    CompletesSnoc(nodes, machine.parallels, targetPath, parentPath[start..], id);
   }
 }
 
@@ -2162,7 +2163,7 @@ lemma ShapeRoot(machine: ParallelMachine, active: seq<string>, next: seq<string>
   var nodes := machine.nodes;
   BelowMeaning([machine.root], domain);
   if below([machine.root], domain) {
-    completes_ensures(nodes, machine.parallel, nodes[target].path, [machine.root][DomainStart(domain)..]);
+    completes_ensures(nodes, machine.parallels, nodes[target].path, [machine.root][DomainStart(domain)..]);
   }
 }
 
@@ -2271,14 +2272,14 @@ lemma CrossRegionDomain(parallelPath: seq<string>, sourcePath: seq<string>, targ
 
 lemma CrossDomain(machine: ParallelMachine, source: string, target: string, parallel: string)
   requires ParallelWellFormed(machine) && source in machine.nodes && target in machine.nodes
-  requires machine.parallel == Some(parallel)
+  requires parallel in machine.parallels
   requires below(machine.nodes[source].path, machine.nodes[parallel].path)
   requires below(machine.nodes[target].path, machine.nodes[parallel].path)
   requires machine.nodes[source].path[|machine.nodes[parallel].path|] !=
     machine.nodes[target].path[|machine.nodes[parallel].path|]
-  ensures transitionDomain(machine.parallel, machine.nodes[source].path, machine.nodes[target].path, false) ==
+  ensures transitionDomain(machine.parallels, machine.nodes[source].path, machine.nodes[target].path, false) ==
     machine.nodes[target].path[..|machine.nodes[parallel].path| + 1]
-  ensures transitionDomain(machine.parallel, machine.nodes[source].path, machine.nodes[target].path, true) ==
+  ensures transitionDomain(machine.parallels, machine.nodes[source].path, machine.nodes[target].path, true) ==
     machine.nodes[parallel].path
 {
   hide *;
@@ -2293,12 +2294,12 @@ lemma CrossDomain(machine: ParallelMachine, source: string, target: string, para
   BelowMeaning(targetPath, parallelPath);
   CrossRegionDomain(parallelPath, sourcePath, targetPath);
   assert sourcePath[0..depth] == parallelPath;
-  assert narrow(machine.parallel, targetPath, parallelPath) == targetPath[0..depth + 1];
+  assert narrow(machine.parallels, targetPath, parallelPath) == targetPath[0..depth + 1];
 }
 
 lemma KnownNodes(machine: ParallelMachine, active: seq<string>, source: string, parallel: string)
   requires ParallelWellFormed(machine) && ParallelValid(machine, active)
-  requires source in active && machine.parallel == Some(parallel)
+  requires source in active && parallel in machine.parallels
   ensures source in machine.nodes && parallel in machine.nodes
 {
 }
@@ -2306,7 +2307,7 @@ lemma KnownNodes(machine: ParallelMachine, active: seq<string>, source: string, 
 lemma CrossRegionNarrows(machine: ParallelMachine, active: seq<string>, source: string, target: string, parallel: string)
   requires ParallelWellFormed(machine) && ParallelValid(machine, active)
   requires source in active && target in machine.nodes
-  requires machine.parallel == Some(parallel)
+  requires parallel in machine.parallels
   requires below(machine.nodes[source].path, machine.nodes[parallel].path)
   requires below(machine.nodes[target].path, machine.nodes[parallel].path)
   requires machine.nodes[source].path[|machine.nodes[parallel].path|] !=
@@ -2341,7 +2342,7 @@ lemma CrossRegionNarrows(machine: ParallelMachine, active: seq<string>, source: 
 lemma ParallelSourceNarrows(machine: ParallelMachine, active: seq<string>, target: string, parallel: string)
   requires ParallelWellFormed(machine) && ParallelValid(machine, active)
   requires parallel in active && target in machine.nodes
-  requires machine.parallel == Some(parallel)
+  requires parallel in machine.parallels
   requires below(machine.nodes[target].path, machine.nodes[parallel].path)
   ensures parallelPlan(machine, active, parallel, target, false).domain ==
     machine.nodes[target].path[..|machine.nodes[parallel].path| + 1]
@@ -2355,10 +2356,10 @@ lemma ParallelSourceNarrows(machine: ParallelMachine, active: seq<string>, targe
 
 lemma AncestorDomain(machine: ParallelMachine, source: string, target: string, parallel: string)
   requires ParallelWellFormed(machine) && source in machine.nodes && target in machine.nodes
-  requires machine.parallel == Some(parallel)
+  requires parallel in machine.parallels && source !in machine.parallels
   requires below(machine.nodes[parallel].path, machine.nodes[source].path)
   requires below(machine.nodes[target].path, machine.nodes[parallel].path)
-  ensures transitionDomain(machine.parallel, machine.nodes[source].path, machine.nodes[target].path, false) ==
+  ensures transitionDomain(machine.parallels, machine.nodes[source].path, machine.nodes[target].path, false) ==
     machine.nodes[source].path
 {
   var parallelPath := machine.nodes[parallel].path;
@@ -2370,13 +2371,13 @@ lemma AncestorDomain(machine: ParallelMachine, source: string, target: string, p
   BelowMeaning(targetPath, parallelPath);
   assert targetPath[..|sourcePath|] == sourcePath;
   CommonPrefixExact(sourcePath, targetPath, |sourcePath|);
-  assert sourcePath[|sourcePath| - 1] != parallel;
+  assert sourcePath[|sourcePath| - 1] !in machine.parallels;
 }
 
 lemma AncestorResetsSubtree(machine: ParallelMachine, active: seq<string>, source: string, target: string, parallel: string)
   requires ParallelWellFormed(machine) && ParallelValid(machine, active)
   requires source in active && target in machine.nodes
-  requires machine.parallel == Some(parallel)
+  requires parallel in machine.parallels && source !in machine.parallels
   requires below(machine.nodes[parallel].path, machine.nodes[source].path)
   requires below(machine.nodes[target].path, machine.nodes[parallel].path)
   ensures var plan := parallelPlan(machine, active, source, target, false);
@@ -2408,7 +2409,7 @@ lemma AncestorResetsSubtree(machine: ParallelMachine, active: seq<string>, sourc
 lemma ReenterWidens(machine: ParallelMachine, active: seq<string>, source: string, target: string, parallel: string)
   requires ParallelWellFormed(machine) && ParallelValid(machine, active)
   requires source in active && target in machine.nodes
-  requires machine.parallel == Some(parallel)
+  requires parallel in machine.parallels
   requires below(machine.nodes[source].path, machine.nodes[parallel].path)
   requires below(machine.nodes[target].path, machine.nodes[parallel].path)
   requires machine.nodes[source].path[|machine.nodes[parallel].path|] !=
@@ -2437,7 +2438,7 @@ lemma ReenterWidens(machine: ParallelMachine, active: seq<string>, source: strin
   assert plan.reentered == None;
   assert plan.extra == None;
   assert !exiting(nodes, plan.domain, plan.reentered, parallel);
-  assert !entering(nodes, machine.parallel, targetPath, plan.domain, plan.extra, parallel);
+  assert !entering(nodes, machine.parallels, targetPath, plan.domain, plan.extra, parallel);
   forall id | id in active && id in nodes && below(nodes[id].path, parallelPath)
     ensures id in plan.exits
   {
@@ -2448,7 +2449,7 @@ lemma ReenterWidens(machine: ParallelMachine, active: seq<string>, source: strin
 lemma ReenterResetsSubtree(machine: ParallelMachine, active: seq<string>, source: string, target: string, parallel: string)
   requires ParallelWellFormed(machine) && ParallelValid(machine, active)
   requires source in active && target in machine.nodes
-  requires machine.parallel == Some(parallel)
+  requires parallel in machine.parallels
   requires source == parallel || below(machine.nodes[parallel].path, machine.nodes[source].path)
   requires below(machine.nodes[target].path, machine.nodes[parallel].path)
   ensures var plan := parallelPlan(machine, active, source, target, true);
@@ -2475,14 +2476,14 @@ lemma ReenterResetsSubtree(machine: ParallelMachine, active: seq<string>, source
   assert |parallelPath| >= |sourcePath| && parallelPath[..|sourcePath|] == sourcePath;
   assert targetPath[..|sourcePath|] == sourcePath;
   CommonPrefixExact(sourcePath, targetPath, |sourcePath|);
-  assert transitionDomain(machine.parallel, sourcePath, targetPath, true) == sourcePath;
+  assert transitionDomain(machine.parallels, sourcePath, targetPath, true) == sourcePath;
   SamePathMeaning(sourcePath, sourcePath);
   var plan := parallelPlan(machine, active, source, target, true);
   assert plan.domain == sourcePath;
   assert plan.reentered == Some(source);
   PlanContext(machine, active, source, target, true);
   assert exiting(nodes, plan.domain, plan.reentered, source);
-  assert entering(nodes, machine.parallel, targetPath, plan.domain, plan.extra, source);
+  assert entering(nodes, machine.parallels, targetPath, plan.domain, plan.extra, source);
   forall id | id in active && id in nodes && InRegion(nodes[id].path, parallelPath)
     ensures id in plan.exits
   {
@@ -2501,7 +2502,7 @@ lemma ReenterResetsSubtree(machine: ParallelMachine, active: seq<string>, source
 
 lemma ParallelSelfReenter(machine: ParallelMachine, active: seq<string>, parallel: string)
   requires ParallelWellFormed(machine) && ParallelValid(machine, active)
-  requires parallel in active && machine.parallel == Some(parallel)
+  requires parallel in active && parallel in machine.parallels
   ensures var plan := parallelPlan(machine, active, parallel, parallel, true);
     plan.domain == machine.nodes[parallel].path && plan.reentered == Some(parallel) &&
     parallel in plan.exits && parallel in plan.entries && parallel in plan.active
@@ -2513,7 +2514,7 @@ lemma ParallelSelfReenter(machine: ParallelMachine, active: seq<string>, paralle
   PlanContext(machine, active, parallel, parallel, true);
   assert PlanMemberFacts(machine, active, parallel, plan);
   assert exiting(machine.nodes, plan.domain, plan.reentered, parallel);
-  assert entering(machine.nodes, machine.parallel, parallelPath, plan.domain, plan.extra, parallel);
+  assert entering(machine.nodes, machine.parallels, parallelPath, plan.domain, plan.extra, parallel);
 }
 
 lemma PlanDeclared(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
@@ -2590,7 +2591,7 @@ lemma InitialEntries(machine: ParallelMachine, event: Event)
   ensures var entries := parallelInitialTransition(machine, event).snapshot.active;
     Subseq(entries, machine.order) &&
     forall id :: id in entries <==>
-      (id in machine.nodes && completes(machine.nodes, machine.parallel, [machine.root], machine.nodes[id].path))
+      (id in machine.nodes && completes(machine.nodes, machine.parallels, [machine.root], machine.nodes[id].path))
 {
   hide *;
   reveal NextShape(), DomainStart();
@@ -2599,7 +2600,7 @@ lemma InitialEntries(machine: ParallelMachine, event: Event)
   InitialOrder(machine, event);
   RootPath(machine);
   forall id | id in machine.nodes
-    ensures id in entries <==> completes(machine.nodes, machine.parallel, [machine.root], machine.nodes[id].path)
+    ensures id in entries <==> completes(machine.nodes, machine.parallels, [machine.root], machine.nodes[id].path)
   {
     PathEnds(machine, id);
     BelowMeaning(machine.nodes[id].path, []);
@@ -2613,11 +2614,26 @@ lemma ParallelInitialMeaning(machine: ParallelMachine, event: Event)
     var entered := lifecycle(machine.nodes, step.snapshot.active, machine.context, event, false);
     Subseq(step.snapshot.active, machine.order) &&
     (forall id :: id in step.snapshot.active <==>
-      id in machine.nodes && completes(machine.nodes, machine.parallel, [machine.root], machine.nodes[id].path)) &&
+      id in machine.nodes && completes(machine.nodes, machine.parallels, [machine.root], machine.nodes[id].path)) &&
     step == ParallelStep(ParallelSnapshot(step.snapshot.active, entered.context), false, entered.reused, entered.effects)
 {
   InitialEntries(machine, event);
   DeclaredMembers(machine.nodes, parallelInitialTransition(machine, event).snapshot.active);
+}
+
+lemma InitialChildren(machine: ParallelMachine, event: Event, id: string, child: string)
+  requires ParallelWellFormed(machine) && id in machine.nodes && child in machine.nodes[id].children
+  ensures var entries := parallelInitialTransition(machine, event).snapshot.active;
+    child in entries <==>
+      id in entries && (id in machine.parallels || machine.nodes[id].initial == Some(child))
+{
+  var nodes := machine.nodes;
+  var path := nodes[id].path;
+  InitialEntries(machine, event);
+  assert ParallelNodeShape(machine, id);
+  assert nodes[child].path == path + [child];
+  CompletesSnoc(nodes, machine.parallels, [machine.root], path, child);
+  BelowMeaning([machine.root], path);
 }
 
 lemma RegionFirstSelection(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
@@ -2632,7 +2648,14 @@ lemma RegionFirstSelection(machine: ParallelMachine, snapshot: ParallelSnapshot,
 lemma ParallelStepDelegates(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
   requires |parallelSelections(machine, snapshot, event)| < 2
   ensures parallelStep(machine, snapshot, event) == parallelTransition(machine, snapshot, event)
-  ensures parallelStepReady(machine, snapshot, event) == parallelReady(machine, snapshot, event)
+  ensures parallelStepReady(machine, snapshot, event) ==
+    (|machine.parallels| <= 1 && parallelReady(machine, snapshot, event))
+{
+}
+
+lemma MultipleParallelStepsRefused(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  requires |machine.parallels| > 1
+  ensures !parallelStepReady(machine, snapshot, event)
 {
 }
 
@@ -3023,27 +3046,27 @@ lemma {:induction false} DomainsApartMeaning(plans: seq<ParallelPlan>)
   }
 }
 
-lemma NarrowWithin(parallel: Option<string>, target: seq<string>, domain: seq<string>)
+lemma NarrowWithin(parallels: seq<string>, target: seq<string>, domain: seq<string>)
   requires Within(target, domain)
-  ensures Within(target, narrow(parallel, target, domain))
+  ensures Within(target, narrow(parallels, target, domain))
 {
   BelowMeaning(target, domain);
 }
 
-lemma DomainWithinTarget(parallel: Option<string>, source: seq<string>, target: seq<string>, reenter: bool)
-  ensures Within(target, transitionDomain(parallel, source, target, reenter))
+lemma DomainWithinTarget(parallels: seq<string>, source: seq<string>, target: seq<string>, reenter: bool)
+  ensures Within(target, transitionDomain(parallels, source, target, reenter))
 {
   if commonPrefix(source, target) == |source| {
     assert source == target[..|source|];
-    NarrowWithin(parallel, target, source);
+    NarrowWithin(parallels, target, source);
   } else if |target| > 0 {
     var ancestors := target[0..|target| - 1];
     var lca := commonPrefix(source, ancestors);
     assert source[0..lca] == ancestors[0..lca] == target[0..lca];
     if lca == 0 {
-      NarrowWithin(parallel, target, target[0..1]);
+      NarrowWithin(parallels, target, target[0..1]);
     } else {
-      NarrowWithin(parallel, target, source[0..lca]);
+      NarrowWithin(parallels, target, source[0..lca]);
     }
   }
 }
@@ -3072,7 +3095,7 @@ lemma PatternDomainsComparable(machine: ParallelMachine, active: seq<string>,
   assert exiting(nodes, plan1.domain, plan1.reentered, node);
   WithinMeaning(nodePath, plan1.domain);
   WithinTransitive(targetPath, nodePath, plan1.domain);
-  DomainWithinTarget(machine.parallel, nodes[source2].path, targetPath, reenter2);
+  DomainWithinTarget(machine.parallels, nodes[source2].path, targetPath, reenter2);
   WithinShared(targetPath, plan1.domain, plan2.domain);
 }
 
@@ -3403,15 +3426,15 @@ lemma {:induction false} SelectionsReady(machine: ParallelMachine, active: seq<s
     }
   }
 
-  lemma DomainEqualTargetIsRegion(parallel: Option<string>, source: seq<string>, target: seq<string>, reenter: bool)
+  lemma DomainEqualTargetIsRegion(parallels: seq<string>, source: seq<string>, target: seq<string>, reenter: bool)
     requires |target| > 1 && source != target
-    requires transitionDomain(parallel, source, target, reenter) == target
-    ensures parallel == Some(target[|target| - 2])
+    requires transitionDomain(parallels, source, target, reenter) == target
+    ensures target[|target| - 2] in parallels
   {
     CommonPrefixMeaning(source, target);
     if commonPrefix(source, target) == |source| {
       BelowMeaning(target, source);
-      assert narrow(parallel, target, source) == target;
+      assert narrow(parallels, target, source) == target;
       assert |target| == |source| + 1;
       assert target[..|source|] == source;
     } else {
@@ -3420,7 +3443,7 @@ lemma {:induction false} SelectionsReady(machine: ParallelMachine, active: seq<s
       CommonPrefixMeaning(source, ancestors);
       var base := if lca == 0 then target[..1] else source[..lca];
       assert |base| < |target|;
-      assert narrow(parallel, target, base) == target;
+      assert narrow(parallels, target, base) == target;
       BelowMeaning(target, base);
       assert |target| == |base| + 1;
       assert target[..|base|] == base;
@@ -3461,13 +3484,13 @@ lemma {:induction false} SelectionsReady(machine: ParallelMachine, active: seq<s
           assert below(nodes[source].path, nodes[target].path);
         } else {
           assert nodes[source].path != nodes[target].path;
-          DomainEqualTargetIsRegion(machine.parallel, nodes[source].path, nodes[target].path, result.reenter);
+          DomainEqualTargetIsRegion(machine.parallels, nodes[source].path, nodes[target].path, result.reenter);
           assert !selectionReady(machine, active, selection);
         }
       }
       assert plan.extra.None?;
       assert forall id :: id in nodes ==> !exiting(nodes, plan.domain, plan.reentered, id);
-      assert forall id :: id in nodes ==> !entering(nodes, machine.parallel, nodes[target].path, plan.domain, plan.extra, id);
+      assert forall id :: id in nodes ==> !entering(nodes, machine.parallels, nodes[target].path, plan.domain, plan.extra, id);
       if |plan.exits| > 0 {
         var id := plan.exits[0];
         assert id in active && id in nodes;
@@ -3476,7 +3499,7 @@ lemma {:induction false} SelectionsReady(machine: ParallelMachine, active: seq<s
       }
       if |plan.entries| > 0 {
         var id := plan.entries[0];
-        assert entering(nodes, machine.parallel, nodes[target].path, plan.domain, plan.extra, id);
+        assert entering(nodes, machine.parallels, nodes[target].path, plan.domain, plan.extra, id);
         assert id in nodes;
         assert false;
       }
@@ -3518,7 +3541,7 @@ lemma {:induction false} SelectionsReady(machine: ParallelMachine, active: seq<s
       assert id in machine.nodes && id in active && machine.nodes[id].path == b.domain;
       if |machine.nodes[id].children| > 0 {
         assert ChildrenActive(machine, active, id);
-        if machine.parallel == Some(id) {
+        if id in machine.parallels {
           assert machine.nodes[id].children[0] in machine.nodes[id].children;
           assert machine.nodes[id].children[0] in active;
         }

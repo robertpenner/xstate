@@ -51,6 +51,19 @@ const defects = [
     test: 'enters every region of a root-level parallel machine in document order'
   },
   {
+    name: 'compound regions of nested parallel nodes enter every child',
+    file: 'packages/core/src/stateUtils.ts',
+    before: `    if (descStateNode.type === 'compound') {
+      for (const target of descStateNode.initial.target ?? []) {`,
+    after: `    if (descStateNode.type === 'compound') {
+      for (const target of descStateNode.parent?.type === 'parallel' &&
+      descStateNode.parent.parent?.type === 'parallel'
+        ? getChildren(descStateNode)
+        : (descStateNode.initial.target ?? [])) {`,
+    testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
+    test: 'enters a nested parallel region of a parallel root in document order'
+  },
+  {
     name: 'a later conflicting transition preempts an earlier one',
     file: 'packages/core/src/stateUtils.ts',
     before: 'if (isDescendant(t1.source, t2.source)) {',

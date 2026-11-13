@@ -26,7 +26,7 @@ export function compareParallelTrace(config: Config, events: readonly Event[]) {
     return initialPath(node.children.get(node.config.initial)!);
   }
   const nodes: Record<string, model.CompoundNode> = {};
-  let parallel: string | undefined;
+  const parallels: string[] = [];
   for (const node of registry.values()) {
     const resolve = (target: string) => resolveTarget(node, target);
     for (const [type, handler] of Object.entries(node.config.on ?? {})) {
@@ -35,7 +35,7 @@ export function compareParallelTrace(config: Config, events: readonly Event[]) {
       if (typeof handler !== 'function')
         validateResult(handler, resolve, false);
     }
-    if (node.config.type === 'parallel') parallel = modelId(node);
+    if (node.config.type === 'parallel') parallels.push(modelId(node));
     nodes[modelId(node)] = {
       path: node.path,
       initialPath: initialPath(node),
@@ -59,7 +59,7 @@ export function compareParallelTrace(config: Config, events: readonly Event[]) {
     context: encoding.encode(config.context),
     nodes,
     order: [...registry.values()].map(modelId),
-    parallel
+    parallels
   };
   const runtime = createMachine(config);
   type RuntimeNode = typeof runtime.root;
@@ -189,6 +189,7 @@ export function compareParallelTrace(config: Config, events: readonly Event[]) {
 }
 
 export type RefusalReason =
+  | 'multiple parallel nodes'
   | 'unknown target'
   | 'active region target'
   | 'comparable sources';
@@ -200,6 +201,7 @@ export function refusalReason(
   snapshot: model.ParallelSnapshot,
   event: model.Event
 ): RefusalReason {
+  if (machine.parallels.length > 1) return 'multiple parallel nodes';
   const selections = model.parallelSelections(machine, snapshot, event);
   for (const selection of selections) {
     const result = selection.evaluation.result;

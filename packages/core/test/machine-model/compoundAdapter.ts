@@ -85,10 +85,6 @@ export function collectTree(config: Config, allowParallel: boolean) {
         throw new Error(`Unsupported state type: ${state.type}`);
       if (node.children.size === 0)
         throw new Error(`Unsupported parallel state without regions at ${id}`);
-      for (const other of registry.values()) {
-        if (other !== node && other.config.type === 'parallel')
-          throw new Error(`Unsupported second parallel state at ${id}`);
-      }
       if (state.initial !== undefined)
         throw new Error(`Unsupported parallel initial at ${id}`);
       if (state.on !== undefined) plainRecord(state.on, `${id}.on`);
