@@ -1,11 +1,11 @@
 # AFK Run — Multiple and nested parallel states (#23 PRD, #25–#27)
 
-**Status:** active
+**Status:** completed
 
 **Branch:** `machine-nested-parallel-25-27`, in the sibling worktree
 `xstate-nested-parallel`, based on `machine-formalized` at `886402a`.
 
-**Pull request:** [robertpenner/xstate#29](https://github.com/robertpenner/xstate/pull/29) (draft)
+**Pull request:** [robertpenner/xstate#29](https://github.com/robertpenner/xstate/pull/29) (ready for review)
 
 **Started:** 2026-11-13 10:21:28 UTC
 
@@ -129,7 +129,7 @@ Not resumed.
 
 ### Publication at stop or handoff
 
-**Published head:** `c519d25`.
+**Published head:** `32d26f4` (code head `c519d25`).
 
 **Unverified checkpoint:** none.
 
@@ -194,3 +194,25 @@ the Dafny files, and the manifest are unchanged since `1d2b483`, whose
 `pnpm verify:machine-model` run reported 492 verified, 0 errors.
 
 **Remaining blockers:** none.
+
+### Completion
+
+**Final verification:** at `c519d25`, `pnpm test:machine-model` 154 passed,
+`pnpm test:machine-model:runtime-defects` 13 mutations rejected,
+`pnpm test:core` 3108 passed (29 skipped, 3 todo), `pnpm typecheck`,
+`pnpm lint`, `pnpm format:check`, `pnpm build` exit 0;
+`pnpm verify:machine-model` 492 verified, 0 errors at `1d2b483` with model,
+Dafny, and manifest unchanged since. `gh pr checks 29`: `build` passed
+(10m47s) on `32d26f4` after the PR was marked ready.
+
+**Pre-existing failures:** none observed in the final runs. Earlier,
+`declarations.test.ts` hit a 60-second hook timeout once in `pnpm test:core`
+under load and passed when rerun alone (recorded under #25).
+
+**Parent summary:**
+[#23 comment](https://github.com/robertpenner/xstate/issues/23#issuecomment-6856465734).
+
+**Result:** #25, #26, and #27 integrated and verified on PR #29; the machine
+model now proves initialization, single-selection steps, and simultaneous
+steps for any finite parallel nesting, compared against the runtime by named
+and generated differential tests. Issues remain open until the PR merges.
