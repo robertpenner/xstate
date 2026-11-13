@@ -403,7 +403,8 @@ filed. The historical [AFK investigation log](../../../../AFK_RUNS/2026-11-12T06
 retains the original pre-fix observations. During proof regeneration,
 `CompoundLifecycleMeaning` exceeded its unchanged 15-second verification
 limit. Scoping tree-definition reveals to their prerequisite assertions
-restored verification without changing the lemma's assumptions or guarantees.
+restored verification. That proof-search adjustment preserved the assumptions
+and the targetless-corrected guarantee.
 
 [`adapterContract.test.ts`](./adapterContract.test.ts) checks both adapters
 against caught refusals, reflective capability probes, null-prototype contexts,
