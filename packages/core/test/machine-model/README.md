@@ -25,9 +25,9 @@ multiple-and-nested-parallel initialization
 unmodified LemmaScript 0.6.6. Dafny 4.11.0 proves its contracts and the laws in
 [`formal/machineModel.dfy`](./formal/machineModel.dfy).
 [`formal/machineModel.manifest.json`](./formal/machineModel.manifest.json) lists
-155 laws (including proof helpers and a concrete lifecycle witness), 22 generated
-contract lemmas, and 33 deliberately incorrect model edits. The complete proof
-currently checks 472 verification tasks. Function postconditions support
+166 laws (including proof helpers and a concrete lifecycle witness), 22 generated
+contract lemmas, and 36 deliberately incorrect model edits. The complete proof
+currently checks 492 verification tasks. Function postconditions support
 composition; they are also checked against the generated bodies.
 Eleven additional proof-weakening probes check that generated contracts cannot
 gain restrictive preconditions or lose their original postconditions.
@@ -85,10 +85,11 @@ The laws establish:
   active,
   each active node's parent is active, an active parallel node has every region
   active, and an active compound node has exactly one active child.
-- Simultaneous selections on a machine with more than one parallel node are
-  not yet modeled: `parallelStepReady` refuses a step with two or more
-  selections on such a machine (`MultipleParallelSelectionsRefused`). Steps
-  with at most one selection are modeled for every machine.
+- Simultaneous selections are modeled for any number of parallel nodes at any
+  depth. With two or more selections, a step from a valid configuration is
+  accepted exactly when every selection passes the single-selection target
+  check (`SimultaneousReadyMeaning`); the number of parallel nodes plays no
+  part.
 - Selection follows the runtime's recursive rule: a compound node defers to
   its active child, and a parallel node to all of its regions, falling back to
   its own handler only when nothing below it handles the event. The selections
@@ -131,9 +132,16 @@ The laws establish:
   every kept selection was drawn from them, and kept selections have pairwise
   disjoint exit sets. With pairwise incomparable sources, the result equals
   greedy filtering in selection order. For two overlapping selections, the
-  descendant source wins in either order. With one parallel node, selected
-  sources come from different regions, so that rule is proved for the model
-  function but never fires in the supported domain.
+  descendant source wins in either order. Selection never returns two sources
+  on one path: a handler strictly below an active node suppresses that node's
+  own handler, and active ids are distinct, so the selected sources are
+  pairwise incomparable at every depth (`SelectedSourcesApart`). Conflict
+  removal on the selections is therefore exactly greedy filtering in region
+  order (`SelectedConflictsGreedy`): the earlier kept selection wins whether
+  the conflicting sources are in sibling regions, in regions of different
+  parallel nodes, or at different depths. The descendant rule, and conflicts
+  between two selections from one handler, are proved for `removeConflicts`
+  as a function but cannot arise from selection.
 - Fewer than two selections delegate to the single-transition step.
 - A multi-transition step exits the union of the kept plans' exit sets in
   reverse document order, applies every kept result in selection order, then
@@ -147,7 +155,8 @@ The laws establish:
 - The next active set contains every node that was active and not exited, plus
   every entered node, in document order. For a well-formed machine starting
   from a valid configuration, every step accepted by `parallelStepReady`
-  remains valid. Readiness does not require kept domains to be incomparable. The proof
+  remains valid, including simultaneous steps that leave, enter, or move
+  within several nested parallel nodes. Readiness does not require kept domains to be incomparable. The proof
   discards lifecycle-free plans only when reasoning about active nodes:
   `MovingCombined` proves that this preserves the exit and entry unions, and
   `ReadyMovingDomainsApart` proves that the remaining plans have incomparable
@@ -208,10 +217,9 @@ callback are not modeled.
 [`parallelAdapter.ts`](./parallelAdapter.ts) reuses the compound tree builder
 and accepts any number of `type: 'parallel'` nodes, at any depth, including
 the root and regions of other parallel nodes. Each parallel node needs at least
-one region and may not declare `initial`. Initialization and single-selection steps of such machines are
-compared with the runtime; a step with two or more selections on a machine
-with more than one parallel node is refused with
-`simultaneous selections with several parallel nodes` before it runs. A target must be a string, so array (multi-target)
+one region and may not declare `initial`. Initialization, single-selection
+steps, and simultaneous steps of such machines are compared with the runtime.
+A target must be a string, so array (multi-target)
 transitions are refused. Each step is checked against the model's
 `parallelStepReady` before it runs. When fewer than two regions select, this is
 the single-selection `parallelReady` check. When several regions select, every
@@ -249,7 +257,7 @@ target refusal still covers the statelyai/xstate#5895 reproduction. All
 remaining comparable-domain cases are subject to the same listed readiness
 checks as other steps.
 
-Simultaneous selections with more than one parallel node, choices, history, completion, eventless transitions,
+Choices, history, completion, eventless transitions,
 raised events, timers, actors, routes, state input and persistence remain
 refused.
 Refusal is not a statement that
@@ -359,7 +367,7 @@ array-target, and active-region refusals. Initialization cases cover a parallel
 region of a parallel root, parallel nodes below compound ancestors and inside
 regions, parallel subtrees on different compound branches with an inactive
 branch skipped, entry callbacks threading context through nine nested nodes,
-and refusal of event steps on those machines. The active-region refusal is checked
+and a simultaneous step on a machine with two parallel nodes. The active-region refusal is checked
 with and without `reenter` and on the statelyai/xstate#5895 reproduction
 machine. Its
 multi-transition cases cover independent region transitions exiting in reverse
@@ -373,6 +381,18 @@ the active nodes and skip lifecycle callbacks; omitting patches preserves
 context identity, while empty patches copy context. Atomic self-targets beside an ancestor exit are
 compared in both selection orders, including configuration, patches, and
 exit/transition/entry effect order.
+Nested cases use a parallel node with an inner parallel region and a compound
+region. Single-selection steps move inside an inner region, leave or reenter
+the inner parallel node, reenter the outer one, and fall back to the outer
+parallel node only when every nested region declines. Simultaneous steps move
+two inner regions and an outer region together; suppress inner and outer
+parallel fallbacks when a region below handles; fall back to the inner
+parallel node while an outer region handles locally; keep the earlier region
+when one result leaves the inner and another the outer parallel node, in both
+orders; keep an earlier fallback on a shallow source over a later conflicting
+source two levels deeper; keep a lifecycle-free atomic self-target beside a
+plan leaving both parallel nodes, in both orders; and show that kept callbacks
+observe the pre-step context while a losing result contributes nothing.
 
 [`parallelModel.property.test.ts`](./parallelModel.property.test.ts) generates
 500 trees with seed 8912 and depths one through four, turning at most one
@@ -396,13 +416,12 @@ A second property generates 300 trees with seed 2541 in which any compound
 node may become a parallel node, so parallel nodes appear inside regions and
 on inactive branches. It compares initialization. In some runs it then sends
 one event that every node handles by targeting the root. Every active leaf
-then selects, so the step is compared when only one leaf is active or the
-machine has one parallel node, and must be refused with
-`simultaneous selections with several parallel nodes` otherwise. At seed 2541
-it reported 182 machines with more than one active parallel node, 86 with two
-active parallel nodes on separate branches of a common parallel ancestor, a
-maximum of 4 nested parallel nodes on one path, 51 machines with an inactive
-parallel node, and 87 refused steps.
+then selects, and the step is compared. At seed 2541 it reported 182 machines
+with more than one active parallel node, 86 with two active parallel nodes on
+separate branches of a common parallel ancestor, a maximum of 4 nested
+parallel nodes on one path, 51 machines with an inactive parallel node, and 87
+compared steps with two or more selections on a machine with more than one
+parallel node.
 
 A third property generates 400 trees with seed 6113 and depths two through
 four, in which any compound node may become a parallel node, and sends up to
@@ -411,13 +430,17 @@ node or, more often, to a leaf, so targets reach through several parallel
 levels. Handler density falls as the tree widens so that many events select
 one handler. A refused event is dropped and the trace continues with the next
 one. At seed 6113 it reported 319 machines with more than one parallel node,
-346 compared steps with a selection on such machines, 50 steps whose domain
-narrowed through a parallel node and 9 that narrowed through two or more,
-10 steps that fell back to a parallel node after a region below it declined,
-39 steps entering and 31 steps exiting two or more parallel nodes, and 1112
-dropped events: 744 simultaneous selections with several parallel nodes and
-368 active-region targets. Each of these counts except the active-region
-targets has an asserted lower bound.
+544 compared steps with a selection on such machines, 105 steps whose domain
+narrowed through a parallel node and 19 that narrowed through two or more,
+12 steps that fell back to a parallel node after a region below it declined,
+and 71 steps entering and 60 steps exiting two or more parallel nodes. Of the
+compared steps on machines with more than one parallel node, 186 had two or
+more selections. Of those, 93 had sources at different depths, 160 had a
+source below two or more parallel nodes, 33 dropped a conflicting selection,
+6 kept two or more moving plans without a conflict, and 3 kept plans with
+strictly nested domains. It dropped 913 events, all at an active-region
+target. Each count has an asserted lower bound except the narrowed steps and
+the steps with strictly nested domains.
 
 [`runtimeFindings.test.ts`](./runtimeFindings.test.ts) contains direct public-API
 regressions and characterizations of four previously reported behaviors:
@@ -529,22 +552,28 @@ multi-transition edits let an ancestor source preempt a descendant, apply droppe
 result twice, apply kept results in reverse order, and keep exited nodes in
 the next active set. A nested-domain edit incorrectly retains an atomic
 self-target's domain node when another kept plan exits it; `MultiStepMembers`
-rejects it. It also checks that a
+rejects it. Three simultaneous-step edits restore the refusal of several
+selections on a machine with more than one parallel node
+(`SimultaneousReadyMeaning` rejects it), select from every active node twice
+(`SelectedIdsDistinct`), and let a later conflicting selection replace an
+earlier one (`GreedyWhenApart` and the `removeConflicts` lemmas). It also checks that a
 behavior-preserving rewrite changes the generated
 artifact and still proves after regeneration.
 
 The runtime-defect command temporarily changes a clean production file, runs
 the corresponding differential test, requires an assertion failure, and restores
 the original bytes in `finally`. Run it only in a dedicated checkout with no
-other test/build process. Its eleven mutations test targetless source reentry,
+other test/build process. Its thirteen mutations test targetless source reentry,
 an ignored fast-path target, a dropped
 context patch, compound exits ordered ancestor-before-descendant, a parallel
 domain that is never narrowed to a region, regions entered in reverse
 document order, compound regions of a nested parallel node entering every
 child at initialization, a later conflicting transition preempting an earlier
 one, kept transition patches merged in reverse order, a parallel domain
-narrowed only one level, and a parallel node whose own handler overrides a
-single region's selection. Mutations that drop
+narrowed only one level, a parallel node whose own handler overrides a
+single region's selection, regions of a nested parallel node selected in
+reverse order, and a deeper conflicting source preempting a shallower one.
+Mutations that drop
 a nested region at initialization are not listed: the runtime adds missing
 regions in `getInitialStateNodes`, `addAncestorStatesToEnter`, and
 `addDescendantStatesToEnter`, so removing one of those loops leaves behavior
