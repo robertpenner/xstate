@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 474,
+  "verifiedCount": 462,
   "functions": [
     "mergePatch",
     "apply",
@@ -136,7 +136,7 @@
     "TargetlessLifecycle",
     "NonReenteringSelf",
     "LifecycleOrderAndContext",
-    "TargetlessReentryCharacterization",
+    "TargetlessReentryLifecycle",
     "PathHasExactlyOneChild",
     "CompoundInitialValid",
     "CompoundStepValid",
@@ -215,6 +215,7 @@
     "PlanDeclared",
     "ParallelStepMeaning",
     "ParallelTargetlessKeepsActive",
+    "TargetlessSelectionLifecycle",
     "RootPath",
     "InitialOrder",
     "InitialEntries",
@@ -267,6 +268,26 @@
     "ReadyMovingDomainsApart"
   ],
   "defects": [
+    {
+      "name": "flat targetless reentry runs entry",
+      "before": "    changes && entry !== undefined",
+      "after": "    (changes || reenter) && entry !== undefined"
+    },
+    {
+      "name": "compound targetless reentry runs entry",
+      "before": "  const entryPath = target === undefined ? [] : nextPath.slice(kept);",
+      "after": "  const entryPath = target === undefined ? (reenter ? [selected.id] : []) : nextPath.slice(kept);"
+    },
+    {
+      "name": "parallel targetless reentry runs entry",
+      "before": "      effects: updated.effects\n    };",
+      "after": "      effects: [...updated.effects, ...runLifecycle(nodes, reenter ? [selected.id] : [], updated.context, event, false).effects]\n    };"
+    },
+    {
+      "name": "targetless reentry is refused",
+      "before": "  const result = selection.evaluation.result;\n  if (result === undefined) return true;\n  const target = result.target;\n  if (target === undefined) return true;",
+      "after": "  const result = selection.evaluation.result;\n  if (result === undefined) return true;\n  const target = result.target;\n  if (target === undefined) return !result.reenter;"
+    },
     {
       "name": "ignored target",
       "before": "const next = target ?? snapshot.value;",

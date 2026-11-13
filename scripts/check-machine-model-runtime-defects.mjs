@@ -65,6 +65,13 @@ const defects = [
     after: 'for (const t of [...filteredTransitions].reverse()) {',
     testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
     test: 'merges patches in region order'
+  },
+  {
+    name: 'targetless reentry runs entry again',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'if (targets?.length && reenter && domain === transition.source) {',
+    after: 'if (reenter && domain === transition.source) {',
+    test: 'keeps targetless-reentry patches and effects without lifecycle callbacks'
   }
 ];
 try {

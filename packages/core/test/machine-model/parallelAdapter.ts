@@ -191,7 +191,6 @@ export function compareParallelTrace(config: Config, events: readonly Event[]) {
 export type RefusalReason =
   | 'unknown target'
   | 'active region target'
-  | 'targetless reentry'
   | 'comparable sources';
 
 // Names the first `parallelStepReady` clause that fails, in the order the
@@ -205,9 +204,8 @@ export function refusalReason(
   for (const selection of selections) {
     const result = selection.evaluation.result;
     const target = result?.target;
-    if (target === undefined) {
-      if (selections.length > 1 && result?.reenter) return 'targetless reentry';
-    } else if (!(target in machine.nodes)) {
+    if (target === undefined) continue;
+    if (!(target in machine.nodes)) {
       return 'unknown target';
     } else if (!model.selectionReady(machine, snapshot.active, selection)) {
       return 'active region target';

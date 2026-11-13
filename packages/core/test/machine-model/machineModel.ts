@@ -121,7 +121,7 @@ export function transition(
   const entry = destination === undefined ? undefined : destination.entry;
   const entered = apply(
     updated.context,
-    (changes || reenter) && entry !== undefined
+    changes && entry !== undefined
       ? entry(updated.context, event)
       : emptyEvaluation()
   );
@@ -385,12 +385,7 @@ export function compoundTransition(
   const exitKept = target === machine.root && !reenter ? 1 : kept;
   const exitPath =
     target === undefined ? [] : reverse(snapshot.path.slice(exitKept));
-  const entryPath =
-    target === undefined
-      ? reenter
-        ? [selected.id]
-        : []
-      : nextPath.slice(kept);
+  const entryPath = target === undefined ? [] : nextPath.slice(kept);
   const exited = lifecycle(
     machine.nodes,
     exitPath,
@@ -724,18 +719,11 @@ export function parallelTransition(
   const reenter = result === undefined ? false : result.reenter;
   if (target === undefined || !(target in nodes)) {
     const updated = apply(snapshot.context, selected.evaluation);
-    const entered = runLifecycle(
-      nodes,
-      reenter ? [selected.id] : [],
-      updated.context,
-      event,
-      false
-    );
     return {
-      snapshot: { active: snapshot.active, context: entered.context },
+      snapshot: { active: snapshot.active, context: updated.context },
       snapshotReused: false,
-      contextReused: updated.reused && entered.reused,
-      effects: [...updated.effects, ...entered.effects]
+      contextReused: updated.reused,
+      effects: updated.effects
     };
   }
   const plan = parallelPlan(
@@ -894,7 +882,7 @@ export function selectionReady(
   const result = selection.evaluation.result;
   if (result === undefined) return true;
   const target = result.target;
-  if (target === undefined) return !result.reenter;
+  if (target === undefined) return true;
   if (!(target in machine.nodes)) return false;
   const targetPath = lookupNode(machine.nodes, target).path;
   if (targetPath.length < 2) return true;

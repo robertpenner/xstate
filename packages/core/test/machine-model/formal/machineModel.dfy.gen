@@ -124,7 +124,7 @@ function transition(machine: Machine, snapshot: Snapshot, event: Event): Step
     var updated := apply(exited.context, selected);
     var destination := (if next in machine.states then Some(machine.states[next]) else None);
     var entry := (match destination { case Some(i_destination_val) => Option.Some(i_destination_val.entry) case None => Option.None });
-    var entered := apply(updated.context, (match entry { case Some(i_entry_val) => (if (changes || reenter) then i_entry_val(updated.context, event) else emptyEvaluation()) case None => emptyEvaluation() }));
+    var entered := apply(updated.context, (match entry { case Some(i_entry_val) => (if changes then i_entry_val(updated.context, event) else emptyEvaluation()) case None => emptyEvaluation() }));
     Step(Snapshot(next, entered.context), false, ((exited.reused && updated.reused) && entered.reused), ((exited.effects + updated.effects) + entered.effects))
 }
 
@@ -349,7 +349,7 @@ function compoundTransition(machine: CompoundMachine, snapshot: CompoundSnapshot
       var kept := (if contained then (|sourcePath| - (if reenter then 1 else 0)) else commonPrefix(sourcePath, targetAncestors));
       var exitKept := (if ((match target { case Some(i_value) => (i_value == machine.root) case None => false }) && !(reenter)) then 1 else kept);
       var exitPath := (match target { case Some(i_target_val) => reverse(snapshot.path[exitKept..]) case None => [] });
-      var entryPath := (match target { case Some(i_target_val) => nextPath[kept..] case None => (if reenter then [i_selected_val.id] else []) });
+      var entryPath := (match target { case Some(i_target_val) => nextPath[kept..] case None => [] });
       var exited := lifecycle(machine.nodes, exitPath, snapshot.context, event, true);
       var updated := apply(exited.context, i_selected_val.evaluation);
       var entered := lifecycle(machine.nodes, entryPath, updated.context, event, false);
@@ -570,8 +570,7 @@ function parallelTransition(machine: ParallelMachine, snapshot: ParallelSnapshot
       case Some(i_target_val) =>
         if !((i_target_val in nodes)) then
           var updated := apply(snapshot.context, selected.evaluation);
-          var entered := runLifecycle(nodes, (if reenter then [selected.id] else []), updated.context, event, false);
-          ParallelStep(ParallelSnapshot(snapshot.active, entered.context), false, (updated.reused && entered.reused), (updated.effects + entered.effects))
+          ParallelStep(ParallelSnapshot(snapshot.active, updated.context), false, updated.reused, updated.effects)
         else
           var plan := parallelPlan(machine, snapshot.active, selected.id, i_target_val, reenter);
           var exited := runLifecycle(nodes, plan.exits, snapshot.context, event, true);
@@ -580,8 +579,7 @@ function parallelTransition(machine: ParallelMachine, snapshot: ParallelSnapshot
           ParallelStep(ParallelSnapshot(plan.active, entered.context), false, ((exited.reused && updated.reused) && entered.reused), ((exited.effects + updated.effects) + entered.effects))
       case None =>
         var updated := apply(snapshot.context, selected.evaluation);
-        var entered := runLifecycle(nodes, (if reenter then [selected.id] else []), updated.context, event, false);
-        ParallelStep(ParallelSnapshot(snapshot.active, entered.context), false, (updated.reused && entered.reused), (updated.effects + entered.effects))
+        ParallelStep(ParallelSnapshot(snapshot.active, updated.context), false, updated.reused, updated.effects)
     }
 }
 
@@ -717,7 +715,7 @@ function selectionReady(machine: ParallelMachine, active: seq<string>, selection
             var targetPath := lookupNode(machine.nodes, i_target_val).path;
             ((|targetPath| < 2) || !(((match machine.parallel { case Some(i_value) => (i_value == targetPath[(|targetPath| - 2)]) case None => false }) && (i_target_val in active))))
         case None =>
-          !(i_result_val.reenter)
+          true
       }
     case None =>
       true
