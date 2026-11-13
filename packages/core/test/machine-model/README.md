@@ -1,4 +1,4 @@
-# Verified flat, compound, and single-parallel machine models
+# Verified flat, compound, and parallel machine models
 
 This directory models XState v6 `createMachine` initialization and external-event
 steps. The runtime baseline is `da64b0a` plus upstream
@@ -12,9 +12,12 @@ Work belongs to
 [#10](https://github.com/robertpenner/xstate/issues/10), and the single-parallel
 extension [#15](https://github.com/robertpenner/xstate/issues/15), and the
 multi-transition parallel extension
-[#16](https://github.com/robertpenner/xstate/issues/16), under
-[#8](https://github.com/robertpenner/xstate/issues/8) and
-[#14](https://github.com/robertpenner/xstate/issues/14).
+[#16](https://github.com/robertpenner/xstate/issues/16), and the
+multiple-and-nested-parallel initialization
+[#25](https://github.com/robertpenner/xstate/issues/25), under
+[#8](https://github.com/robertpenner/xstate/issues/8),
+[#14](https://github.com/robertpenner/xstate/issues/14), and
+[#23](https://github.com/robertpenner/xstate/issues/23).
 
 ## What is verified
 
@@ -22,8 +25,8 @@ multi-transition parallel extension
 unmodified LemmaScript 0.6.6. Dafny 4.11.0 proves its contracts and the laws in
 [`formal/machineModel.dfy`](./formal/machineModel.dfy).
 [`formal/machineModel.manifest.json`](./formal/machineModel.manifest.json) lists
-149 laws (including proof helpers and a concrete lifecycle witness), 22 generated
-contract lemmas, and 27 deliberately incorrect model edits. The complete proof
+151 laws (including proof helpers and a concrete lifecycle witness), 22 generated
+contract lemmas, and 30 deliberately incorrect model edits. The complete proof
 currently checks 462 verification tasks. Function postconditions support
 composition; they are also checked against the generated bodies.
 Eleven additional proof-weakening probes check that generated contracts cannot
@@ -68,14 +71,22 @@ The laws establish:
   before the exit cut is preserved. A concrete sibling/self-reentry witness
   additionally checks the plan against distinguishable callback effects.
 
-- Machines with at most one parallel node start with every node on the path from
-  the root through the initial descendants, entering all regions of the
-  parallel node. Active nodes, and entry callbacks, follow document order.
-  For a well-formed machine, initialization yields a valid configuration, and
-  every handled single-selection step from a valid configuration preserves
-  validity: the root is active,
+- Initialization accepts any number of parallel nodes at any depth, including
+  parallel nodes nested in regions of other parallel nodes and parallel nodes
+  below compound branches that are not initially active. It enters the root,
+  every region of each entered parallel node, and the initial child of each
+  entered compound node, and nothing else (`InitialChildren`). Active nodes,
+  and entry callbacks, follow document order (`InitialOrder`), and entry
+  callbacks thread context patches and effects in that order
+  (`ParallelInitialMeaning`). For a well-formed machine, initialization yields
+  a valid configuration (`ParallelInitialValid`), and every handled
+  single-selection step from a valid configuration of a machine with at most
+  one parallel node preserves validity: the root is active,
   each active node's parent is active, an active parallel node has every region
   active, and an active compound node has exactly one active child.
+- Event steps on a machine with more than one parallel node are not yet
+  modeled: `parallelStepReady` refuses every such step
+  (`MultipleParallelStepsRefused`).
 - Selection is region-first. Each active atomic node tries its own path below
   the parallel node, deepest first. When any of those nodes handles the event,
   the selections come only from the regions. Otherwise the parallel node and
@@ -186,10 +197,11 @@ Callback invocation counts and identity of the context record passed into a
 callback are not modeled.
 
 [`parallelAdapter.ts`](./parallelAdapter.ts) reuses the compound tree builder
-and accepts at most one `type: 'parallel'` node, at any depth, including the
-root. The parallel node needs at least one region and may not declare
-`initial`. A second parallel node, including one nested inside a region, is
-refused before running. A target must be a string, so array (multi-target)
+and accepts any number of `type: 'parallel'` nodes, at any depth, including
+the root and regions of other parallel nodes. Each parallel node needs at least
+one region and may not declare `initial`. Initialization of such machines is
+compared with the runtime; every event step on a machine with more than one
+parallel node is refused with `multiple parallel nodes` before it runs. A target must be a string, so array (multi-target)
 transitions are refused. Each step is checked against the model's
 `parallelStepReady` before it runs. When fewer than two regions select, this is
 the single-selection `parallelReady` check. When several regions select, every
@@ -227,7 +239,7 @@ target refusal still covers the statelyai/xstate#5895 reproduction. All
 remaining comparable-domain cases are subject to the same listed readiness
 checks as other steps.
 
-Multiple parallel nodes, choices, history, completion, eventless transitions,
+Event steps with more than one parallel node, choices, history, completion, eventless transitions,
 raised events, timers, actors, routes, state input and persistence remain
 refused.
 Refusal is not a statement that
@@ -332,8 +344,12 @@ node, ancestor transitions that reset every region with and without
 `reenter`, reentering widening, the parallel node as a reentering source and
 targeting itself with and without `reenter`, entry from outside with deep
 targets, fallback to the parallel node only when every region declines,
-targetless transitions, and the nested/multiple-parallel, parallel-initial,
-array-target, and active-region refusals. The active-region refusal is checked
+targetless transitions, and the parallel-initial, empty-parallel,
+array-target, and active-region refusals. Initialization cases cover a parallel
+region of a parallel root, parallel nodes below compound ancestors and inside
+regions, parallel subtrees on different compound branches with an inactive
+branch skipped, entry callbacks threading context through nine nested nodes,
+and refusal of event steps on those machines. The active-region refusal is checked
 with and without `reenter` and on the statelyai/xstate#5895 reproduction
 machine. Its
 multi-transition cases cover independent region transitions exiting in reverse
@@ -365,6 +381,16 @@ count has an asserted positive lower bound. Refusals cut short 124 of the
 284 traces with a parallel node, all at an active-region target.
 Steps compared before a refusal are
 not counted.
+
+A second property generates 300 trees with seed 2541 in which any compound
+node may become a parallel node, so parallel nodes appear inside regions and
+on inactive branches. It compares initialization. In some runs it then sends
+one event targeting the root: the step is compared when the machine has one
+parallel node and must be refused with `multiple parallel nodes` otherwise. At
+seed 2541 it reported 182 machines with more than one active parallel node,
+86 with two active parallel nodes on separate branches of a common parallel
+ancestor, a maximum of 4 nested parallel nodes on one path, 51 machines with
+an inactive parallel node, and 105 refused steps.
 
 [`runtimeFindings.test.ts`](./runtimeFindings.test.ts) contains direct public-API
 regressions and characterizations of four previously reported behaviors:
@@ -466,6 +492,9 @@ ancestor prematurely, skip initial descent, exit an unaffected ancestor,
 reverse lifecycle effects, and ignore source reentry. The parallel edits enter
 only the first region, leave atomic descendants of an exited parallel node
 active, exit the source region in a cross-region transition, and run exits in
+document order. Three initialization edits enter only the first region of a
+nested parallel node, enter every child of a compound node when the machine has
+more than one parallel node, and enter nested parallel machines in reverse
 document order. The multi-transition edits let an ancestor source preempt a
 descendant, apply dropped selections' patches and effects, apply a kept
 result twice, apply kept results in reverse order, and keep exited nodes in
@@ -478,12 +507,17 @@ artifact and still proves after regeneration.
 The runtime-defect command temporarily changes a clean production file, runs
 the corresponding differential test, requires an assertion failure, and restores
 the original bytes in `finally`. Run it only in a dedicated checkout with no
-other test/build process. Its eight mutations test targetless source reentry,
+other test/build process. Its nine mutations test targetless source reentry,
 an ignored fast-path target, a dropped
 context patch, compound exits ordered ancestor-before-descendant, a parallel
 domain that is never narrowed to a region, regions entered in reverse
-document order, a later conflicting transition preempting an earlier one, and
-kept transition patches merged in reverse order.
+document order, compound regions of a nested parallel node entering every
+child at initialization, a later conflicting transition preempting an earlier
+one, and kept transition patches merged in reverse order. Mutations that drop
+a nested region at initialization are not listed: the runtime adds missing
+regions in `getInitialStateNodes`, `addAncestorStatesToEnter`, and
+`addDescendantStatesToEnter`, so removing one of those loops leaves behavior
+unchanged.
 Production mutations are never committed.
 
 After model edits:
