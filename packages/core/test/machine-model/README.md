@@ -14,7 +14,9 @@ extension [#15](https://github.com/robertpenner/xstate/issues/15), and the
 multi-transition parallel extension
 [#16](https://github.com/robertpenner/xstate/issues/16), and the
 multiple-and-nested-parallel initialization
-[#25](https://github.com/robertpenner/xstate/issues/25), under
+[#25](https://github.com/robertpenner/xstate/issues/25), single-selection steps
+[#26](https://github.com/robertpenner/xstate/issues/26), and simultaneous steps
+[#27](https://github.com/robertpenner/xstate/issues/27), under
 [#8](https://github.com/robertpenner/xstate/issues/8),
 [#14](https://github.com/robertpenner/xstate/issues/14), and
 [#23](https://github.com/robertpenner/xstate/issues/23).
@@ -49,7 +51,7 @@ The laws establish:
   pre-exit context. The entry callback observes exit patches overwritten by any
   transition patch. Effects are returned in exit, transition, entry order.
 - Targetless `reenter: true` skips exit and entry callbacks in the flat,
-  compound, and single-parallel models. Its context patch and transition
+  compound, and parallel models. Its context patch and transition
   effects still apply. A targetless selection has no lifecycle plan or
   conflict exits and passes the multi-selection readiness check
   (`TargetlessSelectionLifecycle`).
@@ -94,8 +96,10 @@ The laws establish:
   its active child, and a parallel node to all of its regions, falling back to
   its own handler only when nothing below it handles the event. The selections
   are exactly the active nodes whose own handler selects and below which no
-  active node's handler selects, in document order (`RegionFirstSelection`,
-  `EnabledSelectionMeaning`, `HandledBelowMeaning`). A blocking or
+  active node's handler selects (`RegionFirstSelection`,
+  `EnabledSelectionMeaning`, `HandledBelowMeaning`). They come in document
+  order because `enabledSelections` filters the active list, which follows
+  `order`; no separate law states the order. A blocking or
   effect-only handler counts as handling and stops fallback; a declining
   handler does not. If nothing handles the event, the snapshot is unchanged.
 - A handled step equals the composition of its exit plan, the selected
@@ -113,8 +117,9 @@ The laws establish:
   (`ReenterWidens`). A transition from the parallel node to one of its
   descendants narrows the same way. A reentering self-transition on the
   parallel node exits and reenters it.
-- A transition from an ancestor of the parallel node into one region exits
-  every active node below the parallel node (`AncestorResetsSubtree`). All
+- A transition from a compound (non-parallel) ancestor of a parallel node into
+  one of its regions exits every active node below that parallel node
+  (`AncestorResetsSubtree`). A parallel ancestor narrows instead, as above. All
   regions are then reentered from their initial descendants, not only the
   targeted region; no separate law states this half, which follows from the
   validity law and the entry plan's definition. With `reenter: true`, a
@@ -141,7 +146,9 @@ The laws establish:
   the conflicting sources are in sibling regions, in regions of different
   parallel nodes, or at different depths. The descendant rule, and conflicts
   between two selections from one handler, are proved for `removeConflicts`
-  as a function but cannot arise from selection.
+  as a function but cannot arise from the model's selection. They are
+  unreachable at the runtime only insofar as the runtime selects as the model
+  does, which the differential tests check.
 - Fewer than two selections delegate to the single-transition step.
 - A multi-transition step exits the union of the kept plans' exit sets in
   reverse document order, applies every kept result in selection order, then
@@ -221,12 +228,14 @@ one region and may not declare `initial`. Initialization, single-selection
 steps, and simultaneous steps of such machines are compared with the runtime.
 A target must be a string, so array (multi-target)
 transitions are refused. Each step is checked against the model's
-`parallelStepReady` before it runs. When fewer than two regions select, this is
-the single-selection `parallelReady` check. When several regions select, every
-selection must pass that check and sources must lie on pairwise incomparable
-paths. A step is
-also refused when a transition, with or without `reenter`, targets an already
-active direct region of the parallel node, including in single-selection steps.
+`parallelStepReady` before it runs. With fewer than two selections, this is
+the single-selection `parallelReady` check. With several, every selection must
+pass that check and sources must lie on pairwise incomparable paths. The second
+clause always holds for selections from a valid configuration
+(`SelectedSourcesApart`), so the adapter's `comparable sources` refusal reason
+cannot occur. A step is refused when a transition, with or without `reenter`,
+targets an already active direct region of a parallel node, including in
+single-selection steps.
 Without `reenter`, the runtime runs the targeted region's entry actions again
 without exiting it; the open
 [statelyai/xstate#5899](https://github.com/statelyai/xstate/pull/5899) keeps
@@ -299,9 +308,12 @@ preorder of the tree, so the lifecycle-order laws hold relative to that list.
 The compound laws assume the normalized tree's path and initial-child
 relationships. Authored target resolution and construction of that normalized
 tree remain executable adapter code covered by comparisons and refusal tests.
-The parallel model selects in region-first order: one selection per active
-atomic node below the parallel node, then the parallel node and its ancestors
-only when no region selects. SCXML instead selects, for every active atomic
+The parallel model selects recursively: an active node is selected when its own
+handler selects and no active node below it handles the event, so a parallel
+node or ancestor is consulted only when nothing in its active subtree handles
+the event. With one parallel node, this is one selection per active atomic
+node below it, then the parallel node and its ancestors only when no region
+selects. SCXML instead selects, for every active atomic
 state, the first enabled transition among it and its ancestors, removes
 duplicates, then removes conflicting transitions; in that last pass a
 transition whose source is a descendant of a conflicting transition's source
@@ -381,16 +393,18 @@ the active nodes and skip lifecycle callbacks; omitting patches preserves
 context identity, while empty patches copy context. Atomic self-targets beside an ancestor exit are
 compared in both selection orders, including configuration, patches, and
 exit/transition/entry effect order.
-Nested cases use a parallel node with an inner parallel region and a compound
-region. Single-selection steps move inside an inner region, leave or reenter
+Most nested cases use an outer parallel node whose region `a` holds an inner
+parallel node `q` below a compound node, beside a compound region `b`. Single-selection steps move inside an inner region, leave or reenter
 the inner parallel node, reenter the outer one, and fall back to the outer
 parallel node only when every nested region declines. Simultaneous steps move
-two inner regions and an outer region together; suppress inner and outer
+two inner regions and an outer region together; move two sibling inner
+parallel nodes independently, from region sources or with one inner parallel
+node narrowing into its region; suppress inner and outer
 parallel fallbacks when a region below handles; fall back to the inner
 parallel node while an outer region handles locally; keep the earlier region
 when one result leaves the inner and another the outer parallel node, in both
 orders; keep an earlier fallback on a shallow source over a later conflicting
-source two levels deeper; keep a lifecycle-free atomic self-target beside a
+source one level deeper; keep a lifecycle-free atomic self-target beside a
 plan leaving both parallel nodes, in both orders; and show that kept callbacks
 observe the pre-step context while a losing result contributes nothing.
 
@@ -415,7 +429,7 @@ not counted.
 A second property generates 300 trees with seed 2541 in which any compound
 node may become a parallel node, so parallel nodes appear inside regions and
 on inactive branches. It compares initialization. In some runs it then sends
-one event that every node handles by targeting the root. Every active leaf
+one event that every node, including the root, handles by targeting the root. Every active leaf
 then selects, and the step is compared. At seed 2541 it reported 182 machines
 with more than one active parallel node, 86 with two active parallel nodes on
 separate branches of a common parallel ancestor, a maximum of 4 nested
@@ -432,15 +446,19 @@ one handler. A refused event is dropped and the trace continues with the next
 one. At seed 6113 it reported 319 machines with more than one parallel node,
 544 compared steps with a selection on such machines, 105 steps whose domain
 narrowed through a parallel node and 19 that narrowed through two or more,
-12 steps that fell back to a parallel node after a region below it declined,
+12 steps that fell back to a parallel node after a node below it declined, 224
+steps where a selected block or effect-only handler kept an active ancestor's
+handler from being selected, 55 steps with a moving domain inside regions of
+two or more parallel nodes, 71 steps that exited and reentered a parallel node,
 and 71 steps entering and 60 steps exiting two or more parallel nodes. Of the
 compared steps on machines with more than one parallel node, 186 had two or
 more selections. Of those, 93 had sources at different depths, 160 had a
 source below two or more parallel nodes, 33 dropped a conflicting selection,
 6 kept two or more moving plans without a conflict, and 3 kept plans with
 strictly nested domains. It dropped 913 events, all at an active-region
-target. Each count has an asserted lower bound except the narrowed steps and
-the steps with strictly nested domains.
+target; the test asserts that no other refusal reason occurs. Each count has
+an asserted lower bound except the steps with strictly nested domains, which
+the named self-target cases assert.
 
 [`runtimeFindings.test.ts`](./runtimeFindings.test.ts) contains direct public-API
 regressions and characterizations of four previously reported behaviors:
@@ -544,8 +562,8 @@ only the first region, leave atomic descendants of an exited parallel node
 active, exit the source region in a cross-region transition, and run exits in
 document order. Three initialization edits enter only the first region of a
 nested parallel node, enter every child of a compound node when the machine has
-more than one parallel node, and enter nested parallel machines in reverse
-document order. Three nested-step edits stop narrowing after one parallel
+more than one parallel node, and enter machines with more than one parallel
+node in reverse document order. Three nested-step edits stop narrowing after one parallel
 level, select a handler even when an active node below it handles the event,
 and defer to handlers above the candidate instead of below it. The
 multi-transition edits let an ancestor source preempt a descendant, apply dropped selections' patches and effects, apply a kept
@@ -576,8 +594,9 @@ reverse order, and a deeper conflicting source preempting a shallower one.
 Mutations that drop
 a nested region at initialization are not listed: the runtime adds missing
 regions in `getInitialStateNodes`, `addAncestorStatesToEnter`, and
-`addDescendantStatesToEnter`, so removing one of those loops leaves behavior
-unchanged.
+`addDescendantStatesToEnter`. Removing the region loop from
+`getInitialStateNodes` or from `addDescendantStatesToEnter` left behavior
+unchanged; the loop in `addAncestorStatesToEnter` was not tried.
 Production mutations are never committed.
 
 After model edits:
