@@ -1,9 +1,13 @@
 # Verified flat, compound, and single-parallel machine models
 
 This directory models XState v6 `createMachine` initialization and external-event
-steps. The runtime baseline is `da64b0a` on the fork's `next` branch, the base of
-`machine-formalized`. Its `packages/core/src` is identical to `bcd3840`, the
-baseline recorded for the flat and compound work. Work belongs to
+steps. The runtime baseline is `da64b0a` plus upstream
+[`9eb940c`](https://github.com/statelyai/xstate/commit/9eb940c), the targetless-reentry
+fix merged in [statelyai/xstate#5898](https://github.com/statelyai/xstate/pull/5898).
+Only that fix, its tests, documentation, and changeset are integrated; other
+upstream `next` changes are not included. Before this fix, `packages/core/src`
+was identical to `bcd3840`, the baseline recorded for the flat and compound work.
+Work belongs to
 [#9](https://github.com/robertpenner/xstate/issues/9), the compound extension
 [#10](https://github.com/robertpenner/xstate/issues/10), and the single-parallel
 extension [#15](https://github.com/robertpenner/xstate/issues/15), and the
@@ -18,9 +22,9 @@ multi-transition parallel extension
 unmodified LemmaScript 0.6.6. Dafny 4.11.0 proves its contracts and the laws in
 [`formal/machineModel.dfy`](./formal/machineModel.dfy).
 [`formal/machineModel.manifest.json`](./formal/machineModel.manifest.json) lists
-148 laws (including proof helpers and a concrete lifecycle witness), 22 generated
-contract lemmas, and 23 deliberately incorrect model edits. The complete proof
-currently checks 474 verification tasks. Function postconditions support
+149 laws (including proof helpers and a concrete lifecycle witness), 22 generated
+contract lemmas, and 27 deliberately incorrect model edits. The complete proof
+currently checks 462 verification tasks. Function postconditions support
 composition; they are also checked against the generated bodies.
 Eleven additional proof-weakening probes check that generated contracts cannot
 gain restrictive preconditions or lose their original postconditions.
@@ -41,9 +45,11 @@ The laws establish:
   The selected callback observes pre-exit context. The exit callback also observes
   pre-exit context. The entry callback observes exit patches overwritten by any
   transition patch. Effects are returned in exit, transition, entry order.
-- Targetless `reenter: true` currently runs entry without exit. Its separate
-  characterization law records an apparent runtime bug, not an intended
-  lifecycle rule.
+- Targetless `reenter: true` skips exit and entry callbacks in the flat,
+  compound, and single-parallel models. Its context patch and transition
+  effects still apply. A targetless selection has no lifecycle plan or
+  conflict exits and passes the multi-selection readiness check
+  (`TargetlessSelectionLifecycle`).
 - Compound initialization and event steps preserve declared active nodes,
   required ancestors, and exactly one active direct child for each active
   compound node, assuming a well-formed normalized machine and valid targets.
@@ -198,9 +204,10 @@ the region active and skips that entry. Until it lands, the model makes no
 claim about these steps. That
 refusal also covers the reproduction machine of
 [statelyai/xstate#5895](https://github.com/statelyai/xstate/issues/5895).
-Targetless `reenter: true` transitions are refused when several regions
-select, because the runtime's targetless-reentry lifecycle is a separate
-suspected bug.
+Targetless `reenter: true` transitions are accepted when several regions
+select. Their results contribute patches and transition effects, while the
+other kept plans determine any exits and entries. This includes a sibling
+transition that reenters or leaves the parallel ancestor.
 
 The general #5895 pattern is that one
 transition's exit set contains another transition's target or an ancestor of
@@ -333,8 +340,11 @@ multi-transition cases cover independent region transitions exiting in reverse
 document order, mixed handled/declined/blocked regions, pre-step callback
 context with patches merged in region order, conflicts where the earlier
 region wins in either order, two regions that both leave the parallel node, a
-region transition against a reentry of the parallel node, and the
-targetless-reentry refusal. Atomic self-targets beside an ancestor exit are
+region transition against a reentry of the parallel node, and targetless
+reentry beside a local move, parallel-parent reentry, or exit from the parallel
+node, each in both selection orders. Two targetless reentries also preserve
+the active nodes and skip lifecycle callbacks; omitting patches preserves
+context identity, while empty patches copy context. Atomic self-targets beside an ancestor exit are
 compared in both selection orders, including configuration, patches, and
 exit/transition/entry effect order.
 
@@ -348,19 +358,20 @@ tree. Steps refused by `parallelStepReady` end the trace. It uses the same
 four-second fail-on-interruption limit. The test prints coverage statistics
 with `console.info` and asserts only lower bounds on them. At seed 8912 it
 reported 284 machines with a parallel node, 87 whose regions differ in
-height, 2131 compared steps in traces that ran to completion, 315 steps with
-two or more selections, 38 steps where conflict removal dropped a
-selection, and 3 compared steps with strictly nested kept domains. The last
-count has an asserted positive lower bound. Refusals cut short 143 of the
-284 traces with a parallel node: 114
-at an active-region target and 29 at a targetless reentry among several
-selections. Steps compared before a refusal are
+height, 2255 compared steps in traces that ran to completion, 404 steps with
+two or more selections, 49 steps where conflict removal dropped a
+selection, and 9 compared steps with strictly nested kept domains. The last
+count has an asserted positive lower bound. Refusals cut short 124 of the
+284 traces with a parallel node, all at an active-region target.
+Steps compared before a refusal are
 not counted.
 
 [`runtimeFindings.test.ts`](./runtimeFindings.test.ts) contains direct public-API
-characterizations of four previously reported behaviors:
+regressions and characterizations of four previously reported behaviors:
 
-- Targetless reentry runs entry without exit (statelyai/xstate#5897).
+- Targetless reentry preserves the active state and skips lifecycle effects.
+  This guards the fix for
+  [statelyai/xstate#5897](https://github.com/statelyai/xstate/issues/5897).
 - A descendant targeting the root without reentry invokes root entry without
   root exit. Seed 8912 discovered this after six cases and 77 shrinks; the named
   reproduction retains the minimal root/child behavior
@@ -371,15 +382,28 @@ characterizations of four previously reported behaviors:
   re-enters the sibling region without its parent, ending in `m, m.P.B, m.X`
   (statelyai/xstate#5895).
 - A targetless reentry in one region beside a reentry of the parallel node in
-  another exits region `A` and never re-enters it, while re-entering its leaf
-  `a1`. This is already recorded in
+  another reenters every region and its required ancestors. Previously region
+  `A` exited and never reentered, while its leaf `a1` reentered. That symptom
+  was already recorded in
   [statelyai/xstate#5897's follow-up comment](https://github.com/statelyai/xstate/issues/5897#issuecomment-6806469021)
-  and covered by the proposed fix in
+  and is fixed by the integrated
   [statelyai/xstate#5898](https://github.com/statelyai/xstate/pull/5898).
 
-All four assert observed output, so a runtime change requires revisiting these
-characterizations and the model's exit/entry plans.
-The AFK run log records the investigation; no production fix is included.
+The two targetless cases now assert corrected behavior. The root-target and
+cross-region cases still characterize open reports; the active-region refusal
+remains in force. The targetless correction agrees with the v5 `5.33.4`
+comparison previously recorded in #5897 and SCXML's
+[normative entry-set and exit-set rules](https://www.w3.org/TR/2015/REC-scxml-20150901/#SelectingTransitions),
+which require a target before a transition contributes lifecycle changes.
+XState's `reenter` option remains an XState-specific API.
+
+The integration exposed no additional runtime bug. Existing upstream reports
+were checked before updating these regressions, so no duplicate report was
+filed. The historical [AFK investigation log](../../../../AFK_RUNS/2026-11-12T060235Z-machine-model-followups.md)
+retains the original pre-fix observations. During proof regeneration,
+`CompoundLifecycleMeaning` exceeded its unchanged 15-second verification
+limit. Scoping tree-definition reveals to their prerequisite assertions
+restored verification without changing the lemma's assumptions or guarantees.
 
 [`adapterContract.test.ts`](./adapterContract.test.ts) checks both adapters
 against caught refusals, reflective capability probes, null-prototype contexts,
@@ -434,7 +458,9 @@ The driver rejects assumptions and proof-disabling attributes; only
 `induction false` and `isolate_assertions` are allowed to control proof search.
 It requires every seeded edit to
 produce a proof failure. Parser/type/tool failures do not count as rejected
-defects; a timeout alone also does not count. The compound edits select an
+defects; a timeout alone also does not count. Four targetless edits restore
+flat, compound, or parallel entry callbacks, or restore the multi-selection
+targetless-reentry refusal. The compound edits select an
 ancestor prematurely, skip initial descent, exit an unaffected ancestor,
 reverse lifecycle effects, and ignore source reentry. The parallel edits enter
 only the first region, leave atomic descendants of an exited parallel node
@@ -451,7 +477,8 @@ artifact and still proves after regeneration.
 The runtime-defect command temporarily changes a clean production file, runs
 the corresponding differential test, requires an assertion failure, and restores
 the original bytes in `finally`. Run it only in a dedicated checkout with no
-other test/build process. It tests an ignored fast-path target, a dropped
+other test/build process. Its eight mutations test targetless source reentry,
+an ignored fast-path target, a dropped
 context patch, compound exits ordered ancestor-before-descendant, a parallel
 domain that is never narrowed to a region, regions entered in reverse
 document order, a later conflicting transition preempting an earlier one, and

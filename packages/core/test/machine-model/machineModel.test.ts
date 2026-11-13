@@ -195,12 +195,12 @@ describe('flat machine model', () => {
     expect(entry).not.toHaveBeenCalled();
   });
 
-  it('records the current targetless-reenter entry-only behavior', () => {
+  it('keeps targetless-reentry patches and effects without lifecycle callbacks', () => {
     const effect = vi.fn();
     const trace = compareTrace(
       {
         initial: 'a',
-        context: {},
+        context: { count: 0 },
         states: {
           a: {
             entry: (_, enq) => {
@@ -209,13 +209,24 @@ describe('flat machine model', () => {
             exit: (_, enq) => {
               enq(effect, 'exit');
             },
-            on: { event: { reenter: true } }
+            on: {
+              event: ({ context }, enq) => {
+                enq(effect, 'transition');
+                return {
+                  reenter: true,
+                  context: { count: Number(context.count) + 1 }
+                };
+              }
+            }
           }
         }
       },
       [{ type: 'event' }]
     );
-    expect(trace[1].effects.map((effect) => effect.args)).toEqual([['entry']]);
+    expect(trace[1].context).toEqual({ count: 1 });
+    expect(trace[1].effects.map((effect) => effect.args)).toEqual([
+      ['transition']
+    ]);
   });
 
   it.each([

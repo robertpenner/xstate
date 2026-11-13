@@ -667,20 +667,122 @@ describe('multi-transition parallel steps', () => {
     expect(trace[1].context).toEqual({ count: 1 });
   });
 
-  it.each([
-    [
-      'active region target',
-      { go: { target: '#m.p.b' } },
-      { go: { target: '#m.off' } }
-    ],
-    [
-      'targetless reentry',
-      { go: { reenter: true } },
-      { go: { target: '#m.p', reenter: true } }
-    ]
-  ] as const)('refuses a %s before running', (reason, aOn, bOn) => {
+  it.each(['local', 'parallel reentry', 'leave'] as const)(
+    'keeps targetless-reentry results beside a %s transition in both orders',
+    (kind) => {
+      for (const targetlessFirst of [true, false]) {
+        const targetless: On = {
+          go: ({ context }, enq) => {
+            enq(record, 'targetless', context.count);
+            return { reenter: true, context: { count: 1 } };
+          }
+        };
+        const moving: On = {
+          go: ({ context }, enq) => {
+            enq(record, 'moving', context.count);
+            return {
+              target:
+                kind === 'local'
+                  ? targetlessFirst
+                    ? 'b2'
+                    : 'a2'
+                  : kind === 'parallel reentry'
+                    ? '#m.p'
+                    : '#m.off',
+              reenter: kind === 'parallel reentry',
+              context: { count: 2 }
+            };
+          }
+        };
+        const trace = compareParallelTrace(
+          regions(
+            targetlessFirst ? targetless : moving,
+            targetlessFirst ? moving : targetless
+          ),
+          [{ type: 'go' }]
+        );
+        expect(trace[1].selections).toBe(2);
+        expect(trace[1].kept).toBe(2);
+        expect(trace[1].context).toEqual({ count: targetlessFirst ? 2 : 1 });
+        const results = targetlessFirst
+          ? ['targetless', 'moving']
+          : ['moving', 'targetless'];
+        const exits = [
+          'exit c1',
+          'exit c',
+          'exit b1',
+          'exit b',
+          'exit a1',
+          'exit a',
+          'exit p'
+        ];
+        if (kind === 'local') {
+          expect(trace[1].value).toEqual({
+            p: targetlessFirst
+              ? { a: 'a1', b: 'b2', c: 'c1' }
+              : { a: 'a2', b: 'b1', c: 'c1' }
+          });
+          expect(labels(trace[1])).toEqual([
+            targetlessFirst ? 'exit b1' : 'exit a1',
+            ...results,
+            targetlessFirst ? 'enter b2' : 'enter a2'
+          ]);
+        } else if (kind === 'parallel reentry') {
+          expect(trace[1].active).toEqual([
+            'm',
+            'm.p',
+            'm.p.a',
+            'm.p.a.a1',
+            'm.p.b',
+            'm.p.b.b1',
+            'm.p.c',
+            'm.p.c.c1'
+          ]);
+          expect(labels(trace[1])).toEqual([
+            ...exits,
+            ...results,
+            'enter p',
+            'enter a',
+            'enter a1',
+            'enter b',
+            'enter b1',
+            'enter c',
+            'enter c1'
+          ]);
+        } else {
+          expect(trace[1].active).toEqual(['m', 'm.off']);
+          expect(labels(trace[1])).toEqual([...exits, ...results, 'enter off']);
+        }
+        expect(
+          trace[1].effects
+            .filter((effect) => results.includes(String(effect.args[0])))
+            .map((effect) => effect.args)
+        ).toEqual(results.map((name) => [name, 0]));
+      }
+    }
+  );
+
+  it.each([undefined, {}])(
+    'keeps lifecycle-free targetless selections with patch %j',
+    (context) => {
+      const on: On = { go: { reenter: true, context } };
+      const trace = compareParallelTrace(regions(on, on), [{ type: 'go' }]);
+      expect(trace[1].selections).toBe(2);
+      expect(trace[1].kept).toBe(2);
+      expect(trace[1].active).toEqual(trace[0].active);
+      expect(trace[1].effects).toEqual([]);
+      expect(trace[1].snapshotReused).toBe(false);
+      expect(trace[1].contextReused).toBe(context === undefined);
+      expect(trace[1].context).toEqual({ count: 0 });
+    }
+  );
+
+  it('refuses an active region target before running', () => {
     expect(() =>
-      compareParallelTrace(regions(aOn, bOn), [{ type: 'go' }])
-    ).toThrow(`Unsupported step: go (${reason})`);
+      compareParallelTrace(
+        regions({ go: { target: '#m.p.b' } }, { go: { target: '#m.off' } }),
+        [{ type: 'go' }]
+      )
+    ).toThrow('Unsupported step: go (active region target)');
   });
 });

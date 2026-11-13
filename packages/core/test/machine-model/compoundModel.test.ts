@@ -238,6 +238,8 @@ describe('compound machine model', () => {
           ? [['exit b'], ['exit p'], ['enter p'], ['enter a']]
           : [['exit b'], ['enter a']]
       );
+      expect(trace[3].value).toEqual({ p: 'a' });
+      expect(trace[3].effects).toEqual([]);
       expect(record).not.toHaveBeenCalled();
     }
   );

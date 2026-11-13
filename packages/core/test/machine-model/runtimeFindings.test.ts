@@ -1,6 +1,6 @@
 import { createMachine, initialTransition, transition } from '../../src';
 
-describe('recorded runtime findings at da64b0a', () => {
+describe('recorded runtime findings and fixed regressions', () => {
   it('targeting the root from a descendant enters root without exiting it', () => {
     const record = vi.fn();
     const machine = createMachine({
@@ -21,7 +21,7 @@ describe('recorded runtime findings at da64b0a', () => {
     ).toEqual([['root entry']]);
   });
 
-  it('targetless reenter runs entry without exit (suspected bug)', () => {
+  it('targetless reentry skips entry and exit (fixed by statelyai/xstate#5898)', () => {
     const record = vi.fn();
     const machine = createMachine({
       initial: 'a',
@@ -42,7 +42,7 @@ describe('recorded runtime findings at da64b0a', () => {
     expect(next.value).toBe('a');
     expect(
       effects.map((effect) => ('args' in effect ? effect.args : undefined))
-    ).toEqual([['enter']]);
+    ).toEqual([]);
     expect(record).not.toHaveBeenCalled();
   });
 
@@ -87,7 +87,7 @@ describe('recorded runtime findings at da64b0a', () => {
     expect(next.nodes.map((node) => node.id)).toEqual(['m', 'm.P.B', 'm.X']);
   });
 
-  it('targetless reentry beside a parallel-node reentry leaves a leaf without its region (suspected bug)', () => {
+  it('targetless reentry beside parallel-node reentry preserves region membership (fixed by statelyai/xstate#5898)', () => {
     const record = vi.fn();
     const log = (name: string) => ({
       entry: (_: unknown, enq: (fn: typeof record, arg: string) => void) => {
@@ -128,12 +128,14 @@ describe('recorded runtime findings at da64b0a', () => {
       'exit A',
       'exit P',
       'enter P',
+      'enter A',
       'enter a1',
       'enter B'
     ]);
     expect(next.nodes.map((node) => node.id)).toEqual([
       'm',
       'm.P',
+      'm.P.A',
       'm.P.A.a1',
       'm.P.B'
     ]);
