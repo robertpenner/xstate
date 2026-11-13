@@ -16,7 +16,7 @@ Dafny laws, seeded model defects, differential tests, and runtime mutations.
 
 **Execution:** sequential.
 
-**Verified integration head:** `58455e3` (#26).
+**Verified integration head:** `c2fb9fa` (#27).
 
 ### Slice progress
 
@@ -24,7 +24,7 @@ Dafny laws, seeded model defects, differential tests, and runtime mutations.
 | ------------------------------------------------------- | ---------------------------------------- | ----------- | ------------------- | ------------------ | ------------------ |
 | [#25](https://github.com/robertpenner/xstate/issues/25) | Initialization                           | integrated/verified |                     | `773e55c`, `95e824d` | see evidence below |
 | [#26](https://github.com/robertpenner/xstate/issues/26) | Single-selection transitions             | integrated/verified |                     | `5e692fc`, `58455e3` | see evidence below |
-| [#27](https://github.com/robertpenner/xstate/issues/27) | Simultaneous transitions across regions  | pending     | #26                 |                    |                    |
+| [#27](https://github.com/robertpenner/xstate/issues/27) | Simultaneous transitions across regions  | integrated/verified |                     | `1d2b483`, `c2fb9fa` | see evidence below |
 
 ### Verification evidence
 
@@ -89,13 +89,45 @@ inputs.
 - `pnpm test:core`: 3097 passed, 29 skipped, 3 todo; exit 0. The first run
   also hit the known `test/declarations.test.ts` hook timeout.
 
+**#27 (`1d2b483` model, proofs, adapter, tests, mutations; `c2fb9fa` README).**
+Brief: [#27 comment](https://github.com/robertpenner/xstate/issues/27#issuecomment-6854017167).
+Checks ran on the exact uncommitted tree committed as those two commits.
+
+- Removing the refusal from `parallelStepReady` produced no model/runtime
+  mismatch in the differential tests; only tests that expected the refusal
+  failed. Regeneration changed only that function, and only
+  `MultipleParallelSelectionsRefused` failed to verify; it was deleted. The new
+  laws `SelectedSourcesApart`, `SelectedConflictsGreedy`, and
+  `SimultaneousReadyMeaning` (with helpers) show that selected sources are
+  pairwise incomparable, that conflict removal on them is greedy filtering,
+  and that readiness depends only on each selection's target. The existing
+  multi-step laws needed no change.
+- `pnpm verify:machine-model` (`MACHINE_MODEL_VERIFY_TIMEOUT_MS=600000`, run
+  alone): 492 verified, 0 errors; 11 proof weakenings and 36 defects
+  rejected; freshness, additions-only inventory and refactor verified; exit 0.
+- `pnpm test:machine-model:runtime-defects` (run alone): all 13 runtime
+  mutations rejected, exit 0.
+- `pnpm test:machine-model`: 152 tests passed.
+- Property 2 at seed 2541 now compares the 87 steps it previously refused.
+  Property 3 at seed 6113, 400 runs: 319 machines with more than one parallel
+  node, 544 compared steps with a selection on such machines, 105 narrowed (19
+  through two or more levels), 12 parallel fallbacks, 71 deep entries, 60 deep
+  exits, 186 simultaneous steps (93 mixed source depths, 160 sources below two
+  or more parallel nodes, 33 conflicting, 6 independent moves, 3 strictly
+  nested kept domains), 913 dropped events, all active-region targets.
+- `pnpm typecheck`, `pnpm lint`, `pnpm format:check`, `pnpm build`: exit 0.
+- `pnpm test:tooling`: 28 tests passed.
+- `pnpm test:core`: 3106 passed, 29 skipped, 3 todo; exit 0.
+- Correction: the #26 README stated 155 laws while its manifest listed 154.
+  The #27 README states the manifest's 166.
+
 ### Recovery
 
 Not resumed.
 
 ### Publication at stop or handoff
 
-**Published head:** `58455e3`.
+**Published head:** `c2fb9fa`.
 
 **Unverified checkpoint:** none.
 
@@ -111,4 +143,4 @@ Not resumed.
 
 **Findings:** pending until reviewed.
 
-**Remaining blockers:** #27 not started.
+**Remaining blockers:** final review pending.
