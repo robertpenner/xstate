@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 472,
+  "verifiedCount": 492,
   "functions": [
     "mergePatch",
     "apply",
@@ -114,7 +114,9 @@
     "PlansApart",
     "Combined",
     "PlansContext",
-    "MovingPlans"
+    "MovingPlans",
+    "Distinct",
+    "DistinctIds"
   ],
   "laws": [
     "LastPatchCons",
@@ -266,11 +268,23 @@
     "SelectionPlanMembers",
     "ReadyMovingDomainsApart",
     "InitialChildren",
-    "MultipleParallelSelectionsRefused",
     "NarrowMeaning",
     "OwnSelectionMeaning",
     "EnabledSelectionMeaning",
-    "HandledBelowMeaning"
+    "HandledBelowMeaning",
+    "DistinctTail",
+    "EnabledSelectionsDistinct",
+    "SelectedConflictsGreedy",
+    "SelectedIdsDistinct",
+    "SelectedNotBelow",
+    "SelectedPairApart",
+    "SelectedSourcesApart",
+    "SelectionsReadyConverse",
+    "SimultaneousReadyMeaning",
+    "SourceApartMeaning",
+    "SourcesApartMeaning",
+    "SubseqDistinct",
+    "SubseqMembers"
   ],
   "defects": [
     {
@@ -437,6 +451,21 @@
       "name": "selection defers to handlers above the candidate",
       "before": "      below(lookupNode(nodes, id).path, path) &&\n      ownSelection(nodes, id, context, event) !== undefined",
       "after": "      below(path, lookupNode(nodes, id).path) &&\n      ownSelection(nodes, id, context, event) !== undefined"
+    },
+    {
+      "name": "simultaneous steps on several parallel nodes are refused",
+      "before": "  if (selections.length < 2) return parallelReady(machine, snapshot, event);\n  return multiReady(",
+      "after": "  if (selections.length < 2) return parallelReady(machine, snapshot, event);\n  if (machine.parallels.length > 1) return false;\n  return multiReady("
+    },
+    {
+      "name": "selection visits each active node twice",
+      "before": "  return enabledSelections(\n    machine.nodes,\n    snapshot.active,\n    snapshot.active,\n",
+      "after": "  return enabledSelections(\n    machine.nodes,\n    snapshot.active,\n    [...snapshot.active, ...snapshot.active],\n"
+    },
+    {
+      "name": "a later conflicting selection replaces an earlier one",
+      "before": "  if (anyPreempts(machine, active, first, kept)) {",
+      "after": "  if (anyPreempts(machine, active, first, [])) {"
     }
   ],
   "proofDefects": [

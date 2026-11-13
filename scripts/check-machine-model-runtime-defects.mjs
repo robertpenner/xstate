@@ -97,6 +97,23 @@ const defects = [
     test: 'lets an inner region block control fallback to nested ancestors'
   },
   {
+    name: 'inner parallel regions select in reverse order',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'for (const subStateKey of subStateKeys) {',
+    after:
+      'for (const subStateKey of stateNode.parent?.parent ? [...subStateKeys].reverse() : subStateKeys) {',
+    testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
+    test: 'keeps the earlier region when results leave the inner and the outer parallel node'
+  },
+  {
+    name: 'a deeper conflicting source preempts a shallower one',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'if (isDescendant(t1.source, t2.source)) {',
+    after: 'if (t1.source.path.length > t2.source.path.length) {',
+    testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
+    test: 'keeps an earlier shallow fallback over a later deeper conflicting source'
+  },
+  {
     name: 'targetless reentry runs entry again',
     file: 'packages/core/src/stateUtils.ts',
     before: 'if (targets?.length && reenter && domain === transition.source) {',

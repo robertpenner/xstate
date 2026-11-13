@@ -11,7 +11,13 @@ import * as model from './machineModel';
 
 export type { Config } from './compoundAdapter';
 
-export function compareParallelTrace(config: Config, events: readonly Event[]) {
+// Throws on a refused event unless `onRefusal` is given, in which case the
+// event is skipped and the trace continues from the same snapshot.
+export function compareParallelTrace(
+  config: Config,
+  events: readonly Event[],
+  onRefusal?: (reason: RefusalReason, event: Event) => void
+) {
   for (const event of events) {
     plainRecord(event, 'event');
     if (typeof event.type !== 'string')
@@ -148,7 +154,10 @@ export function compareParallelTrace(config: Config, events: readonly Event[]) {
       narrowing: 0,
       parallelFallback: false,
       enteredParallels: 0,
-      exitedParallels: 0
+      exitedParallels: 0,
+      movingPlans: 0,
+      sourceDepths: 0,
+      sourceParallels: 0
     }
   ];
   for (const event of events) {
@@ -159,6 +168,10 @@ export function compareParallelTrace(config: Config, events: readonly Event[]) {
     };
     if (!model.parallelStepReady(machine, expected.snapshot, modelEvent)) {
       const reason = refusalReason(machine, expected.snapshot, modelEvent);
+      if (onRefusal) {
+        onRefusal(reason, event);
+        continue;
+      }
       throw new Error(`Unsupported step: ${event.type} (${reason})`);
     }
     const selected = model.parallelSelections(
@@ -229,6 +242,19 @@ export function compareParallelTrace(config: Config, events: readonly Event[]) {
       0,
       ...plans.map((plan) => countParallels(plan.exits))
     );
+    const movingPlans = plans.filter(
+      (plan) => plan.exits.length > 0 || plan.entries.length > 0
+    ).length;
+    const sourceDepths = new Set(
+      selected.map((selection) => nodes[selection.id].path.length)
+    ).size;
+    // The most parallel nodes strictly above any selected source.
+    const sourceParallels = Math.max(
+      0,
+      ...selected.map((selection) =>
+        countParallels(nodes[selection.id].path.slice(0, -1))
+      )
+    );
     expected = model.parallelStep(machine, expected.snapshot, modelEvent);
     [actual, actualEffects] = transition(runtime, actual, event);
     trace.push({
@@ -239,14 +265,16 @@ export function compareParallelTrace(config: Config, events: readonly Event[]) {
       narrowing,
       parallelFallback,
       enteredParallels,
-      exitedParallels
+      exitedParallels,
+      movingPlans,
+      sourceDepths,
+      sourceParallels
     });
   }
   return trace;
 }
 
 export type RefusalReason =
-  | 'simultaneous selections with several parallel nodes'
   | 'unknown target'
   | 'active region target'
   | 'comparable sources';
@@ -259,8 +287,6 @@ export function refusalReason(
   event: model.Event
 ): RefusalReason {
   const selections = model.parallelSelections(machine, snapshot, event);
-  if (selections.length > 1 && machine.parallels.length > 1)
-    return 'simultaneous selections with several parallel nodes';
   for (const selection of selections) {
     const result = selection.evaluation.result;
     const target = result?.target;

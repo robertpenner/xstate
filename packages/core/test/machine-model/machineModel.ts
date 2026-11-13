@@ -964,8 +964,6 @@ export function parallelStepReady(
   //@ verify
   const selections = parallelSelections(machine, snapshot, event);
   if (selections.length < 2) return parallelReady(machine, snapshot, event);
-  // Simultaneous selections are supported only with a single parallel node.
-  if (machine.parallels.length > 1) return false;
   return multiReady(machine, snapshot.active, selections);
 }
 

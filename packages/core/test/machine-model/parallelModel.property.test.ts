@@ -148,7 +148,7 @@ it('compares generated initialization of multiple and nested parallel trees', ()
     siblingActiveParallel: 0,
     maxNestedParallelDepth: 0,
     inactiveParallel: 0,
-    refusedSteps: 0
+    simultaneousSteps: 0
   };
   fc.assert(
     fc.property(
@@ -195,21 +195,12 @@ it('compares generated initialization of multiple and nested parallel trees', ()
         const config: Config = { ...root, context: { trail: 0 } };
         for (const node of all) node.on = { go: { target: '#id0' } };
         stats.runs++;
-        const trace = (() => {
-          try {
-            return compareParallelTrace(config, step ? [{ type: 'go' }] : []);
-          } catch (error) {
-            if (
-              !step ||
-              !(error instanceof Error) ||
-              error.message !==
-                'Unsupported step: go (simultaneous selections with several parallel nodes)'
-            )
-              throw error;
-            stats.refusedSteps++;
-            return compareParallelTrace(config, []);
-          }
-        })();
+        const trace = compareParallelTrace(
+          config,
+          step ? [{ type: 'go' }] : []
+        );
+        if (step && parallelIds.size > 1 && trace[1].selections > 1)
+          stats.simultaneousSteps++;
         const active = new Set(trace[0].active);
         const activeParallel = [...parallelIds].filter((id) => active.has(id));
         if (activeParallel.length < parallelIds.size) stats.inactiveParallel++;
@@ -252,7 +243,7 @@ it('compares generated initialization of multiple and nested parallel trees', ()
   expect(stats.siblingActiveParallel).toBeGreaterThan(stats.runs / 20);
   expect(stats.maxNestedParallelDepth).toBeGreaterThan(2);
   expect(stats.inactiveParallel).toBeGreaterThan(0);
-  expect(stats.refusedSteps).toBeGreaterThan(0);
+  expect(stats.simultaneousSteps).toBeGreaterThan(stats.runs / 10);
 });
 
 it('compares generated event traces through multiple and nested parallel trees', () => {
@@ -265,6 +256,12 @@ it('compares generated event traces through multiple and nested parallel trees',
     parallelFallback: 0,
     deepEntries: 0,
     deepExits: 0,
+    simultaneous: 0,
+    mixedDepths: 0,
+    deepSources: 0,
+    conflicting: 0,
+    independentMoves: 0,
+    nestedDomains: 0,
     refused: 0,
     reasons: {} as Record<string, number>
   };
@@ -360,23 +357,14 @@ it('compares generated event traces through multiple and nested parallel trees',
         const multi = parallelIds.size > 1;
         if (multi) stats.multiParallel++;
         // A refused event is dropped so the rest of the trace still runs.
-        const accepted: { type: string }[] = [];
-        let trace = compareParallelTrace(config, []);
-        for (const type of events) {
-          try {
-            trace = compareParallelTrace(config, [...accepted, { type }]);
-            accepted.push({ type });
-          } catch (error) {
-            if (
-              !(error instanceof Error) ||
-              !/^Unsupported step/.test(error.message)
-            )
-              throw error;
+        const trace = compareParallelTrace(
+          config,
+          events.map((type) => ({ type })),
+          (reason) => {
             stats.refused++;
-            const reason = /\((.*)\)$/.exec(error.message)?.[1] ?? 'single';
             stats.reasons[reason] = (stats.reasons[reason] ?? 0) + 1;
           }
-        }
+        );
         for (const step of trace.slice(1)) {
           if (multi && step.selections > 0) stats.nestedSteps++;
           if (step.narrowing > 0) stats.narrowedSteps++;
@@ -384,6 +372,13 @@ it('compares generated event traces through multiple and nested parallel trees',
           if (step.parallelFallback) stats.parallelFallback++;
           if (step.enteredParallels > 1) stats.deepEntries++;
           if (step.exitedParallels > 1) stats.deepExits++;
+          if (!multi || step.selections < 2) continue;
+          stats.simultaneous++;
+          if (step.sourceDepths > 1) stats.mixedDepths++;
+          if (step.sourceParallels > 1) stats.deepSources++;
+          if (step.kept < step.selections) stats.conflicting++;
+          else if (step.movingPlans > 1) stats.independentMoves++;
+          if (step.nestedDomains) stats.nestedDomains++;
         }
       }
     ),
@@ -401,7 +396,10 @@ it('compares generated event traces through multiple and nested parallel trees',
   expect(stats.parallelFallback).toBeGreaterThan(0);
   expect(stats.deepEntries).toBeGreaterThan(0);
   expect(stats.deepExits).toBeGreaterThan(0);
-  expect(
-    stats.reasons['simultaneous selections with several parallel nodes']
-  ).toBeGreaterThan(0);
+  expect(stats.simultaneous).toBeGreaterThan(stats.runs / 4);
+  expect(stats.mixedDepths).toBeGreaterThan(0);
+  expect(stats.deepSources).toBeGreaterThan(0);
+  expect(stats.conflicting).toBeGreaterThan(0);
+  expect(stats.independentMoves).toBeGreaterThan(0);
+  expect(stats.reasons['active region target']).toBeGreaterThan(0);
 });

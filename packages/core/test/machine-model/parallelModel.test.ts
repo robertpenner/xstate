@@ -663,7 +663,7 @@ describe('multiple and nested parallel initialization', () => {
     ]);
   });
 
-  it('refuses simultaneous selections once a machine has more than one parallel node', () => {
+  it('takes simultaneous selections on a machine with more than one parallel node', () => {
     const config: Config = {
       context: {},
       type: 'parallel',
@@ -678,16 +678,18 @@ describe('multiple and nested parallel initialization', () => {
         b: {}
       }
     };
-    expect(() => compareParallelTrace(config, [{ type: 'go' }])).toThrow(
-      'Unsupported step: go (simultaneous selections with several parallel nodes)'
-    );
+    const trace = compareParallelTrace(config, [{ type: 'go' }]);
+    expect(trace[1].selections).toBe(2);
+    expect(trace[1].kept).toBe(2);
     expect(
       compareParallelTrace(config, [{ type: 'unhandled' }])[1].snapshotReused
     ).toBe(true);
   });
 });
 
-type NestedOn = Partial<Record<'p' | 'a' | 'q' | 'x1' | 'off', On>>;
+type NestedOn = Partial<
+  Record<'p' | 'a' | 'q' | 'x' | 'x1' | 'y' | 'y1' | 'b' | 'b1' | 'off', On>
+>;
 
 // An outer parallel node `p` whose region `a` holds an inner parallel node `q`
 // below a compound node, beside a plain region `b`.
@@ -711,6 +713,7 @@ function nested(on: NestedOn = {}, initial = 'p'): Config {
                 states: {
                   x: logged('x', {
                     initial: 'x1',
+                    on: on.x,
                     states: {
                       x1: logged('x1', {
                         on: { next: { target: 'x2' }, ...on.x1 }
@@ -720,7 +723,11 @@ function nested(on: NestedOn = {}, initial = 'p'): Config {
                   }),
                   y: logged('y', {
                     initial: 'y1',
-                    states: { y1: logged('y1'), y2: logged('y2') }
+                    on: on.y,
+                    states: {
+                      y1: logged('y1', { on: on.y1 }),
+                      y2: logged('y2')
+                    }
                   })
                 }
               }),
@@ -729,7 +736,8 @@ function nested(on: NestedOn = {}, initial = 'p'): Config {
           }),
           b: logged('b', {
             initial: 'b1',
-            states: { b1: logged('b1'), b2: logged('b2') }
+            on: on.b,
+            states: { b1: logged('b1', { on: on.b1 }), b2: logged('b2') }
           })
         }
       }),
@@ -979,6 +987,190 @@ describe('single-selection steps through nested parallel structure', () => {
     );
     expect(trace[2].value).toEqual({ a: { x: 'x2', y: 'y2' }, b: {} });
     expect(labels(trace[2])).toEqual(['exit y1', 'enter y2']);
+  });
+});
+
+// A handler that records what it saw and patches `count` from the pre-step
+// context, optionally moving to `target`.
+const seen =
+  (name: string, count: number, target?: string) =>
+  (
+    { context }: { context: Record<string, unknown> },
+    enq: Parameters<NonNullable<Logged['entry']>>[1]
+  ) => {
+    enq(record, `${name} saw ${String(context.count)}`);
+    return {
+      ...(target === undefined ? {} : { target }),
+      context: { count: Number(context.count) * 10 + count }
+    };
+  };
+
+describe('simultaneous transitions through nested parallel structure', () => {
+  it('moves two inner regions and an outer region together', () => {
+    const trace = compareParallelTrace(
+      nested({
+        x1: { go: { target: 'x2' } },
+        y1: { go: { target: 'y2' } },
+        b1: { go: { target: 'b2' } }
+      }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].selections).toBe(3);
+    expect(trace[1].kept).toBe(3);
+    expect(trace[1].value).toEqual({
+      p: { a: { q: { x: 'x2', y: 'y2' } }, b: 'b2' }
+    });
+    expect(labels(trace[1])).toEqual([
+      'exit b1',
+      'exit y1',
+      'exit x1',
+      'enter x2',
+      'enter y2',
+      'enter b2'
+    ]);
+  });
+
+  it('suppresses inner and outer parallel fallbacks when a region below handles', () => {
+    const trace = compareParallelTrace(
+      nested({
+        p: { go: patch(7, '#m.off') },
+        q: { go: patch(8, '#m.p.a.r') },
+        x1: { go: patch(1, 'x2') },
+        b1: { go: patch(2, 'b2') }
+      }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].selections).toBe(2);
+    expect(trace[1].context).toEqual({ count: 2 });
+    expect(trace[1].value).toEqual({
+      p: { a: { q: { x: 'x2', y: 'y1' } }, b: 'b2' }
+    });
+  });
+
+  it('falls back to the inner parallel node while an outer region handles locally', () => {
+    const trace = compareParallelTrace(
+      nested({
+        q: { go: patch(1, '#m.p.a.r') },
+        b1: { go: patch(2, 'b2') }
+      }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].selections).toBe(2);
+    expect(trace[1].kept).toBe(2);
+    expect(trace[1].parallelFallback).toBe(false);
+    expect(trace[1].value).toEqual({ p: { a: 'r', b: 'b2' } });
+    expect(labels(trace[1])).toEqual([
+      'exit b1',
+      'exit y1',
+      'exit y',
+      'exit x1',
+      'exit x',
+      'exit q',
+      'enter r',
+      'enter b2'
+    ]);
+  });
+
+  it.each([
+    [
+      'inner exit first',
+      { go: patch(1, '#m.p.a.r') },
+      { go: patch(2, '#m.off') },
+      { p: { a: 'r', b: 'b1' } }
+    ],
+    [
+      'outer exit first',
+      { go: patch(1, '#m.off') },
+      { go: patch(2, '#m.p.a.r') },
+      'off'
+    ]
+  ] as const)(
+    'keeps the earlier region when results leave the inner and the outer parallel node (%s)',
+    (_, x1, y1, value) => {
+      const trace = compareParallelTrace(nested({ x1, y1 }), [{ type: 'go' }]);
+      expect(trace[1].selections).toBe(2);
+      expect(trace[1].kept).toBe(1);
+      expect(trace[1].context).toEqual({ count: 1 });
+      expect(trace[1].value).toEqual(value);
+    }
+  );
+
+  it('keeps an earlier shallow fallback over a later deeper conflicting source', () => {
+    const trace = compareParallelTrace(
+      nested({ a: { go: patch(1, '#m.off') }, b1: { go: patch(2, 'b2') } }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].selections).toBe(2);
+    expect(trace[1].kept).toBe(1);
+    expect(trace[1].context).toEqual({ count: 1 });
+    expect(trace[1].value).toBe('off');
+  });
+
+  it.each([true, false])(
+    'keeps a lifecycle-free atomic self-target beside a plan leaving both parallel nodes (self-target first: %s)',
+    (selfFirst) => {
+      const self = { go: seen('self', 1, '#m.p.a.q.x.x1') };
+      const leave = { go: seen('leave', 2, '#m.off') };
+      const trace = compareParallelTrace(
+        nested(
+          selfFirst
+            ? { x1: self, y1: leave }
+            : { x1: leave, y1: { go: seen('self', 1, '#m.p.a.q.y.y1') } }
+        ),
+        [{ type: 'go' }]
+      );
+      expect(trace[1].selections).toBe(2);
+      expect(trace[1].kept).toBe(2);
+      expect(trace[1].value).toBe('off');
+      expect(trace[1].context).toEqual({ count: selfFirst ? 2 : 1 });
+      expect(labels(trace[1])).toEqual([
+        'exit b1',
+        'exit b',
+        'exit y1',
+        'exit y',
+        'exit x1',
+        'exit x',
+        'exit q',
+        'exit a',
+        'exit p',
+        ...(selfFirst
+          ? ['self saw 0', 'leave saw 0']
+          : ['leave saw 0', 'self saw 0']),
+        'enter off'
+      ]);
+    }
+  );
+
+  it('runs kept callbacks on the pre-step context and drops a losing result', () => {
+    const trace = compareParallelTrace(
+      nested({
+        x1: { go: seen('inner', 1, '#m.p.a.r') },
+        y1: {
+          go: (_, enq) => {
+            enq(record, 'lost');
+            return { target: '#m.off', context: { lost: 1 } };
+          }
+        },
+        b1: { go: seen('outer', 3, 'b2') }
+      }),
+      [{ type: 'go' }]
+    );
+    expect(trace[1].selections).toBe(3);
+    expect(trace[1].kept).toBe(2);
+    expect(trace[1].context).toEqual({ count: 3 });
+    expect(trace[1].value).toEqual({ p: { a: 'r', b: 'b2' } });
+    expect(labels(trace[1])).toEqual([
+      'exit b1',
+      'exit y1',
+      'exit y',
+      'exit x1',
+      'exit x',
+      'exit q',
+      'inner saw 0',
+      'outer saw 0',
+      'enter r',
+      'enter b2'
+    ]);
   });
 });
 

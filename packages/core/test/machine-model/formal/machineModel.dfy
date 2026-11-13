@@ -1324,10 +1324,7 @@ function parallelStepReady(machine: ParallelMachine, snapshot: ParallelSnapshot,
   if (|selections| < 2) then
     parallelReady(machine, snapshot, event)
   else
-    if (|machine.parallels| > 1) then
-      false
-    else
-      multiReady(machine, snapshot.active, selections)
+    multiReady(machine, snapshot.active, selections)
 }
 
 function parallelStep(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): ParallelStep
@@ -2665,10 +2662,266 @@ lemma ParallelStepDelegates(machine: ParallelMachine, snapshot: ParallelSnapshot
 {
 }
 
-lemma MultipleParallelSelectionsRefused(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
-  requires |machine.parallels| > 1 && |parallelSelections(machine, snapshot, event)| >= 2
-  ensures !parallelStepReady(machine, snapshot, event)
+ghost predicate Distinct(xs: seq<string>)
 {
+  forall i, j :: 0 <= i < j < |xs| ==> xs[i] != xs[j]
+}
+
+lemma DistinctTail(xs: seq<string>)
+  requires |xs| > 0 && Distinct(xs)
+  ensures Distinct(xs[1..]) && xs[0] !in xs[1..]
+{
+  forall i, j | 0 <= i < j < |xs| - 1
+    ensures xs[1..][i] != xs[1..][j]
+  {
+    assert xs[1..][i] == xs[i + 1] && xs[1..][j] == xs[j + 1];
+  }
+  forall k | 0 <= k < |xs| - 1
+    ensures xs[1..][k] != xs[0]
+  {
+    assert xs[1..][k] == xs[k + 1];
+  }
+}
+
+lemma {:induction false} SubseqMembers(a: seq<string>, b: seq<string>)
+  requires Subseq(a, b)
+  ensures forall x :: x in a ==> x in b
+  decreases |b|
+{
+  if |a| > 0 {
+    if a[0] == b[0] && Subseq(a[1..], b[1..]) {
+      SubseqMembers(a[1..], b[1..]);
+      assert a == [a[0]] + a[1..];
+      assert b == [b[0]] + b[1..];
+    } else {
+      SubseqMembers(a, b[1..]);
+      assert b == [b[0]] + b[1..];
+    }
+  }
+}
+
+lemma {:induction false} SubseqDistinct(a: seq<string>, b: seq<string>)
+  requires Subseq(a, b) && Distinct(b)
+  ensures Distinct(a)
+  decreases |b|
+{
+  if |a| > 0 {
+    DistinctTail(b);
+    if a[0] == b[0] && Subseq(a[1..], b[1..]) {
+      SubseqDistinct(a[1..], b[1..]);
+      SubseqMembers(a[1..], b[1..]);
+      forall i, j | 0 <= i < j < |a|
+        ensures a[i] != a[j]
+      {
+        assert a[j] == a[1..][j - 1];
+        if i > 0 {
+          assert a[i] == a[1..][i - 1];
+        } else {
+          assert a[j] in a[1..];
+        }
+      }
+    } else {
+      SubseqDistinct(a, b[1..]);
+    }
+  }
+}
+
+ghost predicate DistinctIds(selections: seq<Selection>)
+{
+  forall i, j :: 0 <= i < j < |selections| ==> selections[i].id != selections[j].id
+}
+
+lemma {:induction false} EnabledSelectionsDistinct(nodes: map<string, CompoundNode>, active: seq<string>,
+                                                   candidates: seq<string>, context: map<string, int>, event: Event)
+  requires Distinct(candidates)
+  ensures DistinctIds(enabledSelections(nodes, active, candidates, context, event))
+  decreases |candidates|
+{
+  if |candidates| > 0 {
+    var id := candidates[0];
+    var tail := candidates[1..];
+    DistinctTail(candidates);
+    EnabledSelectionsDistinct(nodes, active, tail, context, event);
+    EnabledSelectionMeaning(nodes, active, tail, context, event);
+    OwnSelectionMeaning(nodes, id, context, event);
+    var rest := enabledSelections(nodes, active, tail, context, event);
+    var selections := enabledSelections(nodes, active, candidates, context, event);
+    assert DistinctIds(rest);
+    if id in nodes && ownSelection(nodes, id, context, event).Some? &&
+       !handledBelow(nodes, active, nodes[id].path, context, event) {
+      assert selections == [ownSelection(nodes, id, context, event).value] + rest;
+      assert DistinctIds(selections) by {
+      forall i, j | 0 <= i < j < |selections|
+        ensures selections[i].id != selections[j].id
+      {
+        assert selections[j] == rest[j - 1];
+        assert rest[j - 1] in rest;
+        if i > 0 {
+          assert selections[i] == rest[i - 1];
+        } else {
+          assert selections[i].id == id;
+          assert rest[j - 1].id in tail;
+        }
+      }
+      }
+    } else {
+      assert selections == rest;
+    }
+  }
+}
+
+lemma {:induction false} SourceApartMeaning(path: seq<string>, selections: seq<Selection>)
+  ensures sourceApart(path, selections) <==>
+    forall k :: 0 <= k < |selections| ==> !comparable(path, selections[k].node.path)
+  decreases |selections|
+{
+  if |selections| > 0 {
+    SourceApartMeaning(path, selections[1..]);
+    forall k | 0 < k < |selections|
+      ensures selections[k] == selections[1..][k - 1]
+    {
+    }
+  }
+}
+
+lemma {:induction false} SourcesApartMeaning(selections: seq<Selection>)
+  ensures sourcesApart(selections) <==>
+    forall i, j :: 0 <= i < j < |selections| ==> !comparable(selections[i].node.path, selections[j].node.path)
+  decreases |selections|
+{
+  if |selections| > 0 {
+    var rest := selections[1..];
+    SourceApartMeaning(selections[0].node.path, rest);
+    SourcesApartMeaning(rest);
+    forall k | 0 < k < |selections|
+      ensures selections[k] == rest[k - 1]
+    {
+    }
+  }
+}
+
+lemma SelectedNotBelow(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event,
+                       candidate: Selection, other: Selection)
+  requires candidate in parallelSelections(machine, snapshot, event)
+  requires other in parallelSelections(machine, snapshot, event)
+  ensures candidate.id in machine.nodes && candidate.node == machine.nodes[candidate.id]
+  ensures !below(candidate.node.path, other.node.path)
+{
+  var nodes := machine.nodes;
+  var active := snapshot.active;
+  var context := snapshot.context;
+  RegionFirstSelection(machine, snapshot, event);
+  assert candidate.node == nodes[candidate.id];
+  assert other.node == nodes[other.id];
+  BelowMeaning(candidate.node.path, other.node.path);
+  HandledBelowMeaning(nodes, active, other.node.path, context, event);
+  assert !handledBelow(nodes, active, other.node.path, context, event);
+  assert candidate.id in active && ownSelection(nodes, candidate.id, context, event).Some?;
+}
+
+lemma SelectedIdsDistinct(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, snapshot.active)
+  ensures DistinctIds(parallelSelections(machine, snapshot, event))
+{
+  hide *;
+  reveal parallelSelections;
+  assert Subseq(snapshot.active, machine.order) by { reveal ParallelValid; }
+  assert Distinct(machine.order) by { reveal ParallelWellFormed, Distinct; }
+  SubseqDistinct(snapshot.active, machine.order);
+  EnabledSelectionsDistinct(machine.nodes, snapshot.active, snapshot.active, snapshot.context, event);
+}
+
+lemma SelectedPairApart(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event, i: int, j: int)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, snapshot.active)
+  requires 0 <= i < j < |parallelSelections(machine, snapshot, event)|
+  ensures var selections := parallelSelections(machine, snapshot, event);
+    !comparable(selections[i].node.path, selections[j].node.path)
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  var a := selections[i];
+  var b := selections[j];
+  SelectedIdsDistinct(machine, snapshot, event);
+  assert a.id != b.id by { reveal DistinctIds; }
+  SelectedNotBelow(machine, snapshot, event, a, b);
+  SelectedNotBelow(machine, snapshot, event, b, a);
+  ComparableMeaning(a.node.path, b.node.path);
+  WithinMeaning(a.node.path, b.node.path);
+  WithinMeaning(b.node.path, a.node.path);
+  if a.node.path == b.node.path {
+    assert ParallelNodeShape(machine, a.id);
+    assert ParallelNodeShape(machine, b.id);
+  }
+}
+
+// Selection through active configurations never returns two related sources:
+// a strictly lower handler suppresses its ancestors, and active ids are distinct.
+lemma SelectedSourcesApart(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, snapshot.active)
+  ensures var selections := parallelSelections(machine, snapshot, event);
+    (forall i, j :: 0 <= i < j < |selections| ==>
+      !comparable(selections[i].node.path, selections[j].node.path)) &&
+    sourcesApart(selections) && NoDescendantSources(selections, [])
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  forall candidate, other | candidate in selections && (other in selections || other in [])
+    ensures !below(candidate.node.path, other.node.path)
+  {
+    SelectedNotBelow(machine, snapshot, event, candidate, other);
+  }
+  forall i, j | 0 <= i < j < |selections|
+    ensures !comparable(selections[i].node.path, selections[j].node.path)
+  {
+    SelectedPairApart(machine, snapshot, event, i, j);
+  }
+  SourcesApartMeaning(selections);
+}
+
+// The general conflict rule lets a descendant source preempt its ancestor, but
+// selected sources are never related, so selection reduces it to earliest-wins.
+lemma SelectedConflictsGreedy(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, snapshot.active)
+  ensures var selections := parallelSelections(machine, snapshot, event);
+    removeConflicts(machine, snapshot.active, selections, []) == Greedy(machine, snapshot.active, selections, [])
+{
+  SelectedSourcesApart(machine, snapshot, event);
+  GreedyWhenApart(machine, snapshot.active, parallelSelections(machine, snapshot, event), []);
+}
+
+// With several selections, readiness depends only on each target: no simultaneous
+// step is refused because of how many parallel nodes the machine declares.
+lemma SimultaneousReadyMeaning(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, snapshot.active)
+  requires |parallelSelections(machine, snapshot, event)| >= 2
+  ensures parallelStepReady(machine, snapshot, event) <==>
+    forall selection :: selection in parallelSelections(machine, snapshot, event) ==>
+      selectionReady(machine, snapshot.active, selection)
+{
+  hide *;
+  var selections := parallelSelections(machine, snapshot, event);
+  var ready := (selection: Selection) => selectionReady(machine, snapshot.active, selection);
+  SelectedSourcesApart(machine, snapshot, event);
+  assert parallelStepReady(machine, snapshot, event) == multiReady(machine, snapshot.active, selections) by {
+    reveal parallelStepReady;
+  }
+  assert multiReady(machine, snapshot.active, selections) == (SeqAll(selections, ready) && sourcesApart(selections)) by {
+    reveal multiReady;
+  }
+  if parallelStepReady(machine, snapshot, event) {
+    SelectionsReady(machine, snapshot.active, selections);
+  } else if forall selection :: selection in selections ==> selectionReady(machine, snapshot.active, selection) {
+    SelectionsReadyConverse(machine, snapshot.active, selections);
+  }
+}
+
+lemma {:induction false} SelectionsReadyConverse(machine: ParallelMachine, active: seq<string>, selections: seq<Selection>)
+  requires forall selection :: selection in selections ==> selectionReady(machine, active, selection)
+  ensures SeqAll(selections, (selection: Selection) => selectionReady(machine, active, selection))
+  decreases |selections|
+{
+  if |selections| > 0 {
+    assert forall selection :: selection in selections[1..] ==> selection in selections;
+    SelectionsReadyConverse(machine, active, selections[1..]);
+  }
 }
 
 ghost function Effects(selections: seq<Selection>): seq<Effect>

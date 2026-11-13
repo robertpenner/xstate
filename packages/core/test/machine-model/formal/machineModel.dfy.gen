@@ -737,10 +737,7 @@ function parallelStepReady(machine: ParallelMachine, snapshot: ParallelSnapshot,
   if (|selections| < 2) then
     parallelReady(machine, snapshot, event)
   else
-    if (|machine.parallels| > 1) then
-      false
-    else
-      multiReady(machine, snapshot.active, selections)
+    multiReady(machine, snapshot.active, selections)
 }
 
 function parallelStep(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): ParallelStep
