@@ -1,6 +1,6 @@
 {
   "source": "fsmModel.ts",
-  "verifiedCount": 81,
+  "verifiedCount": 89,
   "functions": {
     "sameValue": {
       "parameters": [],
@@ -70,7 +70,9 @@
     "TransitionTargetsDeclared",
     "TargetsDeclared",
     "WitnessMachine",
-    "PatchTransition"
+    "PatchTransition",
+    "AtmMachine",
+    "BankingIsAuthorized"
   ],
   "modelDeclarations": [
     "datatype Value = integer(value: int) | negativeZero | notANumber | undefinedValue | opaque_(id: int)",
@@ -111,7 +113,10 @@
     "InitialDeclared",
     "RunSingleEvent",
     "RunConcat",
-    "RunKeepsContextKeys"
+    "RunKeepsContextKeys",
+    "InvariantAtEveryPrefix",
+    "AtmPreservesAuthorization",
+    "AtmAuthorizedAtEveryPrefix"
   ],
   "witnesses": {
     "MergeValues": "MergeValuesWitness",
@@ -133,7 +138,9 @@
     "NotANumberOverOwnNotANumberKeepsSnapshot": "NotANumberOverOwnNotANumberKeepsSnapshotWitness",
     "StepStaysDeclared": "StepStaysDeclaredWitness",
     "RunStaysDeclared": "RunStaysDeclaredWitness",
-    "InitialDeclared": "InitialDeclaredWitness"
+    "InitialDeclared": "InitialDeclaredWitness",
+    "InvariantAtEveryPrefix": "InvariantAtEveryPrefixWitness",
+    "AtmPreservesAuthorization": "AtmPreservesAuthorizationWitness"
   },
   "defects": [
     {
