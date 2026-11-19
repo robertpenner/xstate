@@ -357,10 +357,11 @@ This section maps the runtime lines of `createFSM` in `src/fsm.ts` at
 `da64b0a`, the `next` commit this branch last merged, to the model, the laws,
 and the tests. `src/fsm.ts` has not changed since `c70dd85`, so the line
 numbers hold for both. "Mutants" are named as in the mutation testing
-section, and "defects" are the model edits that Dafny must reject. Every step of every
-named case and generated run goes through `assertAgrees`, which compares the
-value, the context, and both reuse flags, so each line below is also covered
-by that comparison.
+section, and "defects" are the model edits that Dafny must reject. The
+general FSM comparisons call `assertAgrees` after each step to check the
+value, context, snapshot identity, and context identity. The separate ATM
+replay compares state and context values, authorization at every prefix,
+and snapshot reuse. It does not compare context identity.
 
 - **429–436**, `createSnapshot`, builds `{ status: 'active', value, context,
   output: undefined, error: undefined }`. The model's `Snapshot` keeps only

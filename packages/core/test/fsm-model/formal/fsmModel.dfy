@@ -839,11 +839,16 @@ lemma AtmPreservesAuthorizationWitness()
   var login := FSMEvent("LOGIN", 0);
   var expire := FSMEvent("EXPIRE", 0);
   var ignored := FSMEvent("IGNORED", 0);
+  assert s.value == "idle" && ":authorized" in s.context && s.context[":authorized"] == Value.opaque_(0);
   AtmPreservesAuthorization(s, login);
   var banking := transition(m, s, login).snapshot;
   assert banking.value == "banking" && BankingIsAuthorized(banking);
   MissingTransitionKeepsSnapshot(m, banking, ignored);
   AtmPreservesAuthorization(banking, expire);
+  TransitionMeaning(m, banking, expire);
+  PatchKeysOwnedAfterStep(m, banking, expire);
+  var expired := transition(m, banking, expire).snapshot;
+  assert expired.value == "idle" && ":authorized" in expired.context && expired.context[":authorized"] == Value.opaque_(0);
 }
 
 lemma InvariantAtEveryPrefixWitness()
