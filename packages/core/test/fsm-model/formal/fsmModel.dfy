@@ -758,3 +758,107 @@ lemma InitialDeclaredWitness()
   assert machine.states["idle"].on.Values == {machine.states["idle"].on["go"]};
   InitialDeclared(machine);
 }
+
+lemma InvariantAtEveryPrefix(m: Machine, events: seq<FSMEvent>, inv: Snapshot -> bool, allowed: (Snapshot, FSMEvent) -> bool)
+  requires inv(initialState(m))
+  requires forall s, e :: inv(s) && allowed(s, e) ==> inv(transition(m, s, e).snapshot)
+  requires forall i :: 0 <= i < |events| ==> allowed(run(m, initialState(m), events[..i]), events[i])
+  ensures forall k :: 0 <= k <= |events| ==> inv(run(m, initialState(m), events[..k]))
+  decreases |events|
+{
+  if |events| > 0 {
+    var n := |events|-1;
+    var earlier := events[..n];
+    forall i | 0 <= i < n
+      ensures allowed(run(m, initialState(m), earlier[..i]), earlier[i])
+    {
+      assert earlier[..i] == events[..i];
+    }
+    InvariantAtEveryPrefix(m, earlier, inv, allowed);
+    forall k | 0 <= k <= |events|
+      ensures inv(run(m, initialState(m), events[..k]))
+    {
+      if k <= n {
+        assert earlier[..k] == events[..k];
+      } else {
+        assert earlier[..n] == earlier;
+        var s := run(m, initialState(m), earlier);
+        assert inv(s) && allowed(s, events[n]);
+        assert events[..k] == earlier + [events[n]];
+        RunConcat(m, initialState(m), earlier, [events[n]]);
+        RunSingleEvent(m, s, events[n]);
+      }
+    }
+  }
+}
+
+ghost function AtmMachine(): Machine
+{
+  var login := config(TransitionConfig(Some("banking"), Some([PatchEntry(":authorized", Value.opaque_(1))])));
+  var expire := config(TransitionConfig(Some("idle"), Some([PatchEntry(":authorized", Value.opaque_(0))])));
+  Machine("idle", Some(map[":authorized" := Value.opaque_(0)]),
+          map["idle" := StateNode(map["LOGIN" := login], map[]),
+              "banking" := StateNode(map["EXPIRE" := expire], map[])], map[])
+}
+
+ghost predicate BankingIsAuthorized(s: Snapshot)
+{
+  s.value == "banking" ==> ":authorized" in s.context && s.context[":authorized"] == Value.opaque_(1)
+}
+
+lemma AtmPreservesAuthorization(s: Snapshot, e: FSMEvent)
+  requires BankingIsAuthorized(s)
+  ensures BankingIsAuthorized(transition(AtmMachine(), s, e).snapshot)
+{
+  var m := AtmMachine();
+  if s.value == "idle" && e.type_ == "LOGIN" {
+    TransitionMeaning(m, s, e);
+    PatchKeysOwnedAfterStep(m, s, e);
+  } else if s.value == "banking" && e.type_ == "EXPIRE" {
+    TransitionMeaning(m, s, e);
+  } else {
+    MissingTransitionKeepsSnapshot(m, s, e);
+  }
+}
+
+lemma AtmAuthorizedAtEveryPrefix(events: seq<FSMEvent>)
+  ensures forall k :: 0 <= k <= |events| ==> BankingIsAuthorized(run(AtmMachine(), initialState(AtmMachine()), events[..k]))
+{
+  forall s, e | BankingIsAuthorized(s)
+    ensures BankingIsAuthorized(transition(AtmMachine(), s, e).snapshot)
+  {
+    AtmPreservesAuthorization(s, e);
+  }
+  InvariantAtEveryPrefix(AtmMachine(), events, BankingIsAuthorized, (s, e) => true);
+}
+
+lemma AtmPreservesAuthorizationWitness()
+{
+  var m := AtmMachine();
+  var s := initialState(m);
+  var login := FSMEvent("LOGIN", 0);
+  var expire := FSMEvent("EXPIRE", 0);
+  var ignored := FSMEvent("IGNORED", 0);
+  assert s.value == "idle" && ":authorized" in s.context && s.context[":authorized"] == Value.opaque_(0);
+  AtmPreservesAuthorization(s, login);
+  var banking := transition(m, s, login).snapshot;
+  assert banking.value == "banking" && BankingIsAuthorized(banking);
+  MissingTransitionKeepsSnapshot(m, banking, ignored);
+  AtmPreservesAuthorization(banking, expire);
+  TransitionMeaning(m, banking, expire);
+  PatchKeysOwnedAfterStep(m, banking, expire);
+  var expired := transition(m, banking, expire).snapshot;
+  assert expired.value == "idle" && ":authorized" in expired.context && expired.context[":authorized"] == Value.opaque_(0);
+}
+
+lemma InvariantAtEveryPrefixWitness()
+{
+  var m := AtmMachine();
+  var es := [FSMEvent("LOGIN", 0), FSMEvent("IGNORED", 0), FSMEvent("EXPIRE", 0)];
+  forall s, e | BankingIsAuthorized(s)
+    ensures BankingIsAuthorized(transition(m, s, e).snapshot)
+  {
+    AtmPreservesAuthorization(s, e);
+  }
+  InvariantAtEveryPrefix(m, es, BankingIsAuthorized, (s, e) => true);
+}

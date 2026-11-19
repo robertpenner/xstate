@@ -1,7 +1,7 @@
 # A verified model of `xstate/fsm`
 
 This directory holds a [LemmaScript](https://www.npmjs.com/package/lemmascript)
-model of `createFSM` from [`src/fsm.ts`](../../src/fsm.ts), Dafny proofs of 31
+model of `createFSM` from [`src/fsm.ts`](../../src/fsm.ts), Dafny proofs of 34
 laws about it, and tests that compare the model with `createFSM`.
 
 [`fsmModel.ts`](./fsmModel.ts) writes `createFSM`'s `initialState` and
@@ -110,10 +110,10 @@ hints, such as "a reused step returns the given snapshot". The laws in
   `a + b`.
 
 [`formal/fsmModel.manifest.json`](./formal/fsmModel.manifest.json) lists all
-31 law names and the contract of each function.
+34 law names and the contract of each function.
 
-Twenty laws have preconditions, and a law whose preconditions no case meets
-would be proved without saying anything. Each of the twenty has a witness in
+Twenty-two laws have preconditions, and a law whose preconditions no case meets
+would be proved without saying anything. Each of the twenty-two has a witness in
 `formal/fsmModel.dfy`: a lemma with no parameters or preconditions that builds
 one concrete machine, snapshot, or patch and calls the law, so Dafny must
 prove that the case meets the law's preconditions. For example,
@@ -337,14 +337,31 @@ Both test files run in `pnpm test`.
 
 ## Requirement map
 
+`InvariantAtEveryPrefix` lifts a machine's initialization and one-event
+preservation proofs to all prefixes of a finite input sequence. An event
+must be permitted in the snapshot **before** it runs. The empty prefix is
+included. The induction uses `RunConcat` and `RunSingleEvent` and needs no
+declared-target premise.
+
+`AtmAuthorizedAtEveryPrefix` instantiates this law on a flat ATM, for all
+inputs. `AtmPreservesAuthorization` proves from the actual transition rules
+that a `banking` snapshot owns `:authorized` with the value for true.
+`LOGIN` enters `banking` and sets it; `EXPIRE` clears it and leaves for `idle`;
+unhandled events reuse the snapshot. The proof uses distinct opaque IDs for
+false and true. The verifier changes just the expiry target in a disposable
+copy: `[LOGIN, EXPIRE]` then leaves the machine in `banking` with authorization
+false. It requires the ATM postcondition to fail and every other task,
+including the generic induction, to verify.
+
 This section maps the runtime lines of `createFSM` in `src/fsm.ts` at
 `da64b0a`, the `next` commit this branch last merged, to the model, the laws,
 and the tests. `src/fsm.ts` has not changed since `c70dd85`, so the line
 numbers hold for both. "Mutants" are named as in the mutation testing
-section, and "defects" are the model edits that Dafny must reject. Every step of every
-named case and generated run goes through `assertAgrees`, which compares the
-value, the context, and both reuse flags, so each line below is also covered
-by that comparison.
+section, and "defects" are the model edits that Dafny must reject. The
+general FSM comparisons call `assertAgrees` after each step to check the
+value, context, snapshot identity, and context identity. The separate ATM
+replay compares state and context values, authorization at every prefix,
+and snapshot reuse. It does not compare context identity.
 
 - **429–436**, `createSnapshot`, builds `{ status: 'active', value, context,
   output: undefined, error: undefined }`. The model's `Snapshot` keeps only
@@ -479,7 +496,7 @@ locks LemmaScript and its dependencies.
 
 It checks that the committed `.dfy.gen` is what LemmaScript generates from
 `fsmModel.ts`, checks that every law with preconditions has a witness,
-verifies the model, laws, and witnesses (81 Dafny tasks), rejects the
+verifies the model, laws, and witnesses (89 Dafny tasks), rejects the
 fourteen
 defects, and checks the rewrite. The `fsm model verification` workflow runs it
 on pull requests that change `src/fsm.ts` or this directory.

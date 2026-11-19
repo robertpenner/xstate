@@ -302,6 +302,40 @@ async function regenerateRefactor(directory) {
   return 'Detected stale Dafny after the refactor; regeneration verifies.';
 }
 
+async function rejectFaultyExpiry(directory) {
+  const proof = replaceOnce(
+    inputs.proof,
+    'var expire := config(TransitionConfig(Some("idle")',
+    'var expire := config(TransitionConfig(Some("banking")'
+  );
+  const header = proof.indexOf('lemma AtmPreservesAuthorization(');
+  const postcondition = proof.indexOf('  ensures BankingIsAuthorized(', header);
+  assert.ok(header !== -1 && postcondition > header);
+  const line = proof.slice(0, postcondition).split('\n').length;
+  const file = 'faulty-expiry.dfy';
+  writeFileSync(path.join(directory, file), proof);
+  const result = await run(
+    'dafny',
+    ['verify', '--cores=2', '--verification-time-limit=15', file],
+    directory
+  );
+  assert.equal(result.status, 4, result.output);
+  assert.match(result.output, /Error: a postcondition could not be proved/);
+  assert.match(
+    result.output,
+    new RegExp(
+      `faulty-expiry\\.dfy\\(${line},\\d+\\): Related location: this is the postcondition`
+    )
+  );
+  assert.match(
+    result.output,
+    new RegExp(
+      `finished with ${manifest.verifiedCount - 1} verified, 1 error\\s*$`
+    )
+  );
+  return 'Rejected faulty expiry: only AtmPreservesAuthorization failed.';
+}
+
 // After a failure, workers start no new tasks, and the running ones finish
 // before the caller deletes their scratch directories.
 async function inParallel(tasks, limit) {
@@ -343,7 +377,8 @@ try {
         (defect, index) => () =>
           rejectDefect(path.join(scratch, `defect-${index}`), defect)
       ),
-      () => regenerateRefactor(path.join(scratch, 'refactor'))
+      () => regenerateRefactor(path.join(scratch, 'refactor')),
+      () => rejectFaultyExpiry(scratch)
     ],
     Math.max(1, Math.floor(availableParallelism() / 2))
   );
