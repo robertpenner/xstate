@@ -1,4 +1,6 @@
 import * as fc from 'fast-check';
+import fixture from './atm-prefix-replay.json';
+import { assertAtmReplay } from './atmReplay';
 import {
   assertAgrees,
   type JsConfig,
@@ -241,6 +243,18 @@ const minimums: [label: string, minimum: number, exercises: string][] = [
 const seed = process.env.FSM_MODEL_SEED;
 
 describe('the fsm model and createFSM', () => {
+  it('replays the generated ATM events on both expiry variants', () => {
+    const event = fc
+      .constantFrom('LOGIN', 'EXPIRE', 'IGNORED')
+      .map((type) => ({ type, payload: 0 }));
+    const traces = fc.sample(fc.array(event, { maxLength: 8 }), {
+      seed: 5056,
+      numRuns: 12
+    });
+    expect(traces).toEqual(fixture.generated.map((trace) => trace.events));
+    fixture.generated.forEach(assertAtmReplay);
+  });
+
   it('agree on generated machines', () => {
     const counts = new Map<string, number>();
     const count = (label: string) =>

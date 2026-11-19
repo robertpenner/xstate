@@ -1,3 +1,5 @@
+import fixture from './atm-prefix-replay.json';
+import { assertAtmReplay } from './atmReplay';
 import { assertAgrees, toModel, type JsConfig } from './fsmAdapter.ts';
 import { initialState, run, transition } from './fsmModel.ts';
 
@@ -13,6 +15,15 @@ const setOwn = (object: object, key: PropertyKey, value: unknown) =>
 // machines run in fsmModel.property.test.ts.
 
 describe('the fsm model and createFSM', () => {
+  it.each(fixture.named)('ATM: $name', assertAtmReplay);
+
+  it('first violates banking authorization at EXPIRE only on the faulty ATM', () => {
+    const { events, faultyFirstBadPrefix } = fixture.minimizedFailure;
+    expect(events.map((event) => event.type)).toEqual(['LOGIN', 'EXPIRE']);
+    expect(faultyFirstBadPrefix).toBe(2);
+    assertAtmReplay(fixture.minimizedFailure);
+  });
+
   it('treats inherited object keys as non-transitions', () => {
     const config = {
       initial: 'idle',
