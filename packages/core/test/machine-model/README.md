@@ -1,12 +1,12 @@
 # Verified flat, compound, and parallel machine models
 
 This directory models XState v6 `createMachine` initialization and external-event
-steps. The runtime baseline is `da64b0a` plus upstream
-[`9eb940c`](https://github.com/statelyai/xstate/commit/9eb940c), the targetless-reentry
-fix merged in [statelyai/xstate#5898](https://github.com/statelyai/xstate/pull/5898).
-Only that fix, its tests, documentation, and changeset are integrated; other
-upstream `next` changes are not included. Before this fix, `packages/core/src`
-was identical to `bcd3840`, the baseline recorded for the flat and compound work.
+steps. The runtime baseline is upstream `next` at
+[`3893cf0`](https://github.com/statelyai/xstate/commit/3893cf0), which includes the
+targetless-reentry fix merged in
+[statelyai/xstate#5898](https://github.com/statelyai/xstate/pull/5898). The flat,
+compound, and parallel work was recorded against `bcd3840` and then `da64b0a` plus
+that fix; moving to `3893cf0` changed no model, proof, or test.
 Work belongs to
 [#9](https://github.com/robertpenner/xstate/issues/9), the compound extension
 [#10](https://github.com/robertpenner/xstate/issues/10), and the single-parallel
