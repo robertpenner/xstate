@@ -351,16 +351,27 @@ laws. Later slices depend on earlier ones.
    region-first event selection. Depends on 1 to 3 and on the owner's decision
    about candidate issue 2.
 
-## Decisions for the owner
+## Decisions
 
-1. Choose the termination treatment: A only, A then B (recommended), or C.
-2. Decide whether the model should mirror the runtime's reselection-by-identity
-   rule, including the empty-patch loop, or refuse callbacks whose results
-   could loop on an unchanged snapshot.
-3. Decide whether the model should state the bound exactly, including the
-   done and fast-path leniency, or claim it only for macrosteps that end
-   active outside the fast paths.
-4. Decide whether to file candidate issues 1 to 4 upstream before modeling
-   the behavior they describe.
-5. Decide whether eventless selection in parallel states is in scope for the
-   first model or refused until candidate issue 2 is settled.
+The owner settled these after the investigation:
+
+1. Termination: A then B. The model first claims behavior for macrosteps that
+   settle, then adds bounded evaluation.
+2. The model mirrors the runtime's reselection-by-identity rule, including the
+   loop that an empty context patch causes.
+3. The adapter requires `maxIterations >= 1`. The completion slice models the
+   one-microstep allowance for macrosteps that end done.
+4. Modeling does not wait on upstream. Candidate issues 2 and 4 are filed
+   upstream before the completion and combined-trace slices. Issues 1 and 3
+   are not filed.
+5. The model refuses `always` in machines with parallel nodes until candidate
+   issue 2 is settled.
+
+The breakdown is tracked as sub-issues of robertpenner/xstate#23:
+
+- robertpenner/xstate#34: eventless transitions in the flat model.
+- robertpenner/xstate#35: immediate raised events, blocked by #34.
+- robertpenner/xstate#36: report candidate issues 2 and 4 upstream.
+- robertpenner/xstate#37: completion, blocked by #35 and #36.
+- robertpenner/xstate#38: combined compound and parallel traces, blocked by
+  #37.
