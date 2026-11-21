@@ -271,6 +271,9 @@ raised events, timers, actors, routes, state input and persistence remain
 refused.
 Refusal is not a statement that
 the runtime lacks these features.
+[`SYNCHRONOUS_PROCESSING.md`](./SYNCHRONOUS_PROCESSING.md) records how the
+runtime processes eventless transitions, raised events, and completion, and
+proposes how the model could support them.
 
 ## Representation and trust
 
