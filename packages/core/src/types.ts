@@ -110,7 +110,8 @@ export interface ParameterizedObject {
 export type UnifiedArg<
   TContext extends MachineContext,
   TExpressionEvent extends EventObject,
-  TEvent extends EventObject
+  TEvent extends EventObject,
+  TEmitted extends EventObject = AnyEventObject
 > = {
   context: TContext;
   event: TExpressionEvent;
@@ -126,7 +127,7 @@ export type UnifiedArg<
       any // the machine's state schema is not in scope; `any` keeps every state id indexable
     >,
     TEvent,
-    AnyEventObject
+    TEmitted
   >;
   system: AnyActorSystem;
 } & OutputArg<TExpressionEvent>;
@@ -149,8 +150,9 @@ export type OutputArg<TEvent extends EventObject> = [TEvent] extends [never]
 export type ActionArgs<
   TContext extends MachineContext,
   TExpressionEvent extends EventObject,
-  TEvent extends EventObject
-> = UnifiedArg<TContext, TExpressionEvent, TEvent> & {
+  TEvent extends EventObject,
+  TEmitted extends EventObject = AnyEventObject
+> = UnifiedArg<TContext, TExpressionEvent, TEvent, TEmitted> & {
   children: Record<string, AnyActor>;
 };
 
@@ -301,7 +303,8 @@ export type TransitionContextMapper<
   TActorMap extends Sources['actors'],
   TGuardMap extends Sources['guards'],
   TDelayMap extends Sources['delays'],
-  _TCtx extends MachineContext = [TContext] extends [never] ? any : TContext
+  _TCtx extends MachineContext = [TContext] extends [never] ? any : TContext,
+  TEmitted extends EventObject = EventObject
 > = (
   args: TransitionFunctionArgs<
     _TCtx,
@@ -310,7 +313,9 @@ export type TransitionContextMapper<
     TActionMap,
     TActorMap,
     TGuardMap,
-    TDelayMap
+    TDelayMap,
+    Record<string, AnyActor>,
+    TEmitted
   >
 ) => TransitionContextPatch<_TCtx>;
 
@@ -341,7 +346,9 @@ export interface TransitionConfig<
         TActionMap,
         TActorMap,
         TGuardMap,
-        TDelayMap
+        TDelayMap,
+        TContext,
+        TEmitted
       >;
   to?: TransitionConfigFunction<
     TContext,
@@ -652,7 +659,8 @@ export type TransitionConfigFunction<
     TActorMap,
     TGuardMap,
     TDelayMap,
-    TChildren
+    TChildren,
+    TEmitted
   > & { input: TInput },
   enq: EnqueueObject<
     TEvent,
@@ -708,7 +716,8 @@ type TransitionFunctionArgs<
   TChildren extends Record<string, AnyActorRef | undefined> = Record<
     string,
     AnyActor
-  >
+  >,
+  TEmitted extends EventObject = EventObject
 > = {
   context: TContext;
   event: TCurrentEvent;
@@ -723,7 +732,8 @@ type TransitionFunctionArgs<
       MetaObject,
       any // the machine's state schema is not in scope; `any` keeps every state id indexable
     >,
-    TEvent
+    TEvent,
+    TEmitted
   >;
   parent: UnknownActorRef | undefined;
   value: StateValue;
@@ -1245,15 +1255,17 @@ export type InitialContext<
   TContext extends MachineContext,
   TActorMap extends Sources['actors'],
   TInput,
-  TEvent extends EventObject
-> = TContext | ContextFactory<TContext, TActorMap, TInput, TEvent>;
+  TEvent extends EventObject,
+  TEmitted extends EventObject = AnyEventObject
+> = TContext | ContextFactory<TContext, TActorMap, TInput, TEvent, TEmitted>;
 
 /** @public */
 export type ContextFactory<
   TContext extends MachineContext,
   TActorMap extends Sources['actors'],
   TInput,
-  TEvent extends EventObject = EventObject
+  TEvent extends EventObject = EventObject,
+  TEmitted extends EventObject = AnyEventObject
 > = ({
   spawn,
   actors,
@@ -1275,7 +1287,7 @@ export type ContextFactory<
       any // the machine's state schema is not in scope; `any` keeps every state id indexable
     >,
     TEvent,
-    AnyEventObject
+    string extends TEmitted['type'] ? AnyEventObject : TEmitted
   >;
 }) => [TContext] extends [never] ? MachineContext : TContext;
 
@@ -1614,7 +1626,8 @@ export type Mapper<
   TExpressionEvent extends EventObject,
   TResult,
   TEvent extends EventObject,
-  _TCtx extends MachineContext = [TContext] extends [never] ? any : TContext
+  _TCtx extends MachineContext = [TContext] extends [never] ? any : TContext,
+  TEmitted extends EventObject = AnyEventObject
 > = (
   args: {
     context: _TCtx;
@@ -1632,7 +1645,7 @@ export type Mapper<
         any // the machine's state schema is not in scope; `any` keeps every state id indexable
       >,
       TEvent,
-      AnyEventObject
+      string extends TEmitted['type'] ? AnyEventObject : TEmitted
     >;
   } & OutputArg<TExpressionEvent>
 ) => TResult;
@@ -1751,6 +1764,7 @@ export interface StateConfig<
   _stateInputs?: Record<string, Record<string, unknown>>;
   /** @internal */
   _nextTimerId?: number;
+  _nextTimerOccurrence?: number;
   /**
    * Deterministic generated-child-id counters owned by this snapshot, keyed
    * by src prefix.
@@ -1785,14 +1799,17 @@ export interface StateConfig<
  *   (`type` and `stateId`, plus `delay` for `xstate.after`; `type` and
  *   `actorId` for `xstate.timeout.actor`), matched like `matches: { ... }`
  *
- * The timer firing input is `{ type: 'xstate.timer', ...key }`.
+ * Scheduling keys also carry an `occurrence` identifying that scheduling.
+ * Preserve it in `{ type: 'xstate.timer', ...key }` so cancelled firings cannot
+ * consume a replacement. Cancellation matches the logical key without it.
  *
  * @public
  */
-export type TimerKey =
+export type TimerKey = (
   | { id: string }
   | { seq: number }
-  | { event: EventObject };
+  | { event: EventObject }
+) & { occurrence?: number };
 
 /**
  * A deterministic delayed-delivery declaration owned by a logic snapshot.
@@ -1800,6 +1817,8 @@ export type TimerKey =
  * @public
  */
 export interface LogicalTimer {
+  /** Identity of this scheduling, preserved through persistence. */
+  occurrence?: number;
   /** The `id` passed to `enq.raise(...)` or `enq.sendTo(...)`, if any. */
   id?: string;
   /**
@@ -3147,7 +3166,17 @@ export type StateIdReference<TSchema extends StateSchema> =
     ? `#${string}`
     : `#${Exclude<StateId<TSchema>, ''> & string}`;
 
-/** @public */
+/** @public An event that navigates to a state with an explicit ID and a route. */
+export type RouteEvent<TTarget extends string = `#${string}`> = {
+  type: 'xstate.route';
+  to: TTarget & `#${string}`;
+};
+
+/**
+ * @public
+ * Use a template literal around this type in inferred machine return types so
+ * declaration emit writes the ID union without repeating the state schema.
+ */
 export type RoutableStateId<TSchema extends StateSchema> =
   | (TSchema extends { route: any; id: string } ? `#${TSchema['id']}` : never)
   | (TSchema['states'] extends Record<string, any>
@@ -3289,6 +3318,8 @@ export interface RaiseExecutableEffect extends BaseExecutableEffect {
   id: string | undefined;
   /** Set for a delayed raise scheduled without an `id`. */
   seq?: number;
+  /** Identity of this scheduling. */
+  occurrence?: number;
   delay: number | undefined;
   args: Parameters<(typeof builtInActions)['@xstate.raise']>;
 }
@@ -3303,6 +3334,8 @@ export interface SendToExecutableEffect extends BaseExecutableEffect {
   id: string | undefined;
   /** Set for a delayed send scheduled without an `id`. */
   seq?: number;
+  /** Identity of this scheduling. */
+  occurrence?: number;
   delay: number | undefined;
   args: Parameters<(typeof builtInActions)['@xstate.sendTo']>;
 }
@@ -3504,7 +3537,16 @@ export type EnqueueObject<
    * timer by its {@link TimerKey} (e.g. an `after` timer by its event).
    */
   cancel: (timer: string | TimerKey) => void;
-  raise: (ev: TEvent, options?: { id?: string; delay?: number }) => void;
+  raise: (
+    ev:
+      | TEvent
+      | (EventObject extends TEvent
+          ? RouteEvent
+          : 'xstate.route' extends TEvent['type']
+            ? never
+            : RouteEvent),
+    options?: { id?: string; delay?: number }
+  ) => void;
   /**
    * Spawns a child actor from a registered source key or logic. Without an
    * explicit `id`, the child gets a deterministic src-keyed id (`worker:0`,
@@ -3592,7 +3634,8 @@ export type Action<
         MetaObject,
         any // the machine's state schema is not in scope; `any` keeps every state id indexable
       >,
-      TEvent
+      TEvent,
+      TEmittedEvent
     >;
     children: Record<string, AnyActor | undefined>;
     actions: TActionMap;

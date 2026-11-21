@@ -1,5 +1,79 @@
 # xstate
 
+## 6.0.0-beta.4
+
+### Patch Changes
+
+- cfc1520: Ignore queued timer notifications from cancelled schedulings when a replacement reuses the same ID. Replacements wait for their own deadlines in native and Effect actors, including restored native timers. Preserve anonymous timer keys when named or built-in timers are also scheduled.
+  
+  Custom timer hosts must preserve the scheduling key's `occurrence` in the firing event. Exclude `occurrence` from logical replacement and cancellation lookup keys.
+  
+  Effect snapshot schemas must preserve the optional `nextTimerOccurrence` metadata.
+- cfc1520: Check ancestor context refinements when a transition targets a descendant, including declared `#id` targets, target arrays, and sibling-relative targets inside a refined parent. Require a compatible context patch when the source does not satisfy those refinements.
+  
+  Preserve literal targets returned by choice functions so unknown static targets are TypeScript errors in `createMachine` and `setup().createMachine`. Computed `string` targets remain supported.
+- c72a899: Fixed eventless (`always`) transition functions being called twice per microstep. The evaluation that selects the transition is now the one that is executed, as for event transitions, so a transition function that returns different results on repeated calls no longer follows a result other than the one it was selected with. This does not cover transition functions that call `enq.spawn`, `enq.listen`, or `enq.subscribeTo`: those are still evaluated again when applied, since the selection-time evaluation aborts before it can produce a result.
+- bcd4510: Document timer persistence with tested examples for preserving deadlines, pausing while offline, and restarting delays. Clarify overdue timer delivery and custom clock limitations.
+- f54b3e2: Fix `snapshot.can()` throwing when a transition calls `enq.spawn()` with a registered actor name.
+- 3f5a26e: Preserve declared emitted-event names and payloads on machine callback `self` arguments, including context initialization and typed child input.
+  
+  ```ts
+  const machine = setup({
+    schemas: {
+      emitted: { progress: types<{ percent: number }>() }
+    }
+  }).createMachine({
+    entry: ({ self }) => {
+      self.on('progress', (event) => {
+        console.log(event.percent); // number
+      });
+      // @ts-expect-error Unknown emitted-event type.
+      self.on('unknown', () => {});
+    }
+  });
+  ```
+- 8231fb3: Evaluate invoke input after applying the context patch returned by the invoking state's entry function. Invoke references remain available during entry for sends, listeners, and subscriptions. Failed entry or invoke input evaluation releases new actor ids and registry keys so the state can be retried.
+  
+  ```ts
+  loading: {
+    entry: () => ({ context: { consent: 'granted' } }),
+    invoke: {
+      src: loadUser,
+      input: ({ context }) => ({ consent: context.consent }) // 'granted'
+    }
+  }
+  ```
+
+## 6.0.0-beta.3
+
+### Minor Changes
+
+- 417e5f4: Callback, event observable, listener, and subscription actors now process events they send to a parent in their own transitions. `createEffectEventStreamLogic` actors do the same. Inspection reports each outgoing event on the source transition, and subscribers receive a snapshot notification for that transition.
+- 65afd99: Add eventless `always` transitions to `xstate/fsm`. Machines follow these transitions during initialization and after handled events until no eventless transition is enabled.
+  
+  ```ts
+  import { createFSM } from 'xstate/fsm';
+  
+  const machine = createFSM({
+    initial: 'checking',
+    states: {
+      checking: { always: { target: 'ready' } },
+      ready: {}
+    }
+  });
+  
+  machine.initialState.value; // 'ready'
+  ```
+  
+  Breaking beta change: `xstate/fsm` now requires object transition targets for `on` and `always`, matching the main XState API. Replace `on: { GO: 'ready' }` with `on: { GO: { target: 'ready' } }`. Keep `initial: 'idle'` unchanged. Transition functions must return an object or `undefined`.
+  
+  Run the `@xstate/codemod` `string-targets` transform to update inline FSM configurations. Review separately stored configurations and functions returning strings manually.
+
+### Patch Changes
+
+- 0eb9872: Fix delayed transitions and delayed raised events taking an enabled `always` transition before handling the delayed event. They now handle the delayed event first, then reevaluate eventless transitions, preserving v5 ordering. A delayed send also no longer reevaluates the sender's eventless transitions before delivering its event.
+- 9eb940c: Fix targetless transitions with `reenter: true` unexpectedly running entry behavior. Transitions without a target now preserve the active states without running exit or entry behavior, while still applying context updates and transition effects.
+
 ## 6.0.0-beta.2
 
 ### Major Changes

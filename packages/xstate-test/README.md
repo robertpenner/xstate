@@ -20,6 +20,7 @@ same `ModelTestFailureError`.
 complete worked example.
 
 - [Installation](#installation)
+- [Run tests without fast-check](#run-tests-without-fast-check)
 - [Quick start](#quick-start)
 - [Concepts](#concepts)
 - [How-to guides](#how-to-guides)
@@ -33,14 +34,40 @@ complete worked example.
 pnpm add -D @xstate/test@beta fast-check xstate@beta
 ```
 
-`xstate` and `fast-check` are required peer dependencies. The other peer
-dependencies are optional:
+Install `xstate` and `fast-check` to use the root `@xstate/test` import.
+The [`@xstate/test/paths` entry point](#run-tests-without-fast-check) requires
+only `xstate`. Install the optional peers needed by the integrations you use:
 
 | Package | Needed for |
 | --- | --- |
 | `zod` (v3.25+ or v4) | Deriving event generators from Zod event schemas. |
 | `effect` (v4) | Deriving event generators from Effect Schemas, through `@xstate/test/effect-schema`. |
 | `@playwright/test` or `playwright` (1.40+) | `@xstate/test/playwright`. |
+
+## Run tests without fast-check
+
+<!-- Deterministic exports from src/paths.ts and package.json. -->
+
+Install `@xstate/test@beta` and `xstate@beta`, then import from
+`@xstate/test/paths`. Use `testPaths()` with shortest, simple, or cover
+planning, an explicit event sequence, or paths computed with `xstate/graph`.
+Use `replayTest()` to run a saved fixture.
+
+```ts
+import { testPaths } from '@xstate/test/paths';
+
+await testPaths(cartMachine, {
+  pathGenerator: 'shortest',
+  events: { ADD: () => ({ sku: 'apple' }) },
+  sut: cartSut
+});
+```
+
+Supply payload cases as functions from a seeded random number source, or as
+objects with a `sample(rng)` method. Both forms can also be used in a named
+event case. Provide payloads explicitly when the machine needs them. Use
+`assertTestCoverage()` and `formatTestCoverage()` to check or display
+coverage, and `serializeTestTrace()` to attach a trace to a failure report.
 
 ## Quick start
 
@@ -601,6 +628,44 @@ macrotask turns. An invoked actor whose promise is still pending at that point
 is listed in the step's `pendingActors`, and
 `coverage.exploration.pendingActorSteps` counts such steps: its result may
 land in a later step.
+
+### Follow outcomes from the system under test
+
+Use `sut.create().receive({ signal })` with `propertyTest()` when an
+observation needs to advance the model. For example, model `FLIP` entering
+`flipping`. Define ordinary transitions for `HEADS` and `TAILS` out of that
+state. Only the `HEADS` branch handles `CLAIM_PRIZE`.
+
+```ts
+await propertyTest(coinMachine, {
+  events: {
+    FLIP: { generate: fc.constant({}), when: ({ snapshot, event }) => snapshot.can(event) },
+    CLAIM_PRIZE: { generate: fc.constant({}), when: ({ snapshot, event }) => snapshot.can(event) }
+  },
+  sut: {
+    create: () => ({
+      send: (event) => driver.send(event),
+      receive: ({ signal }) => driver.nextOutput(signal)
+    })
+  }
+});
+```
+
+With `receive()`, the explicit `events` entries are the generated inputs.
+The runner applies a ready output before the next input. When the model has
+output transitions and no configured input transition, it waits up to one
+second for an output. In a mixed state, the runner can send the next input
+while the receive is pending. The SUT session should deliver outputs in order
+and honor the signal so pending reads can be cancelled. Keep `read()` for
+snapshot comparison. The runner defers comparison while it awaits a model
+output.
+
+For live runs, any output the current model allows can advance it. Replays
+check the recorded output before proceeding. A different legal output raises
+`ReplayNotReproducedError` with both events. An output the model disallows
+raises `ModelTestFailureError`. Control the SUT's outcome or schedule in the
+adapter when you need to reproduce an exact path. Observable outputs count
+toward model transition coverage.
 
 ### Test delayed transitions
 
@@ -1406,6 +1471,8 @@ The `invariant`, `temporal`, and `target` functions receive a
 
 ### `testPaths()` options
 
+<!-- Options from PathOptions in src/engine/testPaths.ts -->
+
 In addition to the shared options:
 
 | Option | Default | Description |
@@ -1413,6 +1480,7 @@ In addition to the shared options:
 | `pathGenerator` | `'shortest'` | `'shortest'`, `'simple'`, or a custom `PathGenerator`. |
 | `paths` | none | Runs these paths instead of generating any. |
 | `fromEvents` | none | Runs the single path built from this event sequence. |
+| `cover` | none | Plans walks that collectively cover the named steps or consecutive step sequences before executing them. |
 | `samples` | `3` | Payloads sampled from each event case and outcome generator. An integer of at least `1`. |
 | `seed` | `0` | Sampling seed. Each case samples from its own stream, so adding a case leaves the other cases' payloads unchanged. |
 | `limit` | `10_000` | Traversal steps before path generation throws. A context that grows without bound reaches it; merge states with `serializeState` or prune with `stopWhen`. |
@@ -1421,6 +1489,43 @@ In addition to the shared options:
 | `fromState` | initial state | Starts traversal from this snapshot. |
 | `allowDuplicatePaths` | `false` | Keeps paths that are prefixes of longer paths. |
 | `serializeState`, `serializeEvent` | built in | Identity functions for traversal. |
+
+`cover.requirements` maps a name to a predicate or a nonempty array of
+predicates that must match consecutive steps. Predicates receive the event,
+its case name, the current snapshot, and `snapshots` in chronological order.
+By default the window contains the previous and current snapshots. Set
+`snapshotWindow` to look further back. The current snapshot is always
+`snapshots.at(-1)`.
+
+The experimental planner prefers fewer walks, then fewer total events. Each
+walk starts a fresh SUT session and contains at most `maxStepsPerPath` events
+(20 by default). Set `cover.maxPaths` to cap fresh SUT sessions. Stored fixture
+replays count toward the cap when enabled. If the stored fixtures and planned
+walks would exceed the cap, the run fails before creating a session.
+A sequence must match within one walk, and every walk must end at `toState`
+when supplied.
+
+When `cover` starts from `fromState`, a failure fixture records the model's
+persisted snapshot. Save `error.fixture` yourself for snapshot-starting runs.
+To replay a fixture generated from the same machine, restore the persisted
+snapshot through `restoreSnapshot`:
+
+```ts
+import type { Snapshot } from 'xstate';
+import { restoreActor } from 'xstate/persist';
+import { replayTest } from '@xstate/test/paths';
+
+await replayTest(machine, fixture, {
+  restoreSnapshot: (snapshot) =>
+    restoreActor(machine, snapshot as Snapshot<unknown>).getSnapshot(),
+  sut
+});
+```
+
+Planning uses user events, including no-ops, in pure mode. The `limit` budget
+applies to both finding and combining walks. If planning fails,
+`testPaths()` reports the reason and any missing requirements before creating
+SUT sessions.
 
 `testPaths()` rejects `commands`. It resolves with `results`, one
 `{ path, passed, error }` per path, and sets `coverage.exploration.strategy`
@@ -1501,6 +1606,7 @@ options to fast-check:
 | `read()` | Reads the observable state for comparison. |
 | `states` | Per-state assertions, `(snapshot, session) => void`. Replaces the top-level `states`. |
 | `settle()` | Waits for quiescence before each comparison. |
+| `receive({ signal })` | Returns the next SUT output as a model event for `propertyTest()` and `replayTest()`. |
 | `advance(ms)` | Advances the SUT's clock and returns the events that fired. |
 | `checkpoint(label?)` | Handles a `checkpoint` command. |
 | `stop()` | Handles a `stop` command. |
@@ -1567,6 +1673,8 @@ transition that declares it is covered.
 
 ### `ModelTestFailureError`
 
+<!-- ModelTestFailureError and failure traces from src/engine/propertyTest.ts -->
+
 | Field | Description |
 | --- | --- |
 | `summary` | The short message, such as `Property observation diverged`. `testPaths()` prefixes it with the failing path: `Path 2 (ADD → REMOVE) failed: …`. |
@@ -1590,6 +1698,10 @@ own transition. `<state>` is `formatSnapshot(snapshot)`, which defaults to
 `testPaths()`, or `replayTest()` to print something else. A step whose SUT or
 reference observation differs from the model adds `model:` and `observed:`
 lines.
+
+If the SUT's `send()` throws or rejects, the error keeps the original `cause`. The
+trace marks the attempted event with `sutSendFailed: true` and retains the
+completed steps. The fixture replays those steps and tries the failed send again.
 
 ### `TestFixture`
 
@@ -1615,7 +1727,9 @@ Errors in commands and outcomes are recorded as
 A `TestCommand` is `{ type: 'event', event, phase, origin, caseId? }`,
 `{ type: 'advance', milliseconds, deliveredEvents }`,
 `{ type: 'checkpoint', label? }`, `{ type: 'outcome', src, outcome }`, or
-`{ type: 'stop' }`. Events delivered by a SUT clock appear twice: in the
+`{ type: 'stop' }`. Received output events have `origin: 'receive'`. A
+failed receive is recorded as a `receive` command. Events delivered by a SUT
+clock appear twice: in the
 `advance` command's `deliveredEvents`, and as the following `event` entries
 with `origin: 'clock'`. `replayTest()` rejects a fixture in which the two
 disagree.
@@ -1667,6 +1781,12 @@ Each run:
    `outcome(src, outcome)`).
 3. `runner.finish()`.
 4. `await runner.dispose()`, always.
+
+To support `receive()`, call `runner.start('live')`. Call
+`runner.receiveBeforeInput()` before checking a generated input and before
+finishing the run. If runtime commands can release a pending output, pass
+`false` to receive only ready outputs before processing those commands.
+Use the default at the end of the sequence to wait for a required response.
 
 `run()` resolves with `{ runs, exploration, error?, replay? }`.
 `exploration` has `configuredRuns`, `maximumSequenceLength`, and optionally

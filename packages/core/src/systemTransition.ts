@@ -8,6 +8,7 @@ import { TimeoutError } from './actors/promise.ts';
 import { systemLogicMetadata } from './systemLogicMetadata.ts';
 import { listenerLogic } from './actors/listener.ts';
 import { subscriptionLogic } from './actors/subscription.ts';
+import { XSTATE_ATTACHED_FORWARD } from './actors/attached.ts';
 import { matchesEventDescriptor } from './utils.ts';
 import { IndexedHeap } from './IndexedHeap.ts';
 import { XSTATE_STOP, XSTATE_STOP_EFFECT } from './constants.ts';
@@ -25,7 +26,8 @@ import type {
   AnyEventObject,
   ExecutableEffect,
   InputFrom,
-  TimerKey
+  TimerKey,
+  LogicalTimer
 } from './types.ts';
 
 /** Immutable definitions for a pure actor system. @experimental */
@@ -275,6 +277,7 @@ function snapshotData(
     // Stores such as Convex reject `_`-prefixed field names.
     _stateInputs: stateInputs,
     _nextTimerId: nextTimerId,
+    _nextTimerOccurrence: nextTimerOccurrence,
     _nextActorIds: nextActorIds,
     ...data
   } = snapshot;
@@ -283,6 +286,7 @@ function snapshotData(
       ...data,
       stateInputs,
       nextTimerId,
+      ...(nextTimerOccurrence > 0 && { nextTimerOccurrence }),
       nextActorIds,
       nodeIds: nodes.map((node: any) => node.id)
     },
@@ -445,9 +449,27 @@ class SystemReduction {
     return (this.logic.get(actor.src) as any)?.[systemLogicMetadata]?.kind;
   }
 
+  private forwardAttachment(
+    ref: SystemActorReference,
+    event: AnyEventObject,
+    immediate = false
+  ) {
+    if (!immediate) {
+      this.enqueue(ref, ref, { type: XSTATE_ATTACHED_FORWARD, event });
+      return;
+    }
+    this.process({
+      source: ref,
+      target: ref,
+      event: this.encode({ type: XSTATE_ATTACHED_FORWARD, event }),
+      sequence: this.snapshot.counters.sequence++
+    });
+  }
+
   private relayAttachments(
     source: SystemActorReference,
-    emitted?: AnyEventObject
+    emitted?: AnyEventObject,
+    immediate = false
   ) {
     for (const actor of Object.values(this.snapshot.actors)) {
       const kind = this.attachedKind(actor);
@@ -493,10 +515,10 @@ class SystemReduction {
           );
       }
       if (event)
-        this.enqueue(
+        this.forwardAttachment(
           { '@actor': actor.address, incarnation: actor.incarnation },
-          actor.parent,
-          event
+          event,
+          immediate
         );
     }
   }
@@ -532,6 +554,11 @@ class SystemReduction {
               ...data,
               _stateInputs: data.stateInputs,
               _nextTimerId: data.nextTimerId,
+              _nextTimerOccurrence: (data.timers ?? []).reduce(
+                (next: number, timer: LogicalTimer) =>
+                  Math.max(next, (timer.occurrence ?? -1) + 1),
+                data.nextTimerOccurrence ?? 0
+              ),
               _nextActorIds: data.nextActorIds,
               _nodes: data.nodeIds.map((id: string) =>
                 logic.getStateNodeById(id)
@@ -566,7 +593,9 @@ class SystemReduction {
       id: actor?.id ?? ref['@actor'].split('/').at(-1),
       address: ref['@actor'],
       sessionId: ref.incarnation,
-      options: { _inert: true, input: actor?.input },
+      get options() {
+        return { _inert: true, input: getState()?.input };
+      },
       get logic() {
         return getLogic();
       },
@@ -599,6 +628,10 @@ class SystemReduction {
     return {
       createActorRef: (logic: AnyActorLogic, options: any) =>
         this.allocate(logic, options),
+      initializeActorRef: (actor: AnyActor, input: unknown) =>
+        this.initializeActorRef(this.reference(actor), input),
+      discardActorRef: (actor: AnyActor) =>
+        this.discardActorRef(this.reference(actor)),
       _unregister: (actor: AnyActor) => {
         this.stopping.add(JSON.stringify(this.reference(actor)));
         for (const [key, ref] of Object.entries(this.snapshot.registry)) {
@@ -699,14 +732,30 @@ class SystemReduction {
       input: this.encode(options.input),
       snapshot: { status: 'active', output: undefined, error: undefined }
     };
+    if (options.registryKey && this.snapshot.registry[options.registryKey]) {
+      throw new Error(
+        `Registry key '${options.registryKey}' is already occupied.`
+      );
+    }
     this.snapshot.actors[address] = state;
     if (options.registryKey) {
-      if (this.snapshot.registry[options.registryKey])
-        throw new Error(
-          `Registry key '${options.registryKey}' is already occupied.`
-        );
       this.snapshot.registry[options.registryKey] = ref;
     }
+    try {
+      if (!options._deferInitialization) {
+        this.initializeActorRef(ref, options.input);
+      }
+      return this.handle(ref);
+    } catch (error) {
+      this.discardActorRef(ref);
+      throw error;
+    }
+  }
+
+  private initializeActorRef(ref: SystemActorReference, input: unknown) {
+    const state = { ...this.current(ref)!, input: this.encode(input) };
+    this.snapshot.actors[ref['@actor']] = state;
+    const logic = this.logic.get(state.src)!;
     const scope = this.scope(ref);
     const result = logic.initialTransition(this.decode(state.input), scope);
     const [snapshot, effects] = finalizeTransitionResult(
@@ -716,7 +765,36 @@ class SystemReduction {
     );
     this.store(ref, snapshot);
     this.initialEffects.set(JSON.stringify(ref), effects);
-    return this.handle(ref);
+  }
+
+  private discardActorRef(ref: SystemActorReference) {
+    const actor = this.current(ref);
+    if (!actor || actor.started) return;
+    for (const child of Object.values(this.snapshot.actors)) {
+      if (
+        child.parent?.['@actor'] === ref['@actor'] &&
+        child.parent.incarnation === ref.incarnation
+      ) {
+        this.discardActorRef({
+          '@actor': child.address,
+          incarnation: child.incarnation
+        });
+      }
+    }
+    for (const [key, registered] of Object.entries(this.snapshot.registry)) {
+      if (
+        registered['@actor'] === ref['@actor'] &&
+        registered.incarnation === ref.incarnation
+      ) {
+        delete this.snapshot.registry[key];
+      }
+    }
+    const key = JSON.stringify(ref);
+    delete this.snapshot.actors[ref['@actor']];
+    this.snapshots.delete(key);
+    this.initialEffects.delete(key);
+    this.handles.delete(key);
+    this.stopping.delete(key);
   }
 
   private store(ref: SystemActorReference, snapshot: any) {
@@ -829,7 +907,11 @@ class SystemReduction {
             const key = getTimerKey(value);
             const actor = this.current(ref);
             if (!actor || !isLogicalTimerPending(actor.snapshot, key)) break;
-            this.schedule(ref, value.delay, { type: 'xstate.timer', ...key });
+            this.schedule(ref, value.delay, {
+              type: 'xstate.timer',
+              ...key,
+              occurrence: value.occurrence
+            });
           } else if (isSerializedActorRef(value.target)) {
             // A ref that went through JSON targets the current incarnation
             // at its address; without one the event is a dead letter.
@@ -908,9 +990,8 @@ class SystemReduction {
         input.mappers.error &&
         actor.parent
       ) {
-        this.enqueue(
+        this.forwardAttachment(
           ref,
-          actor.parent,
           input.mappers.error(this.hydrate(target).error)
         );
       }
@@ -979,7 +1060,7 @@ class SystemReduction {
     const actor = this.current(ref);
     if (!actor) return;
     // Publish terminal observations before cleanup and the native parent event.
-    this.relayAttachments(ref);
+    this.relayAttachments(ref, undefined, true);
     this.cancel(ref);
     this.cancelExternal(ref);
     this.stopAttachments(ref);
