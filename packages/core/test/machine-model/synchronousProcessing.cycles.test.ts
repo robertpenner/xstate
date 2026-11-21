@@ -154,8 +154,9 @@ describe('synchronous processing cycles (#24)', () => {
 
     it('skips the bound in transition() when its flat-machine fast path applies', () => {
       // StateMachine._transitionFast handles a single static transition
-      // between root-level atomic states without entry, exit, or eventless
-      // transitions, and never enters the counting loop.
+      // between root-level atomic states that have no eventless transitions
+      // of their own, and never enters the counting loop. The `marker`
+      // state's `always` does not disable it.
       const viaTransition = (machine: AnyStateMachine) =>
         transition(
           machine,

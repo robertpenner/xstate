@@ -284,13 +284,38 @@ describe('synchronous processing probes (#24)', () => {
       expect(steps.map(([s]) => s.context.n)).toEqual([0, 1, 2, 3]);
     });
 
-    it('[runtime] does not loop on a self-targeted eventless transition', () => {
+    it.each([false, true])(
+      '[runtime] does not loop on a self-targeted eventless transition (reenter: %s)',
+      (reenter) => {
+        const machine = createMachine({
+          options: { maxIterations },
+          initial: 'a',
+          states: { a: { always: { target: 'a', reenter } } }
+        });
+        expect(getInitialMicrosteps(machine)).toHaveLength(2);
+      }
+    );
+
+    it('[runtime] emits done events as xstate.done.state with stateId and output', () => {
+      const seen: unknown[] = [];
       const machine = createMachine({
         options: { maxIterations },
-        initial: 'a',
-        states: { a: { always: { target: 'a' } } }
+        initial: 'p',
+        states: {
+          p: {
+            initial: 'f',
+            states: { f: { type: 'final', output: () => 'out' } },
+            onDone: ({ event }) => {
+              seen.push(event);
+              return undefined;
+            }
+          }
+        }
       });
-      expect(getInitialMicrosteps(machine)).toHaveLength(2);
+      initialTransition(machine);
+      expect(seen).toEqual([
+        { type: 'xstate.done.state', stateId: 'p', output: 'out' }
+      ]);
     });
 
     it('[runtime][v5] selects eventless transitions per atomic state but events region-first', () => {

@@ -65,13 +65,19 @@ external or internal. After an eventless microstep they are selected again
 only if that microstep produced a different snapshot object. Raised events
 join the end of the queue in the order the microstep applied them: raises
 from exit functions, then from transitions, then from entry functions, then
-the `done.state` events of any completed parents.
+the done events of any completed parents. A done event has the shape
+`{ type: 'xstate.done.state', stateId, output }`; this document writes it as
+`done.state`.
 
 Two other paths skip this loop:
 
-- `StateMachine._transitionFast` answers `transition()` directly for a single
-  static transition between root-level atomic states without entry, exit,
-  eventless transitions, delays, or invocations.
+- `StateMachine._transitionFast` answers `transition()` directly when the
+  root has no `always`, the active state is a root-level atomic state without
+  exit, `always`, delays, or invocations, and exactly one static transition
+  (no guard, actions, or callback context) handles the event. When that
+  transition changes state, the target must also be a root-level atomic state
+  without entry, `always`, delays, or invocations. `always` elsewhere in the
+  machine does not disable it.
 - The empty-queue check in step 3 skips it for machines without `always`.
 
 ## Observations
@@ -136,8 +142,10 @@ the runtime context object as distinct from its mathematical value (the
 README's reuse flags). Any model of eventless reselection has to carry that
 flag, because a mathematically unchanged context does not stop the loop.
 
-**A self-targeted `always` without `reenter` does not loop.** `[runtime]` It
-leaves the snapshot object unchanged.
+**A self-targeted `always` without a context patch does not loop.**
+`[runtime]` With or without `reenter: true`, an atomic state targeting itself
+leaves the active states and context unchanged, so the snapshot object is
+reused and the transition is taken once.
 
 **Eventless selection walks ancestors per atomic state. Event selection is
 region-first.** `[runtime][v5]` In a parallel node `p` with regions `r1`
@@ -227,7 +235,9 @@ macrostep that ends active needs a bound equal to its total microstep count:
 
 The last three rows succeed with less than the microstep count. Reaching
 `done` ends the loop without the final check, and both fast paths skip the
-loop. This leniency is harmless at runtime, but a model that mirrors the bound
+loop. Both fast paths apply only when no internal step follows, so they
+differ from the loop count only at `maxIterations: 0`. This leniency is
+harmless at runtime, but a model that mirrors the bound
 must reproduce it or define the bound in terms of a quantity both sides
 agree on. For external events, v5 gives the same counts for K = 0, 2, 4 and
 for an unhandled event, except that it has no fast paths. The v5
@@ -316,8 +326,7 @@ requires:
 - `always` in object and callback form.
 - `type: 'final'` states, `onDone` handlers, and `output` callbacks, which
   extend the callback domain.
-- Done-event normalization: event type `xstate.done.state.<id>` and its
-  `output` field.
+- Done-event normalization: `{ type: 'xstate.done.state', stateId, output }`.
 - Reuse flags for snapshot identity, because the reselection rule depends on
   object identity.
 - The bound as an adapter input, with the counting rule above.
