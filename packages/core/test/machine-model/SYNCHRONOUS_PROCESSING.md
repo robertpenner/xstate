@@ -184,13 +184,15 @@ final state passes through each `onDone` event to the root's final output.
 3.7 halts the state machine on a top-level final state. The runtime sets
 `status: 'done'` inside the microstep, so the loop never dequeues the raise.
 
-**Root output is computed before exit functions run.** `[runtime]` When the
+**Root output is computed before exit functions run.** `[runtime][v5]` When the
 machine reaches its root final state, the exit functions of the states still
 active run after the final state's `output` callback. In the probe, `output`
 is 1 while the resulting `context` is 111. A raise from such an exit function
 is discarded. The pending changeset
 `.changeset/pre/entry-exit-parameter-count.md` describes the exit behavior;
-nothing documents the order relative to `output`.
+nothing documents the order relative to `output`. The v5 probe `V10`, with
+`assign` exit actions, gives the same `output: 0` and `context: { n: 110 }`
+as the v6 reproduction in statelyai/xstate#5949.
 
 **A machine can be done at initialization.** `[runtime]` An initial final
 state makes `initialTransition` return a done snapshot, and initialization
@@ -258,10 +260,17 @@ them.
    those paths.
 2. Eventless and event selection use different rules in parallel states. If
    upstream intends region-first selection everywhere, eventless selection
-   is the outlier; if SCXML's rule is intended, event selection is.
+   is the outlier; if SCXML's rule is intended, event selection is. Filed as
+   statelyai/xstate#5948.
 3. An empty context patch from an `always` loops forever, although it changes
    nothing a user can observe.
 4. Root `output` ignores context changes made by exit functions at completion.
+   Filed as statelyai/xstate#5949.
+
+Both filed reports reproduce on the published `xstate@6.0.0-beta.4` and on
+`xstate@5.33.4`, and both ask which rule upstream intends. Until upstream
+answers, the model states the observed v6 behavior and keeps decision 5's
+refusal of `always` in machines with parallel nodes.
 
 ## How the model can claim this behavior
 
@@ -362,8 +371,9 @@ The owner settled these after the investigation:
 3. The adapter requires `maxIterations >= 1`. The completion slice models the
    one-microstep allowance for macrosteps that end done.
 4. Modeling does not wait on upstream. Candidate issues 2 and 4 are filed
-   upstream before the completion and combined-trace slices. Issues 1 and 3
-   are not filed.
+   upstream before the completion and combined-trace slices, as
+   statelyai/xstate#5948 and statelyai/xstate#5949. Issues 1 and 3 are not
+   filed.
 5. The model refuses `always` in machines with parallel nodes until candidate
    issue 2 is settled.
 
