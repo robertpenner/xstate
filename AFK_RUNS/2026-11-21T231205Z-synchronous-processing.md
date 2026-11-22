@@ -17,7 +17,7 @@ candidate issues (#36). Keep a log of potential bugs found along the way.
 
 **Execution:** sequential.
 
-**Verified integration head:** `7cab525` (#37).
+**Verified integration head:** `8fddd06` (#38).
 
 ### Slice progress
 
@@ -27,7 +27,7 @@ candidate issues (#36). Keep a log of potential bugs found along the way.
 | [#35](https://github.com/robertpenner/xstate/issues/35) | Immediate raised events                 | integrated/verified |                     | `7c5c7e8`, `4ac69fe` | see evidence below |
 | [#36](https://github.com/robertpenner/xstate/issues/36) | Upstream reports                        | integrated/verified |                     | `23784c5`            | see evidence below |
 | [#37](https://github.com/robertpenner/xstate/issues/37) | Completion                              | integrated/verified |                     | `40d84e4`, `7cab525` | see evidence below |
-| [#38](https://github.com/robertpenner/xstate/issues/38) | Combined compound and parallel traces   | in progress         |                     |                      |                    |
+| [#38](https://github.com/robertpenner/xstate/issues/38) | Combined compound and parallel traces   | integrated/verified |                     | `bf2318a`, `8fddd06` | see evidence below |
 
 ### Verification evidence
 
@@ -108,6 +108,26 @@ byte for byte with the verified checkout after the pre-commit hook ran):
 - `pnpm test:core`: 3341 passed, 28 skipped, 3 todo (204 files).
 - `pnpm typecheck`, `pnpm lint`, `pnpm format:check`: exit 0.
 
+**#38 (parallel completion and raised events).** Brief:
+https://github.com/robertpenner/xstate/issues/38#issuecomment-7073017164.
+Laws were written first, then the model and proofs. Checks on the
+uncommitted tree that became `bf2318a` and `8fddd06` (the committed files
+were compared byte for byte with the verified checkout):
+
+- `pnpm verify:machine-model` on a detached checkout of `40f1622` plus the
+  #38 changes: the first run failed with `Ambiguous mutation` (Potential bug
+  13). After the two anchors were extended, the rerun exited 0, ending
+  "Freshness, additions-only inventory, defects and refactor verified."
+  Dafny reported 883 verified, 0 errors; all 87 model defects (18 new) were
+  rejected.
+- `pnpm test:machine-model:runtime-defects` (run alone): exit 0, 19 runtime
+  defects rejected (2 new: a parallel node completing twice in one
+  microstep, and a nested parallel region contributing no output).
+- `pnpm test:machine-model`: 258 tests passed (16 files). After a type-only
+  cast fix in `parallelCompletion.test.ts`, that file passed 9 of 9.
+- `pnpm typecheck`, `pnpm lint`, `pnpm format:check`: exit 0.
+- `pnpm test:core` is part of the final series verification below.
+
 ### Potential bugs
 
 Runtime behavior, tool quirks, and suspected defects found during the run.
@@ -186,7 +206,14 @@ Each entry says what was observed, where, and what happened to it.
     ("reversed lifecycle effects") replaces, so `replaceOnce` would have thrown
     only inside the 40-minute verify. A scratch prescreen that counts each
     defect's `before` text in the model caught it. A unit test that runs the
-    same count would catch it in seconds.
+    same count would catch it in seconds. It happened again in #38 in the
+    other direction: the parallel settle loop repeats two lines that #37
+    defects use as anchors ("compound completion keeps the queue" and
+    "compound raised events processed last-in first-out"), so each anchor
+    matched twice. The #38 screen applied the mutations without checking
+    uniqueness, and the first full verify failed with `Ambiguous mutation`
+    after 64 defects had already been rejected. Both anchors now include
+    preceding lines that only the compound settle function contains.
 14. **An abstract law can time out instead of failing on its defect** (proof
     design). Under the defect that names the done event for the final child,
     `NestedFinalRaisesDone` timed out: its ids are symbolic, so nothing tells
@@ -217,3 +244,14 @@ Each entry says what was observed, where, and what happened to it.
     the parallel's done event a second time. `completedNodes` only prevents a
     second done event within one microstep. SCXML's `enterStates` behaves the
     same way, so the model mirrors it.
+18. **An atomic final region counts as final before it is entered** (runtime,
+    differs from SCXML). The runtime's `isInFinalState` treats an atomic node
+    as final when its type is `final`, without checking that it is active. A
+    parallel node `p` with atomic final regions `x` and `y` whose entries
+    raise `RX` and `RY` queues `RX`, then `xstate.done.state.m.p`, then `RY`:
+    the parallel's done event is queued while `y` is still being entered, and
+    the done handler runs between the two raises (context log `|rx|done|ry`).
+    SCXML's `isInFinalState` returns false for an atomic final child of a
+    parallel, so SCXML queues the done event only when entering a compound
+    region's final child. The model mirrors the runtime (`FinalAtMeaning`)
+    and `parallelCompletion.test.ts` records the order. Not filed yet.
