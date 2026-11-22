@@ -28,13 +28,15 @@ datatype Result = Result(target: Option<string>, patch: Option<seq<PatchEntry>>,
 
 datatype Evaluation = Evaluation(result: Option<Result>, effects: seq<Effect>)
 
-datatype Node = Node(on: map<string, (map<string, int>, Event) -> Evaluation>, entry: (map<string, int>, Event) -> Evaluation, exit: (map<string, int>, Event) -> Evaluation)
+datatype Node = Node(on: map<string, (map<string, int>, Event) -> Evaluation>, always: (map<string, int>, Event) -> Evaluation, entry: (map<string, int>, Event) -> Evaluation, exit: (map<string, int>, Event) -> Evaluation)
 
 datatype Machine = Machine(initial: string, context: map<string, int>, states: map<string, Node>)
 
 datatype Snapshot = Snapshot(value: string, context: map<string, int>)
 
 datatype Step = Step(snapshot: Snapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>)
+
+datatype Macrostep = Macrostep(settled: bool, step: Step, trace: seq<Step>)
 
 datatype Applied = Applied(context: map<string, int>, reused: bool, effects: seq<Effect>)
 
@@ -111,6 +113,16 @@ function transition(machine: Machine, snapshot: Snapshot, event: Event): Step
   var node := (if snapshot.value in machine.states then Some(machine.states[snapshot.value]) else None);
   var handler := (match node { case Some(i_node_val) => (if event.type_ in i_node_val.on then Some(i_node_val.on[event.type_]) else None) case None => Option.None });
   var selected := (match handler { case Some(i_handler_val) => i_handler_val(snapshot.context, event) case None => emptyEvaluation() });
+  takeTransition(machine, snapshot, event, node, selected)
+}
+
+lemma transition_ensures(machine: Machine, snapshot: Snapshot, event: Event)
+  ensures (transition(machine, snapshot, event).snapshotReused ==> (transition(machine, snapshot, event).snapshot == snapshot))
+{
+}
+
+function takeTransition(machine: Machine, snapshot: Snapshot, event: Event, node: Option<Node>, selected: Evaluation): Step
+{
   if ((match selected.result { case Some(i_) => false case None => true }) && (|selected.effects| == 0)) then
     Step(snapshot, true, true, [])
   else
@@ -128,9 +140,62 @@ function transition(machine: Machine, snapshot: Snapshot, event: Event): Step
     Step(Snapshot(next, entered.context), false, ((exited.reused && updated.reused) && entered.reused), ((exited.effects + updated.effects) + entered.effects))
 }
 
-lemma transition_ensures(machine: Machine, snapshot: Snapshot, event: Event)
-  ensures (transition(machine, snapshot, event).snapshotReused ==> (transition(machine, snapshot, event).snapshot == snapshot))
+lemma takeTransition_ensures(machine: Machine, snapshot: Snapshot, event: Event, node: Option<Node>, selected: Evaluation)
+  ensures (takeTransition(machine, snapshot, event, node, selected).snapshotReused ==> (takeTransition(machine, snapshot, event, node, selected).snapshot == snapshot))
 {
+}
+
+function alwaysSelected(machine: Machine, snapshot: Snapshot, event: Event): Evaluation
+{
+  var source := (if snapshot.value in machine.states then Some(machine.states[snapshot.value]) else None);
+  var always := (match source { case Some(i_source_val) => Option.Some(i_source_val.always) case None => Option.None });
+  match always {
+    case Some(i_always_val) =>
+      i_always_val(snapshot.context, event)
+    case None =>
+      emptyEvaluation()
+  }
+}
+
+function eventlessStep(machine: Machine, snapshot: Snapshot, event: Event, selected: Evaluation): Step
+{
+  var taken := takeTransition(machine, snapshot, event, (if snapshot.value in machine.states then Some(machine.states[snapshot.value]) else None), selected);
+  var kept := ((taken.snapshot.value == snapshot.value) && taken.contextReused);
+  Step((if kept then snapshot else taken.snapshot), kept, taken.contextReused, taken.effects)
+}
+
+lemma eventlessStep_ensures(machine: Machine, snapshot: Snapshot, event: Event, selected: Evaluation)
+  ensures (eventlessStep(machine, snapshot, event, selected).snapshotReused ==> (eventlessStep(machine, snapshot, event, selected).snapshot == snapshot))
+{
+}
+
+function settle(machine: Machine, step: Step, event: Event, select: bool, remaining: int): Macrostep
+  decreases remaining
+{
+  if (remaining <= 0) then
+    Macrostep(false, step, [])
+  else
+    if !(select) then
+      Macrostep(true, step, [])
+    else
+      var selected := alwaysSelected(machine, step.snapshot, event);
+      var enabled := ((match selected.result { case Some(i_) => true case None => false }) || (|selected.effects| > 0));
+      if !(enabled) then
+        Macrostep(true, step, [])
+      else
+        var next := eventlessStep(machine, step.snapshot, event, selected);
+        var rest := settle(machine, Step(next.snapshot, (step.snapshotReused && next.snapshotReused), (step.contextReused && next.contextReused), (step.effects + next.effects)), event, !(next.snapshotReused), (remaining - 1));
+        Macrostep(rest.settled, rest.step, ([next] + rest.trace))
+}
+
+function initialMacrostep(machine: Machine, event: Event, maxIterations: int): Macrostep
+{
+  settle(machine, initialTransition(machine, event), event, true, maxIterations)
+}
+
+function transitionMacrostep(machine: Machine, snapshot: Snapshot, event: Event, maxIterations: int): Macrostep
+{
+  settle(machine, transition(machine, snapshot, event), event, true, maxIterations)
 }
 
 function declaredPath(nodes: map<string, CompoundNode>, path: seq<string>): bool

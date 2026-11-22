@@ -16,6 +16,7 @@ export type Node = {
     string,
     (context: Record<string, number>, event: Event) => Evaluation
   >;
+  always: (context: Record<string, number>, event: Event) => Evaluation;
   entry: (context: Record<string, number>, event: Event) => Evaluation;
   exit: (context: Record<string, number>, event: Event) => Evaluation;
 };
@@ -30,6 +31,12 @@ export type Step = {
   snapshotReused: boolean;
   contextReused: boolean;
   effects: readonly Effect[];
+};
+// A macrostep that runs out of budget is unfinished: settled is false.
+export type Macrostep = {
+  settled: boolean;
+  step: Step;
+  trace: readonly Step[];
 };
 
 export type Applied = {
@@ -101,6 +108,18 @@ export function transition(
     handler === undefined
       ? emptyEvaluation()
       : handler(snapshot.context, event);
+  return takeTransition(machine, snapshot, event, node, selected);
+}
+
+export function takeTransition(
+  machine: Machine,
+  snapshot: Snapshot,
+  event: Event,
+  node: Node | undefined,
+  selected: Evaluation
+): Step {
+  //@ verify
+  //@ ensures \result.snapshotReused ==> \result.snapshot === snapshot
   if (selected.result === undefined && selected.effects.length === 0) {
     return { snapshot, snapshotReused: true, contextReused: true, effects: [] };
   }
@@ -131,6 +150,112 @@ export function transition(
     contextReused: exited.reused && updated.reused && entered.reused,
     effects: [...exited.effects, ...updated.effects, ...entered.effects]
   };
+}
+
+export function alwaysSelected(
+  machine: Machine,
+  snapshot: Snapshot,
+  event: Event
+): Evaluation {
+  //@ verify
+  const source = machine.states.get(snapshot.value);
+  const always = source === undefined ? undefined : source.always;
+  return always === undefined
+    ? emptyEvaluation()
+    : always(snapshot.context, event);
+}
+
+// The runtime reuses the snapshot object when an eventless microstep leaves
+// the value and the context object unchanged, and then stops reselecting.
+export function eventlessStep(
+  machine: Machine,
+  snapshot: Snapshot,
+  event: Event,
+  selected: Evaluation
+): Step {
+  //@ verify
+  //@ ensures \result.snapshotReused ==> \result.snapshot === snapshot
+  const taken = takeTransition(
+    machine,
+    snapshot,
+    event,
+    machine.states.get(snapshot.value),
+    selected
+  );
+  const kept = taken.snapshot.value === snapshot.value && taken.contextReused;
+  return {
+    snapshot: kept ? snapshot : taken.snapshot,
+    snapshotReused: kept,
+    contextReused: taken.contextReused,
+    effects: taken.effects
+  };
+}
+
+// Each call is one iteration of the runtime's macrostep loop, which counts
+// the final selection that finds nothing enabled.
+export function settle(
+  machine: Machine,
+  step: Step,
+  event: Event,
+  select: boolean,
+  remaining: number
+): Macrostep {
+  //@ verify
+  //@ decreases remaining
+  if (remaining <= 0) return { settled: false, step, trace: [] };
+  if (!select) return { settled: true, step, trace: [] };
+  const selected = alwaysSelected(machine, step.snapshot, event);
+  const enabled = selected.result !== undefined || selected.effects.length > 0;
+  if (!enabled) return { settled: true, step, trace: [] };
+  const next = eventlessStep(machine, step.snapshot, event, selected);
+  const rest = settle(
+    machine,
+    {
+      snapshot: next.snapshot,
+      snapshotReused: step.snapshotReused && next.snapshotReused,
+      contextReused: step.contextReused && next.contextReused,
+      effects: [...step.effects, ...next.effects]
+    },
+    event,
+    !next.snapshotReused,
+    remaining - 1
+  );
+  return {
+    settled: rest.settled,
+    step: rest.step,
+    trace: [next, ...rest.trace]
+  };
+}
+
+export function initialMacrostep(
+  machine: Machine,
+  event: Event,
+  maxIterations: number
+): Macrostep {
+  //@ verify
+  return settle(
+    machine,
+    initialTransition(machine, event),
+    event,
+    true,
+    maxIterations
+  );
+}
+
+export function transitionMacrostep(
+  machine: Machine,
+  snapshot: Snapshot,
+  event: Event,
+  maxIterations: number
+): Macrostep {
+  //@ verify
+  return settle(
+    machine,
+    transition(machine, snapshot, event),
+    event,
+    true,
+    maxIterations
+  );
 }
 
 export type CompoundNode = {

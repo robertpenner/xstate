@@ -28,13 +28,15 @@ datatype Result = Result(target: Option<string>, patch: Option<seq<PatchEntry>>,
 
 datatype Evaluation = Evaluation(result: Option<Result>, effects: seq<Effect>)
 
-datatype Node = Node(on: map<string, (map<string, int>, Event) -> Evaluation>, entry: (map<string, int>, Event) -> Evaluation, exit: (map<string, int>, Event) -> Evaluation)
+datatype Node = Node(on: map<string, (map<string, int>, Event) -> Evaluation>, always: (map<string, int>, Event) -> Evaluation, entry: (map<string, int>, Event) -> Evaluation, exit: (map<string, int>, Event) -> Evaluation)
 
 datatype Machine = Machine(initial: string, context: map<string, int>, states: map<string, Node>)
 
 datatype Snapshot = Snapshot(value: string, context: map<string, int>)
 
 datatype Step = Step(snapshot: Snapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>)
+
+datatype Macrostep = Macrostep(settled: bool, step: Step, trace: seq<Step>)
 
 datatype Applied = Applied(context: map<string, int>, reused: bool, effects: seq<Effect>)
 
@@ -112,6 +114,16 @@ function transition(machine: Machine, snapshot: Snapshot, event: Event): Step
   var node := (if snapshot.value in machine.states then Some(machine.states[snapshot.value]) else None);
   var handler := (match node { case Some(i_node_val) => (if event.type_ in i_node_val.on then Some(i_node_val.on[event.type_]) else None) case None => Option.None });
   var selected := (match handler { case Some(i_handler_val) => i_handler_val(snapshot.context, event) case None => emptyEvaluation() });
+  takeTransition(machine, snapshot, event, node, selected)
+}
+
+lemma transition_ensures(machine: Machine, snapshot: Snapshot, event: Event)
+  ensures (transition(machine, snapshot, event).snapshotReused ==> (transition(machine, snapshot, event).snapshot == snapshot))
+{
+}
+
+function takeTransition(machine: Machine, snapshot: Snapshot, event: Event, node: Option<Node>, selected: Evaluation): Step
+{
   if ((match selected.result { case Some(i_) => false case None => true }) && (|selected.effects| == 0)) then
     Step(snapshot, true, true, [])
   else
@@ -129,9 +141,62 @@ function transition(machine: Machine, snapshot: Snapshot, event: Event): Step
     Step(Snapshot(next, entered.context), false, ((exited.reused && updated.reused) && entered.reused), ((exited.effects + updated.effects) + entered.effects))
 }
 
-lemma transition_ensures(machine: Machine, snapshot: Snapshot, event: Event)
-  ensures (transition(machine, snapshot, event).snapshotReused ==> (transition(machine, snapshot, event).snapshot == snapshot))
+lemma takeTransition_ensures(machine: Machine, snapshot: Snapshot, event: Event, node: Option<Node>, selected: Evaluation)
+  ensures (takeTransition(machine, snapshot, event, node, selected).snapshotReused ==> (takeTransition(machine, snapshot, event, node, selected).snapshot == snapshot))
 {
+}
+
+function alwaysSelected(machine: Machine, snapshot: Snapshot, event: Event): Evaluation
+{
+  var source := (if snapshot.value in machine.states then Some(machine.states[snapshot.value]) else None);
+  var always := (match source { case Some(i_source_val) => Option.Some(i_source_val.always) case None => Option.None });
+  match always {
+    case Some(i_always_val) =>
+      i_always_val(snapshot.context, event)
+    case None =>
+      emptyEvaluation()
+  }
+}
+
+function eventlessStep(machine: Machine, snapshot: Snapshot, event: Event, selected: Evaluation): Step
+{
+  var taken := takeTransition(machine, snapshot, event, (if snapshot.value in machine.states then Some(machine.states[snapshot.value]) else None), selected);
+  var kept := ((taken.snapshot.value == snapshot.value) && taken.contextReused);
+  Step((if kept then snapshot else taken.snapshot), kept, taken.contextReused, taken.effects)
+}
+
+lemma eventlessStep_ensures(machine: Machine, snapshot: Snapshot, event: Event, selected: Evaluation)
+  ensures (eventlessStep(machine, snapshot, event, selected).snapshotReused ==> (eventlessStep(machine, snapshot, event, selected).snapshot == snapshot))
+{
+}
+
+function settle(machine: Machine, step: Step, event: Event, select: bool, remaining: int): Macrostep
+  decreases remaining
+{
+  if (remaining <= 0) then
+    Macrostep(false, step, [])
+  else
+    if !(select) then
+      Macrostep(true, step, [])
+    else
+      var selected := alwaysSelected(machine, step.snapshot, event);
+      var enabled := ((match selected.result { case Some(i_) => true case None => false }) || (|selected.effects| > 0));
+      if !(enabled) then
+        Macrostep(true, step, [])
+      else
+        var next := eventlessStep(machine, step.snapshot, event, selected);
+        var rest := settle(machine, Step(next.snapshot, (step.snapshotReused && next.snapshotReused), (step.contextReused && next.contextReused), (step.effects + next.effects)), event, !(next.snapshotReused), (remaining - 1));
+        Macrostep(rest.settled, rest.step, ([next] + rest.trace))
+}
+
+function initialMacrostep(machine: Machine, event: Event, maxIterations: int): Macrostep
+{
+  settle(machine, initialTransition(machine, event), event, true, maxIterations)
+}
+
+function transitionMacrostep(machine: Machine, snapshot: Snapshot, event: Event, maxIterations: int): Macrostep
+{
+  settle(machine, transition(machine, snapshot, event), event, true, maxIterations)
 }
 
 ghost function Selected(machine: Machine, snapshot: Snapshot, event: Event): Evaluation
@@ -330,6 +395,237 @@ lemma TargetlessReentryLifecycle(machine: Machine, snapshot: Snapshot, event: Ev
             Step(Snapshot(snapshot.value, updated.context), false,
                  updated.reused, effects)
 {
+}
+
+// Eventless transitions and bounded macrosteps (robertpenner/xstate#34).
+
+ghost function NodeAt(machine: Machine, value: string): Option<Node>
+{
+  if value in machine.states then Some(machine.states[value]) else None
+}
+
+ghost predicate AlwaysEnabled(machine: Machine, snapshot: Snapshot, event: Event)
+{
+  alwaysSelected(machine, snapshot, event).result.Some? ||
+  |alwaysSelected(machine, snapshot, event).effects| > 0
+}
+
+ghost predicate AlwaysDeclared(machine: Machine)
+{
+  forall id, context, event ::
+    id in machine.states &&
+    machine.states[id].always(context, event).result.Some? &&
+    machine.states[id].always(context, event).result.value.target.Some? ==>
+      machine.states[id].always(context, event).result.value.target.value in machine.states
+}
+
+ghost function TraceEffects(trace: seq<Step>): seq<Effect>
+  decreases |trace|
+{
+  if |trace| == 0 then [] else trace[0].effects + TraceEffects(trace[1..])
+}
+
+ghost predicate AllSnapshotsReused(trace: seq<Step>)
+{
+  forall i :: 0 <= i < |trace| ==> trace[i].snapshotReused
+}
+
+ghost predicate AllContextsReused(trace: seq<Step>)
+{
+  forall i :: 0 <= i < |trace| ==> trace[i].contextReused
+}
+
+ghost function NextEventless(machine: Machine, step: Step, event: Event): Step
+{
+  eventlessStep(machine, step.snapshot, event, alwaysSelected(machine, step.snapshot, event))
+}
+
+ghost function Advanced(step: Step, next: Step): Step
+{
+  Step(next.snapshot, step.snapshotReused && next.snapshotReused,
+       step.contextReused && next.contextReused, step.effects + next.effects)
+}
+
+lemma SettleUnfold(machine: Machine, step: Step, event: Event, select: bool, remaining: int)
+  requires remaining > 0 && select && AlwaysEnabled(machine, step.snapshot, event)
+  ensures var next := NextEventless(machine, step, event);
+          var rest := settle(machine, Advanced(step, next), event, !next.snapshotReused, remaining - 1);
+          settle(machine, step, event, select, remaining) ==
+            Macrostep(rest.settled, rest.step, [next] + rest.trace)
+{
+}
+
+lemma SettleStops(machine: Machine, step: Step, event: Event, select: bool, remaining: int)
+  requires remaining > 0 && (!select || !AlwaysEnabled(machine, step.snapshot, event))
+  ensures settle(machine, step, event, select, remaining) == Macrostep(true, step, [])
+{
+}
+
+lemma EventStepShared(machine: Machine, snapshot: Snapshot, event: Event)
+  ensures transition(machine, snapshot, event) ==
+    takeTransition(machine, snapshot, event, NodeAt(machine, snapshot.value),
+      Selected(machine, snapshot, event))
+{
+}
+
+lemma EventlessIdentity(machine: Machine, snapshot: Snapshot, event: Event, selected: Evaluation)
+  ensures var taken := takeTransition(machine, snapshot, event, NodeAt(machine, snapshot.value), selected);
+          eventlessStep(machine, snapshot, event, selected) ==
+            (if taken.snapshot.value == snapshot.value && taken.contextReused
+             then Step(snapshot, true, true, taken.effects)
+             else Step(taken.snapshot, false, taken.contextReused, taken.effects))
+{
+}
+
+lemma SettleBudget(machine: Machine, step: Step, event: Event, select: bool, remaining: int)
+  requires remaining >= 0
+  ensures |settle(machine, step, event, select, remaining).trace| <= remaining
+  ensures settle(machine, step, event, select, remaining).settled <==>
+    |settle(machine, step, event, select, remaining).trace| < remaining
+  decreases remaining
+{
+  if remaining > 0 && select && AlwaysEnabled(machine, step.snapshot, event) {
+    var next := NextEventless(machine, step, event);
+    SettleUnfold(machine, step, event, select, remaining);
+    SettleBudget(machine, Advanced(step, next), event, !next.snapshotReused, remaining - 1);
+  }
+}
+
+lemma SettleRest(machine: Machine, step: Step, event: Event, select: bool, remaining: int)
+  ensures var m := settle(machine, step, event, select, remaining);
+          m.settled ==>
+            (if |m.trace| == 0 then !select || !AlwaysEnabled(machine, step.snapshot, event)
+             else m.trace[|m.trace| - 1].snapshotReused ||
+                  !AlwaysEnabled(machine, m.step.snapshot, event))
+  decreases remaining
+{
+  if remaining > 0 && select && AlwaysEnabled(machine, step.snapshot, event) {
+    var next := NextEventless(machine, step, event);
+    SettleUnfold(machine, step, event, select, remaining);
+    SettleRest(machine, Advanced(step, next), event, !next.snapshotReused, remaining - 1);
+  }
+}
+
+lemma SettleSteps(machine: Machine, step: Step, event: Event, select: bool, remaining: int)
+  ensures var m := settle(machine, step, event, select, remaining);
+          (|m.trace| > 0 ==> select && AlwaysEnabled(machine, step.snapshot, event)) &&
+          forall i :: 0 <= i < |m.trace| - 1 ==> !m.trace[i].snapshotReused
+  decreases remaining
+{
+  if remaining > 0 && select && AlwaysEnabled(machine, step.snapshot, event) {
+    var next := NextEventless(machine, step, event);
+    SettleUnfold(machine, step, event, select, remaining);
+    SettleSteps(machine, Advanced(step, next), event, !next.snapshotReused, remaining - 1);
+  }
+}
+
+lemma SettleAccumulates(machine: Machine, step: Step, event: Event, select: bool, remaining: int)
+  ensures var m := settle(machine, step, event, select, remaining);
+          m.step.snapshot == (if |m.trace| == 0 then step.snapshot else m.trace[|m.trace| - 1].snapshot) &&
+          m.step.effects == step.effects + TraceEffects(m.trace) &&
+          m.step.snapshotReused == (step.snapshotReused && AllSnapshotsReused(m.trace)) &&
+          m.step.contextReused == (step.contextReused && AllContextsReused(m.trace))
+  decreases remaining
+{
+  if remaining > 0 && select && AlwaysEnabled(machine, step.snapshot, event) {
+    var next := NextEventless(machine, step, event);
+    var rest := settle(machine, Advanced(step, next), event, !next.snapshotReused, remaining - 1);
+    SettleUnfold(machine, step, event, select, remaining);
+    SettleAccumulates(machine, Advanced(step, next), event, !next.snapshotReused, remaining - 1);
+    var trace := [next] + rest.trace;
+    assert trace[1..] == rest.trace;
+    assert TraceEffects(trace) == next.effects + TraceEffects(rest.trace);
+    assert AllSnapshotsReused(trace) == (next.snapshotReused && AllSnapshotsReused(rest.trace)) by {
+      if next.snapshotReused && AllSnapshotsReused(rest.trace) {
+        forall i | 0 <= i < |trace| ensures trace[i].snapshotReused {
+          if i > 0 { assert trace[i] == rest.trace[i - 1]; }
+        }
+      }
+    }
+    assert AllContextsReused(trace) == (next.contextReused && AllContextsReused(rest.trace)) by {
+      if next.contextReused && AllContextsReused(rest.trace) {
+        forall i | 0 <= i < |trace| ensures trace[i].contextReused {
+          if i > 0 { assert trace[i] == rest.trace[i - 1]; }
+        }
+      }
+    }
+  } else {
+    assert TraceEffects([]) == [];
+  }
+}
+
+lemma SettleStable(machine: Machine, step: Step, event: Event, select: bool, small: int, large: int)
+  requires 0 <= small <= large
+  ensures var a := settle(machine, step, event, select, small);
+          var b := settle(machine, step, event, select, large);
+          a.trace <= b.trace && (a.settled ==> a == b)
+  decreases small
+{
+  if small > 0 && select && AlwaysEnabled(machine, step.snapshot, event) {
+    var next := NextEventless(machine, step, event);
+    SettleUnfold(machine, step, event, select, small);
+    SettleUnfold(machine, step, event, select, large);
+    SettleStable(machine, Advanced(step, next), event, !next.snapshotReused, small - 1, large - 1);
+  } else if small > 0 {
+    SettleStops(machine, step, event, select, small);
+    SettleStops(machine, step, event, select, large);
+  }
+}
+
+lemma EventlessDeclared(machine: Machine, snapshot: Snapshot, event: Event)
+  requires AlwaysDeclared(machine)
+  requires snapshot.value in machine.states
+  ensures eventlessStep(machine, snapshot, event, alwaysSelected(machine, snapshot, event)).snapshot.value
+    in machine.states
+{
+  var selected := alwaysSelected(machine, snapshot, event);
+  assert selected == machine.states[snapshot.value].always(snapshot.context, event);
+}
+
+lemma SettleValid(machine: Machine, step: Step, event: Event, select: bool, remaining: int)
+  requires AlwaysDeclared(machine)
+  requires step.snapshot.value in machine.states
+  ensures var m := settle(machine, step, event, select, remaining);
+          m.step.snapshot.value in machine.states &&
+          forall i :: 0 <= i < |m.trace| ==> m.trace[i].snapshot.value in machine.states
+  decreases remaining
+{
+  if remaining > 0 && select && AlwaysEnabled(machine, step.snapshot, event) {
+    var next := NextEventless(machine, step, event);
+    EventlessDeclared(machine, step.snapshot, event);
+    SettleUnfold(machine, step, event, select, remaining);
+    SettleValid(machine, Advanced(step, next), event, !next.snapshotReused, remaining - 1);
+  }
+}
+
+lemma IdentityStepRunsOnce(machine: Machine, step: Step, event: Event, remaining: int)
+  requires remaining >= 2
+  requires AlwaysEnabled(machine, step.snapshot, event)
+  requires NextEventless(machine, step, event).snapshotReused
+  ensures var m := settle(machine, step, event, true, remaining);
+          m.settled && |m.trace| == 1
+{
+  var next := NextEventless(machine, step, event);
+  SettleUnfold(machine, step, event, true, remaining);
+  SettleStops(machine, Advanced(step, next), event, false, remaining - 1);
+}
+
+lemma EmptyPatchLoops(machine: Machine, step: Step, event: Event, select: bool, remaining: int)
+  requires select
+  requires step.snapshot.value in machine.states
+  requires forall context ::
+    (machine.states[step.snapshot.value].always(context, event).result ==
+     Some(Result(None, Some([]), false)))
+  ensures !settle(machine, step, event, select, remaining).settled
+  decreases remaining
+{
+  if remaining > 0 {
+    assert alwaysSelected(machine, step.snapshot, event).result == Some(Result(None, Some([]), false));
+    var next := NextEventless(machine, step, event);
+    assert next.snapshot.value == step.snapshot.value && !next.snapshotReused;
+    SettleUnfold(machine, step, event, select, remaining);
+    EmptyPatchLoops(machine, Advanced(step, next), event, true, remaining - 1);
+  }
 }
 
 function declaredPath(nodes: map<string, CompoundNode>, path: seq<string>): bool

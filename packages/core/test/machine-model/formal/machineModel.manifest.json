@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 492,
+  "verifiedCount": 521,
   "functions": [
     "mergePatch",
     "apply",
@@ -53,7 +53,13 @@
     "domainsApart",
     "multiReady",
     "parallelStepReady",
-    "parallelStep"
+    "parallelStep",
+    "alwaysSelected",
+    "eventlessStep",
+    "initialMacrostep",
+    "settle",
+    "takeTransition",
+    "transitionMacrostep"
   ],
   "contracts": [
     "mergePatch_ensures",
@@ -77,7 +83,9 @@
     "parallelTransition_ensures",
     "selectionPlans_ensures",
     "applyAll_ensures",
-    "parallelStep_ensures"
+    "parallelStep_ensures",
+    "eventlessStep_ensures",
+    "takeTransition_ensures"
   ],
   "specFunctions": [
     "Selected",
@@ -116,7 +124,15 @@
     "PlansContext",
     "MovingPlans",
     "Distinct",
-    "DistinctIds"
+    "DistinctIds",
+    "Advanced",
+    "AllContextsReused",
+    "AllSnapshotsReused",
+    "AlwaysDeclared",
+    "AlwaysEnabled",
+    "NextEventless",
+    "NodeAt",
+    "TraceEffects"
   ],
   "laws": [
     "LastPatchCons",
@@ -284,7 +300,20 @@
     "SourceApartMeaning",
     "SourcesApartMeaning",
     "SubseqDistinct",
-    "SubseqMembers"
+    "SubseqMembers",
+    "EmptyPatchLoops",
+    "EventStepShared",
+    "EventlessDeclared",
+    "EventlessIdentity",
+    "IdentityStepRunsOnce",
+    "SettleAccumulates",
+    "SettleBudget",
+    "SettleRest",
+    "SettleStable",
+    "SettleSteps",
+    "SettleStops",
+    "SettleUnfold",
+    "SettleValid"
   ],
   "defects": [
     {
@@ -466,6 +495,51 @@
       "name": "a later conflicting selection replaces an earlier one",
       "before": "  if (anyPreempts(machine, active, first, kept)) {",
       "after": "  if (anyPreempts(machine, active, first, [])) {"
+    },
+    {
+      "name": "eventless identity step is reselected",
+      "before": "    !next.snapshotReused,\n    remaining - 1",
+      "after": "    true,\n    remaining - 1"
+    },
+    {
+      "name": "macrostep budget allows one extra iteration",
+      "before": "if (remaining <= 0) return { settled: false, step, trace: [] };",
+      "after": "if (remaining < 0) return { settled: false, step, trace: [] };"
+    },
+    {
+      "name": "settled check precedes the budget check",
+      "before": "  if (remaining <= 0) return { settled: false, step, trace: [] };\n  if (!select) return { settled: true, step, trace: [] };",
+      "after": "  if (!select) return { settled: true, step, trace: [] };\n  if (remaining <= 0) return { settled: false, step, trace: [] };"
+    },
+    {
+      "name": "macrostep snapshot reuse reads only the last step",
+      "before": "snapshotReused: step.snapshotReused && next.snapshotReused,",
+      "after": "snapshotReused: next.snapshotReused,"
+    },
+    {
+      "name": "macrostep context reuse reads only the last step",
+      "before": "contextReused: step.contextReused && next.contextReused,",
+      "after": "contextReused: next.contextReused,"
+    },
+    {
+      "name": "eventless effects are dropped",
+      "before": "effects: [...step.effects, ...next.effects]",
+      "after": "effects: step.effects"
+    },
+    {
+      "name": "eventless steps are omitted from the trace",
+      "before": "trace: [next, ...rest.trace]",
+      "after": "trace: rest.trace"
+    },
+    {
+      "name": "eventless identity ignores context reuse",
+      "before": "const kept = taken.snapshot.value === snapshot.value && taken.contextReused;",
+      "after": "const kept = taken.snapshot.value === snapshot.value;"
+    },
+    {
+      "name": "effect-only eventless transitions are not enabled",
+      "before": "const enabled = selected.result !== undefined || selected.effects.length > 0;",
+      "after": "const enabled = selected.result !== undefined;"
     }
   ],
   "proofDefects": [
