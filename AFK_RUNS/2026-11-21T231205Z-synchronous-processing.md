@@ -17,7 +17,7 @@ candidate issues (#36). Keep a log of potential bugs found along the way.
 
 **Execution:** sequential.
 
-**Verified integration head:** `8fddd06` (#38).
+**Verified integration head:** `f756e58` (#38 review fixes).
 
 ### Slice progress
 
@@ -43,7 +43,10 @@ outside the repo:
 
 - Parallel selection: `start` logs `p always`, `b always`; `EV` logs `b EV`,
   `p always`, `b always`. Two eventless patches to the same key end with the
-  later one (`log: 'B'`). Same on v5.
+  later one (`log: 'B'`). v5 selects the same transitions but runs both
+  `assign` actions in sequence, so no write is lost: probe `V5` in
+  `synchronousProcessing.v5-probes.mjs` ends with `log: 'PBb'` (rerun during
+  the series review).
 - Root output: `{ status: 'done', output: 0, context: { n: 110 } }`. Same on
   v5 (new probe `V10` in `synchronousProcessing.v5-probes.mjs`).
 - Filed statelyai/xstate#5948 and statelyai/xstate#5949.
@@ -126,7 +129,56 @@ were compared byte for byte with the verified checkout):
 - `pnpm test:machine-model`: 258 tests passed (16 files). After a type-only
   cast fix in `parallelCompletion.test.ts`, that file passed 9 of 9.
 - `pnpm typecheck`, `pnpm lint`, `pnpm format:check`: exit 0.
-- `pnpm test:core` is part of the final series verification below.
+- `pnpm test:core` ran with the final series verification below.
+
+**Series review.** A code-review agent reviewed base `dbe2265` to head
+`2ea8157` (22 files, 13 commits) against #23 and #34 to #38. It reported no
+blockers, five should-fix findings, and seven notes. Resolutions:
+
+- Stale README counts: updated to 223 laws, 27 contracts, 88 defects, and 887
+  tasks (`f756e58`).
+- The v5 claim for the lost eventless write contradicted bug 2: probe `V5`
+  rerun against `xstate@5.33.4` ends with `log: 'PBb'`, so v5 keeps both
+  writes. Corrected here and in `SYNCHRONOUS_PROCESSING.md` (`593cea4`).
+- Incomplete #38 verification record: completed by the final verification
+  below.
+- `SYNCHRONOUS_PROCESSING.md` still said a parallel node completes once and
+  that the adapters refuse every feature: qualified with bugs 17 and 18, and
+  the adapter plan now reads as history (`593cea4`).
+- The #38 brief's refusal of a region output object stored in context or
+  passed to an effect was missing: `compareParallelRun` now refuses both, with
+  a named test (`a9610da`). Machine output stays compared structurally,
+  because the runtime allocates that object and structural comparison is
+  sound for it; this departs from the brief's wording "or output".
+- The brief's law "a parallel node completes at most once per microstep" had
+  no whole-pass lemma: `FinalEnteredBookkeeping` and
+  `ParallelEnterCompletesOnce` were written first, `ParallelEntered` now
+  exposes `completed`, and the new defect "entry pass forgets earlier
+  completions" is rejected (`313a59b`).
+- Notes: the flat `SettleBudget` text, done-order citations, evidence labels
+  on bugs 1, 4, 7, 11, 15, and 18, the v5 probes described as printing rather
+  than asserting, bug 18's SCXML comparison (SCXML forbids `<final>` directly
+  under `<parallel>`), refusals counted by reason in the parallel property
+  test (seed 3838: 70 active-region targets and 11 unrepresentable raises of
+  400 runs), and `Number.isSafeInteger` in `iterationBound`.
+
+Checks on the uncommitted review fixes, compared byte for byte with the
+committed files:
+
+- `pnpm verify:machine-model` on a detached checkout of `2ea8157` plus the
+  fixes: exit 0, ending "Freshness, additions-only inventory, defects and
+  refactor verified." Dafny reported 887 verified, 0 errors; all 88 model
+  defects and 11 proof-weakening probes were rejected.
+- `pnpm test:machine-model:runtime-defects` (run alone): exit 0, 19 runtime
+  defects rejected.
+
+### Final verification
+
+On `f756e58`, in the worktree:
+
+- `pnpm build`, `pnpm typecheck`, `pnpm lint`, `pnpm format:check`: exit 0.
+- `pnpm test:core`: 3352 passed, 28 skipped, 3 todo (206 files).
+- `pnpm test:machine-model`: 259 passed (16 files).
 
 ### Potential bugs
 
@@ -136,8 +188,9 @@ Each entry says what was observed, where, and what happened to it.
 1. **Parallel eventless and event selection differ** (runtime, v5 too).
    `selectEventlessTransitions` takes the first enabled `always` on each
    atomic state's ancestor chain, while `transitionNode` lets a region's
-   handler hide the parallel ancestor's handler. Filed as
-   statelyai/xstate#5948.
+   handler hide the parallel ancestor's handler. Evidence: probe
+   `[runtime][v5] selects eventless transitions per atomic state but events
+region-first` and v5 probe `V5`. Filed as statelyai/xstate#5948.
 2. **Simultaneous eventless patches lose a write** (runtime, v6 only). Two
    eventless transitions selected in one microstep both compute patches from
    the pre-step context, and the later one in document order wins. v5 runs
@@ -147,7 +200,8 @@ Each entry says what was observed, where, and what happened to it.
    statelyai/xstate#5949.
 4. **An empty context patch from `always` loops forever** (runtime).
    `mergeContextPatch` returns a new object for `{}`, so the reselection rule
-   sees a new snapshot. Not filed, by decision 4 in
+   sees a new snapshot. Evidence: probe `[runtime] loops on an eventless
+callback that returns an empty context patch`. Not filed, by decision 4 in
    `SYNCHRONOUS_PROCESSING.md`; the owner's statelyai/xstate#5945 covers the
    `xstate/fsm` counterpart.
 5. **The preconstruct dev entry cannot be imported as ESM** (tooling).
@@ -164,7 +218,8 @@ Each entry says what was observed, where, and what happened to it.
    return the previous snapshot, `completeMacrostep` clones it and overwrites
    the last entry of the microstep list, so `getMicrosteps` reports a
    different object for that microstep than the loop used to decide
-   reselection. The adapter compares snapshot identity per macrostep only.
+   reselection. Inferred from reading `completeMacrostep`; no test exercises
+   it. The adapter compares snapshot identity per macrostep only.
 8. **An unhandled event returns the previous snapshot together with eventless
    effects** (runtime observation). With an effect-only `always`, sending an
    unhandled event returns the same snapshot object and a non-empty effect
@@ -192,7 +247,8 @@ Each entry says what was observed, where, and what happened to it.
     `p: { initial: 'a', states: { a: { on: { go: { target: 'b' } } }, b: { type: 'final', always: { target: 'a' } } }, onDone: { target: 'q' } }`,
     sending `go` steps `{p: b}`, then `{p: a}`, then `q`: the done event queued
     on entering `b` is dequeued after `p` has left its final child and still
-    takes `p.onDone`. The model adapter refuses any transitions on final
+    takes `p.onDone`. Evidence: a scratch probe outside the repo; no committed
+    test runs this machine. The model adapter refuses any transitions on final
     nodes. Not filed yet.
 12. **Wall-clock proof timeouts under shared load** (tooling). With the load
     average between 30 and 55, lemmas that verify in a few seconds alone
@@ -231,7 +287,8 @@ Each entry says what was observed, where, and what happened to it.
     `{ R: 'r' }` (`N` undefined); one event completing both ends with
     `{ N: { n1: 'n1', n2: 'n2' }, R: 'r' }`. Compound regions do not have this
     problem because their output is reevaluated from the active final child.
-    Not filed yet.
+    Evidence: `parallelCompletion.test.ts` test `loses the output of a nested
+parallel region that completed earlier`. Not filed yet.
 16. **Region outputs in a parallel done event are reevaluated** (runtime
     observation). A compound region's own done event carries its final
     child's output evaluated on entry, but the parallel done event evaluates
@@ -245,13 +302,17 @@ Each entry says what was observed, where, and what happened to it.
     second done event within one microstep. SCXML's `enterStates` behaves the
     same way, so the model mirrors it.
 18. **An atomic final region counts as final before it is entered** (runtime,
-    differs from SCXML). The runtime's `isInFinalState` treats an atomic node
+    no SCXML counterpart). The runtime's `isInFinalState` treats an atomic node
     as final when its type is `final`, without checking that it is active. A
     parallel node `p` with atomic final regions `x` and `y` whose entries
     raise `RX` and `RY` queues `RX`, then `xstate.done.state.m.p`, then `RY`:
     the parallel's done event is queued while `y` is still being entered, and
     the done handler runs between the two raises (context log `|rx|done|ry`).
-    SCXML's `isInFinalState` returns false for an atomic final child of a
-    parallel, so SCXML queues the done event only when entering a compound
-    region's final child. The model mirrors the runtime (`FinalAtMeaning`)
-    and `parallelCompletion.test.ts` records the order. Not filed yet.
+    SCXML has no equivalent case: a `<parallel>` element may not contain a
+    `<final>` child, so its regions are always compound or parallel. The
+    model mirrors the runtime (`FinalAtMeaning`). Evidence:
+    `parallelCompletion.test.ts` test
+    `queues the done event of atomic final regions between their entry raises`,
+    which also rejects the runtime
+    mutant `a parallel node completes more than once in one microstep`. Not
+    filed yet.
