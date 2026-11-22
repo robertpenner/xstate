@@ -28,27 +28,33 @@ datatype Result = Result(target: Option<string>, patch: Option<seq<PatchEntry>>,
 
 datatype Evaluation = Evaluation(result: Option<Result>, effects: seq<Effect>, raises: seq<Event>)
 
-datatype Node = Node(on: map<string, (map<string, int>, Event) -> Evaluation>, always: (map<string, int>, Event) -> Evaluation, entry: (map<string, int>, Event) -> Evaluation, exit: (map<string, int>, Event) -> Evaluation)
+datatype Node = Node(on: map<string, (map<string, int>, Event) -> Evaluation>, always: (map<string, int>, Event) -> Evaluation, entry: (map<string, int>, Event) -> Evaluation, exit: (map<string, int>, Event) -> Evaluation, final: bool, output: (map<string, int>, Event) -> int)
 
-datatype Machine = Machine(initial: string, context: map<string, int>, states: map<string, Node>)
+datatype Machine = Machine(initial: string, context: map<string, int>, states: map<string, Node>, hasOutput: bool, output: (map<string, int>, Event) -> int)
 
-datatype Snapshot = Snapshot(value: string, context: map<string, int>)
+datatype Snapshot = Snapshot(value: string, context: map<string, int>, output: Option<int>)
 
 datatype Step = Step(snapshot: Snapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>, raised: seq<Event>)
 
 datatype Macrostep = Macrostep(settled: bool, step: Step, queue: seq<Event>, trace: seq<Step>)
 
-datatype Applied = Applied(context: map<string, int>, reused: bool, effects: seq<Effect>)
+datatype Applied = Applied(context: map<string, int>, reused: bool, effects: seq<Effect>, raises: seq<Event>)
 
-datatype CompoundNode = CompoundNode(path: seq<string>, initialPath: seq<string>, children: seq<string>, initial: Option<string>, on: map<string, (map<string, int>, Event) -> Evaluation>, entry: (map<string, int>, Event) -> Evaluation, exit: (map<string, int>, Event) -> Evaluation)
+datatype Completion = Completion(context: map<string, int>, reused: bool, effects: seq<Effect>, output: Option<int>)
 
-datatype CompoundMachine = CompoundMachine(root: string, context: map<string, int>, nodes: map<string, CompoundNode>)
+datatype CompoundNode = CompoundNode(path: seq<string>, initialPath: seq<string>, children: seq<string>, initial: Option<string>, on: map<string, (map<string, int>, Event) -> Evaluation>, entry: (map<string, int>, Event) -> Evaluation, exit: (map<string, int>, Event) -> Evaluation, final: bool, output: (map<string, int>, Event) -> int)
 
-datatype CompoundSnapshot = CompoundSnapshot(path: seq<string>, context: map<string, int>)
+datatype CompoundMachine = CompoundMachine(root: string, context: map<string, int>, nodes: map<string, CompoundNode>, hasOutput: bool, output: (map<string, int>, Event) -> int)
+
+datatype CompoundSnapshot = CompoundSnapshot(path: seq<string>, context: map<string, int>, output: Option<int>)
 
 datatype Selection = Selection(id: string, node: CompoundNode, evaluation: Evaluation)
 
-datatype CompoundStep = CompoundStep(snapshot: CompoundSnapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>)
+datatype CompoundStep = CompoundStep(snapshot: CompoundSnapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>, raised: seq<Event>)
+
+datatype CompoundCompletion = CompoundCompletion(context: map<string, int>, reused: bool, effects: seq<Effect>, raised: seq<Event>, output: Option<int>)
+
+datatype CompoundMacrostep = CompoundMacrostep(settled: bool, refused: bool, step: CompoundStep, queue: seq<Event>, trace: seq<CompoundStep>)
 
 datatype ParallelMachine = ParallelMachine(root: string, context: map<string, int>, nodes: map<string, CompoundNode>, order: seq<string>, parallels: seq<string>)
 
@@ -77,7 +83,7 @@ function apply(context: map<string, int>, evaluation: Evaluation): Applied
 {
   var result := evaluation.result;
   var patch := (match result { case Some(i_result_val) => i_result_val.patch case None => Option.None });
-  Applied((match patch { case Some(i_patch_val) => mergePatch(context, i_patch_val) case None => context }), (match patch { case Some(i_) => false case None => true }), evaluation.effects)
+  Applied((match patch { case Some(i_patch_val) => mergePatch(context, i_patch_val) case None => context }), (match patch { case Some(i_) => false case None => true }), evaluation.effects, evaluation.raises)
 }
 
 lemma apply_ensures(context: map<string, int>, evaluation: Evaluation)
@@ -95,13 +101,47 @@ lemma emptyEvaluation_ensures()
 {
 }
 
+function completed(machine: Machine, value: string): bool
+{
+  ((value in machine.states) && (var i_node_val := machine.states[value]; i_node_val.final))
+}
+
+function doneEvent(id: string, output: int): Event
+{
+  Event(("xstate.done.state." + id), output)
+}
+
+function completion(machine: Machine, value: string, context: map<string, int>, event: Event): Completion
+{
+  if (value in machine.states) then
+    var i_node_val := machine.states[value];
+    if !(i_node_val.final) then
+      Completion(context, true, [], None)
+    else
+      var finalOutputOf := i_node_val.output;
+      var finalOutput := finalOutputOf(context, event);
+      var rootOutputOf := machine.output;
+      var output := (if machine.hasOutput then rootOutputOf(context, doneEvent(value, finalOutput)) else finalOutput);
+      var exit := i_node_val.exit;
+      var exited := apply(context, exit(context, event));
+      Completion(exited.context, exited.reused, exited.effects, Some(output))
+  else
+    Completion(context, true, [], None)
+}
+
+lemma completion_ensures(machine: Machine, value: string, context: map<string, int>, event: Event)
+  ensures (!(completed(machine, value)) ==> ((((completion(machine, value, context, event).context == context) && completion(machine, value, context, event).reused) && (|completion(machine, value, context, event).effects| == 0)) && (match completion(machine, value, context, event).output { case Some(i_) => false case None => true })))
+{
+}
+
 function initialTransition(machine: Machine, event: Event): Step
 {
   var node := (if machine.initial in machine.states then Some(machine.states[machine.initial]) else None);
   var entry := (match node { case Some(i_node_val) => Option.Some(i_node_val.entry) case None => Option.None });
   var entering := (match entry { case Some(i_entry_val) => i_entry_val(machine.context, event) case None => emptyEvaluation() });
   var applied := apply(machine.context, entering);
-  Step(Snapshot(machine.initial, applied.context), false, applied.reused, applied.effects, entering.raises)
+  var done := completion(machine, machine.initial, applied.context, event);
+  Step(Snapshot(machine.initial, done.context, done.output), false, (applied.reused && done.reused), (applied.effects + done.effects), entering.raises)
 }
 
 lemma initialTransition_ensures(machine: Machine, event: Event)
@@ -112,7 +152,7 @@ lemma initialTransition_ensures(machine: Machine, event: Event)
 function transition(machine: Machine, snapshot: Snapshot, event: Event): Step
 {
   var node := (if snapshot.value in machine.states then Some(machine.states[snapshot.value]) else None);
-  var handler := (match node { case Some(i_node_val) => (if event.type_ in i_node_val.on then Some(i_node_val.on[event.type_]) else None) case None => Option.None });
+  var handler := (match node { case Some(i_node_val) => (if i_node_val.final then Option.None else (if event.type_ in i_node_val.on then Some(i_node_val.on[event.type_]) else None)) case None => Option.None });
   var selected := (match handler { case Some(i_handler_val) => i_handler_val(snapshot.context, event) case None => emptyEvaluation() });
   takeTransition(machine, snapshot, event, node, selected)
 }
@@ -140,7 +180,8 @@ function takeTransition(machine: Machine, snapshot: Snapshot, event: Event, node
     var entry := (match destination { case Some(i_destination_val) => Option.Some(i_destination_val.entry) case None => Option.None });
     var entering := (match entry { case Some(i_entry_val) => (if changes then i_entry_val(updated.context, event) else emptyEvaluation()) case None => emptyEvaluation() });
     var entered := apply(updated.context, entering);
-    Step(Snapshot(next, entered.context), false, ((exited.reused && updated.reused) && entered.reused), ((exited.effects + updated.effects) + entered.effects), ((exiting.raises + selected.raises) + entering.raises))
+    var done := (if changes then completion(machine, next, entered.context, event) else Completion(entered.context, true, [], snapshot.output));
+    Step(Snapshot(next, done.context, done.output), false, (((exited.reused && updated.reused) && entered.reused) && done.reused), (((exited.effects + updated.effects) + entered.effects) + done.effects), ((exiting.raises + selected.raises) + entering.raises))
 }
 
 lemma takeTransition_ensures(machine: Machine, snapshot: Snapshot, event: Event, node: Option<Node>, selected: Evaluation)
@@ -175,19 +216,22 @@ lemma eventlessStep_ensures(machine: Machine, snapshot: Snapshot, event: Event, 
 function settle(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>, remaining: int): Macrostep
   decreases remaining
 {
-  if (remaining <= 0) then
-    Macrostep(false, step, queue, [])
+  if completed(machine, step.snapshot.value) then
+    Macrostep(true, step, [], [])
   else
-    var selected := (if select then alwaysSelected(machine, step.snapshot, event) else emptyEvaluation());
-    var enabled := (((match selected.result { case Some(i_) => true case None => false }) || (|selected.effects| > 0)) || (|selected.raises| > 0));
-    if (!(enabled) && (|queue| == 0)) then
-      Macrostep(true, step, queue, [])
+    if (remaining <= 0) then
+      Macrostep(false, step, queue, [])
     else
-      var processed := (if enabled then event else queue[0]);
-      var next := (if enabled then eventlessStep(machine, step.snapshot, event, selected) else transition(machine, step.snapshot, processed));
-      var waiting := (if enabled then queue else queue[1..]);
-      var rest := settle(machine, Step(next.snapshot, (step.snapshotReused && next.snapshotReused), (step.contextReused && next.contextReused), (step.effects + next.effects), (step.raised + next.raised)), processed, (!(enabled) || !(next.snapshotReused)), (waiting + next.raised), (remaining - 1));
-      Macrostep(rest.settled, rest.step, rest.queue, ([next] + rest.trace))
+      var selected := (if select then alwaysSelected(machine, step.snapshot, event) else emptyEvaluation());
+      var enabled := (((match selected.result { case Some(i_) => true case None => false }) || (|selected.effects| > 0)) || (|selected.raises| > 0));
+      if (!(enabled) && (|queue| == 0)) then
+        Macrostep(true, step, queue, [])
+      else
+        var processed := (if enabled then event else queue[0]);
+        var next := (if enabled then eventlessStep(machine, step.snapshot, event, selected) else transition(machine, step.snapshot, processed));
+        var waiting := (if enabled then queue else queue[1..]);
+        var rest := settle(machine, Step(next.snapshot, (step.snapshotReused && next.snapshotReused), (step.contextReused && next.contextReused), (step.effects + next.effects), (step.raised + next.raised)), processed, (!(enabled) || !(next.snapshotReused)), (waiting + next.raised), (remaining - 1));
+        Macrostep(rest.settled, rest.step, rest.queue, ([next] + rest.trace))
 }
 
 function initialMacrostep(machine: Machine, event: Event, maxIterations: int): Macrostep
@@ -231,7 +275,7 @@ function select(nodes: map<string, CompoundNode>, path: seq<string>, context: ma
     var on := node.on;
     var handler := (if event.type_ in on then Some(on[event.type_]) else None);
     var evaluation := (match handler { case Some(i_handler_val) => i_handler_val(context, event) case None => emptyEvaluation() });
-    if ((match evaluation.result { case Some(i_) => true case None => false }) || (|evaluation.effects| > 0)) then
+    if (((match evaluation.result { case Some(i_) => true case None => false }) || (|evaluation.effects| > 0)) || (|evaluation.raises| > 0)) then
       Some(Selection(id, node, evaluation))
     else
       select(nodes, path[0..(|path| - 1)], context, event)
@@ -323,7 +367,7 @@ function lifecycle(nodes: map<string, CompoundNode>, path: seq<string>, context:
   decreases |path|
 {
   if (|path| == 0) then
-    Applied(context, true, [])
+    Applied(context, true, [], [])
   else
     var node := lookupNode(nodes, path[0]);
     var exit := node.exit;
@@ -331,7 +375,7 @@ function lifecycle(nodes: map<string, CompoundNode>, path: seq<string>, context:
     var evaluation := (if exiting then exit(context, event) else entry(context, event));
     var first := apply(context, evaluation);
     var rest := lifecycle(nodes, path[1..], first.context, event, exiting);
-    Applied(rest.context, (first.reused && rest.reused), (first.effects + rest.effects))
+    Applied(rest.context, (first.reused && rest.reused), (first.effects + rest.effects), (first.raises + rest.raises))
 }
 
 lemma lifecycle_ensures(nodes: map<string, CompoundNode>, path: seq<string>, context: map<string, int>, event: Event, exiting: bool)
@@ -381,6 +425,41 @@ function ready(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Even
   }
 }
 
+function compoundDone(machine: CompoundMachine, path: seq<string>): bool
+  requires declaredPath(machine.nodes, path)
+{
+  if (|path| < 2) then
+    false
+  else
+    if (path[(|path| - 2)] != machine.root) then
+      false
+    else
+      lookupNode(machine.nodes, path[(|path| - 1)]).final
+}
+
+function compoundCompletion(machine: CompoundMachine, path: seq<string>, entering: bool, context: map<string, int>, event: Event): CompoundCompletion
+  requires declaredPath(machine.nodes, path)
+{
+  if (!(entering) || (|path| < 2)) then
+    CompoundCompletion(context, true, [], [], None)
+  else
+    var leafId := path[(|path| - 1)];
+    var leaf := lookupNode(machine.nodes, leafId);
+    if !(leaf.final) then
+      CompoundCompletion(context, true, [], [], None)
+    else
+      var leafOutput := leaf.output;
+      var finalOutput := leafOutput(context, event);
+      var parentId := path[(|path| - 2)];
+      if (parentId != machine.root) then
+        CompoundCompletion(context, true, [], [doneEvent(parentId, finalOutput)], None)
+      else
+        var rootOutput := machine.output;
+        var output := (if machine.hasOutput then rootOutput(context, doneEvent(leafId, finalOutput)) else finalOutput);
+        var exited := lifecycle(machine.nodes, reverse(path), context, event, true);
+        CompoundCompletion(exited.context, exited.reused, exited.effects, [], Some(output))
+}
+
 function compoundInitialTransition(machine: CompoundMachine, event: Event): CompoundStep
   requires (machine.root in machine.nodes)
   requires declaredPath(machine.nodes, lookupNode(machine.nodes, machine.root).initialPath)
@@ -388,7 +467,8 @@ function compoundInitialTransition(machine: CompoundMachine, event: Event): Comp
 {
   var path := descend(machine.nodes, machine.root);
   var entered := lifecycle(machine.nodes, path, machine.context, event, false);
-  CompoundStep(CompoundSnapshot(path, entered.context), false, entered.reused, entered.effects)
+  var done := compoundCompletion(machine, path, true, entered.context, event);
+  CompoundStep(CompoundSnapshot(path, done.context, done.output), false, (entered.reused && done.reused), (entered.effects + done.effects), (entered.raises + done.raised))
 }
 
 lemma compoundInitialTransition_ensures(machine: CompoundMachine, event: Event)
@@ -404,28 +484,32 @@ function compoundTransition(machine: CompoundMachine, snapshot: CompoundSnapshot
   requires ready(machine, snapshot, event)
   requires forall k :: ((k in machine.nodes) ==> initialWitness(machine.nodes, k))
 {
-  var selected := select(machine.nodes, snapshot.path, snapshot.context, event);
-  match selected {
-    case Some(i_selected_val) =>
-      var result := i_selected_val.evaluation.result;
-      var target := (match result { case Some(i_result_val) => i_result_val.target case None => Option.None });
-      var reenter := (match result { case Some(i_result_val) => i_result_val.reenter case None => false });
-      var nextPath := (match target { case Some(i_target_val) => descend(machine.nodes, i_target_val) case None => snapshot.path });
-      var targetPath := (match target { case Some(i_target_val) => lookupNode(machine.nodes, i_target_val).path case None => [] });
-      var sourcePath := i_selected_val.node.path;
-      var contained := (commonPrefix(sourcePath, targetPath) == |sourcePath|);
-      var targetAncestors := (if (|targetPath| == 0) then [] else targetPath[0..(|targetPath| - 1)]);
-      var kept := (if contained then (|sourcePath| - (if reenter then 1 else 0)) else commonPrefix(sourcePath, targetAncestors));
-      var exitKept := (if ((match target { case Some(i_value) => (i_value == machine.root) case None => false }) && !(reenter)) then 1 else kept);
-      var exitPath := (match target { case Some(i_target_val) => reverse(snapshot.path[exitKept..]) case None => [] });
-      var entryPath := (match target { case Some(i_target_val) => nextPath[kept..] case None => [] });
-      var exited := lifecycle(machine.nodes, exitPath, snapshot.context, event, true);
-      var updated := apply(exited.context, i_selected_val.evaluation);
-      var entered := lifecycle(machine.nodes, entryPath, updated.context, event, false);
-      CompoundStep(CompoundSnapshot(nextPath, entered.context), false, ((exited.reused && updated.reused) && entered.reused), ((exited.effects + updated.effects) + entered.effects))
-    case None =>
-      CompoundStep(snapshot, true, true, [])
-  }
+  if compoundDone(machine, snapshot.path) then
+    CompoundStep(snapshot, true, true, [], [])
+  else
+    var selected := select(machine.nodes, snapshot.path, snapshot.context, event);
+    match selected {
+      case Some(i_selected_val) =>
+        var result := i_selected_val.evaluation.result;
+        var target := (match result { case Some(i_result_val) => i_result_val.target case None => Option.None });
+        var reenter := (match result { case Some(i_result_val) => i_result_val.reenter case None => false });
+        var nextPath := (match target { case Some(i_target_val) => descend(machine.nodes, i_target_val) case None => snapshot.path });
+        var targetPath := (match target { case Some(i_target_val) => lookupNode(machine.nodes, i_target_val).path case None => [] });
+        var sourcePath := i_selected_val.node.path;
+        var contained := (commonPrefix(sourcePath, targetPath) == |sourcePath|);
+        var targetAncestors := (if (|targetPath| == 0) then [] else targetPath[0..(|targetPath| - 1)]);
+        var kept := (if contained then (|sourcePath| - (if reenter then 1 else 0)) else commonPrefix(sourcePath, targetAncestors));
+        var exitKept := (if ((match target { case Some(i_value) => (i_value == machine.root) case None => false }) && !(reenter)) then 1 else kept);
+        var exitPath := (match target { case Some(i_target_val) => reverse(snapshot.path[exitKept..]) case None => [] });
+        var entryPath := (match target { case Some(i_target_val) => nextPath[kept..] case None => [] });
+        var exited := lifecycle(machine.nodes, exitPath, snapshot.context, event, true);
+        var updated := apply(exited.context, i_selected_val.evaluation);
+        var entered := lifecycle(machine.nodes, entryPath, updated.context, event, false);
+        var done := compoundCompletion(machine, nextPath, (|entryPath| > 0), entered.context, event);
+        CompoundStep(CompoundSnapshot(nextPath, done.context, done.output), false, (((exited.reused && updated.reused) && entered.reused) && done.reused), (((exited.effects + updated.effects) + entered.effects) + done.effects), (((exited.raises + updated.raises) + entered.raises) + done.raised))
+      case None =>
+        CompoundStep(snapshot, true, true, [], [])
+    }
 }
 
 lemma compoundTransition_ensures(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event)
@@ -434,6 +518,48 @@ lemma compoundTransition_ensures(machine: CompoundMachine, snapshot: CompoundSna
   requires forall k :: ((k in machine.nodes) ==> initialWitness(machine.nodes, k))
   ensures (compoundTransition(machine, snapshot, event).snapshotReused ==> (compoundTransition(machine, snapshot, event).snapshot == snapshot))
 {
+}
+
+function compoundSettle(machine: CompoundMachine, step: CompoundStep, queue: seq<Event>, remaining: int): CompoundMacrostep
+  requires forall k :: ((k in machine.nodes) ==> initialWitness(machine.nodes, k))
+  decreases remaining
+{
+  if !(declaredPath(machine.nodes, step.snapshot.path)) then
+    CompoundMacrostep(false, true, step, queue, [])
+  else
+    if compoundDone(machine, step.snapshot.path) then
+      CompoundMacrostep(true, false, step, [], [])
+    else
+      if (remaining <= 0) then
+        CompoundMacrostep(false, false, step, queue, [])
+      else
+        if (|queue| == 0) then
+          CompoundMacrostep(true, false, step, queue, [])
+        else
+          if !(ready(machine, step.snapshot, queue[0])) then
+            CompoundMacrostep(false, true, step, queue, [])
+          else
+            var next := compoundTransition(machine, step.snapshot, queue[0]);
+            var rest := compoundSettle(machine, CompoundStep(next.snapshot, (step.snapshotReused && next.snapshotReused), (step.contextReused && next.contextReused), (step.effects + next.effects), (step.raised + next.raised)), (queue[1..] + next.raised), (remaining - 1));
+            CompoundMacrostep(rest.settled, rest.refused, rest.step, rest.queue, ([next] + rest.trace))
+}
+
+function compoundInitialMacrostep(machine: CompoundMachine, event: Event, maxIterations: int): CompoundMacrostep
+  requires (machine.root in machine.nodes)
+  requires declaredPath(machine.nodes, lookupNode(machine.nodes, machine.root).initialPath)
+  requires forall k :: ((k in machine.nodes) ==> initialWitness(machine.nodes, k))
+{
+  var first := compoundInitialTransition(machine, event);
+  compoundSettle(machine, first, first.raised, maxIterations)
+}
+
+function compoundMacrostep(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event, maxIterations: int): CompoundMacrostep
+  requires declaredPath(machine.nodes, snapshot.path)
+  requires ready(machine, snapshot, event)
+  requires forall k :: ((k in machine.nodes) ==> initialWitness(machine.nodes, k))
+{
+  var first := compoundTransition(machine, snapshot, event);
+  compoundSettle(machine, first, first.raised, maxIterations)
 }
 
 function below(path: seq<string>, prefix: seq<string>): bool
@@ -517,7 +643,7 @@ function transitionDomain(parallels: seq<string>, source: seq<string>, target: s
 function runLifecycle(nodes: map<string, CompoundNode>, path: seq<string>, context: map<string, int>, event: Event, exiting: bool): Applied
 {
   if !(declaredPath(nodes, path)) then
-    Applied(context, true, [])
+    Applied(context, true, [], [])
   else
     lifecycle(nodes, path, context, event, exiting)
 }
@@ -738,11 +864,11 @@ function applyAll(context: map<string, int>, selections: seq<Selection>): Applie
   decreases |selections|
 {
   if (|selections| == 0) then
-    Applied(context, true, [])
+    Applied(context, true, [], [])
   else
     var first := apply(context, selections[0].evaluation);
     var rest := applyAll(first.context, selections[1..]);
-    Applied(rest.context, (first.reused && rest.reused), (first.effects + rest.effects))
+    Applied(rest.context, (first.reused && rest.reused), (first.effects + rest.effects), (first.raises + rest.raises))
 }
 
 lemma applyAll_ensures(context: map<string, int>, selections: seq<Selection>)

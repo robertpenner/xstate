@@ -21,13 +21,22 @@ export type Node = {
   always: (context: Record<string, number>, event: Event) => Evaluation;
   entry: (context: Record<string, number>, event: Event) => Evaluation;
   exit: (context: Record<string, number>, event: Event) => Evaluation;
+  final: boolean;
+  output: (context: Record<string, number>, event: Event) => number;
 };
 export type Machine = {
   initial: string;
   context: Record<string, number>;
   states: Map<string, Node>;
+  hasOutput: boolean;
+  output: (context: Record<string, number>, event: Event) => number;
 };
-export type Snapshot = { value: string; context: Record<string, number> };
+// Output stays undefined until the machine completes.
+export type Snapshot = {
+  value: string;
+  context: Record<string, number>;
+  output: number | undefined;
+};
 export type Step = {
   snapshot: Snapshot;
   snapshotReused: boolean;
@@ -47,6 +56,13 @@ export type Applied = {
   context: Record<string, number>;
   reused: boolean;
   effects: readonly Effect[];
+  raises: readonly Event[];
+};
+export type Completion = {
+  context: Record<string, number>;
+  reused: boolean;
+  effects: readonly Effect[];
+  output: number | undefined;
 };
 
 export function mergePatch(
@@ -72,7 +88,8 @@ export function apply(
   return {
     context: patch === undefined ? context : mergePatch(context, patch),
     reused: patch === undefined,
-    effects: evaluation.effects
+    effects: evaluation.effects,
+    raises: evaluation.raises
   };
 }
 
@@ -80,6 +97,48 @@ export function emptyEvaluation(): Evaluation {
   //@ verify
   //@ ensures \result.result === undefined
   return { result: undefined, effects: [], raises: [] };
+}
+
+export function completed(machine: Machine, value: string): boolean {
+  //@ verify
+  const node = machine.states.get(value);
+  return node === undefined ? false : node.final;
+}
+
+// The adapter decodes this as { type: 'xstate.done.state', stateId, output }.
+export function doneEvent(id: string, output: number): Event {
+  //@ verify
+  return { type: 'xstate.done.state.' + id, value: output };
+}
+
+// Entering a final root child completes the machine. The runtime resolves the
+// final output, then the root output from the same context and a done event
+// carrying the final output, and only then runs the final node's exit.
+export function completion(
+  machine: Machine,
+  value: string,
+  context: Record<string, number>,
+  event: Event
+): Completion {
+  //@ verify
+  //@ ensures !completed(machine, value) ==> \result.context === context && \result.reused && \result.effects.length === 0 && \result.output === undefined
+  const node = machine.states.get(value);
+  if (node === undefined || !node.final)
+    return { context, reused: true, effects: [], output: undefined };
+  const finalOutputOf = node.output;
+  const finalOutput = finalOutputOf(context, event);
+  const rootOutputOf = machine.output;
+  const output = machine.hasOutput
+    ? rootOutputOf(context, doneEvent(value, finalOutput))
+    : finalOutput;
+  const exit = node.exit;
+  const exited = apply(context, exit(context, event));
+  return {
+    context: exited.context,
+    reused: exited.reused,
+    effects: exited.effects,
+    output
+  };
 }
 
 export function initialTransition(machine: Machine, event: Event): Step {
@@ -90,11 +149,16 @@ export function initialTransition(machine: Machine, event: Event): Step {
   const entering =
     entry === undefined ? emptyEvaluation() : entry(machine.context, event);
   const applied = apply(machine.context, entering);
+  const done = completion(machine, machine.initial, applied.context, event);
   return {
-    snapshot: { value: machine.initial, context: applied.context },
+    snapshot: {
+      value: machine.initial,
+      context: done.context,
+      output: done.output
+    },
     snapshotReused: false,
-    contextReused: applied.reused,
-    effects: applied.effects,
+    contextReused: applied.reused && done.reused,
+    effects: [...applied.effects, ...done.effects],
     raised: entering.raises
   };
 }
@@ -106,8 +170,14 @@ export function transition(
 ): Step {
   //@ verify
   //@ ensures \result.snapshotReused ==> \result.snapshot === snapshot
+  // Final states take no transitions, and a done machine processes no events.
   const node = machine.states.get(snapshot.value);
-  const handler = node === undefined ? undefined : node.on.get(event.type);
+  const handler =
+    node === undefined
+      ? undefined
+      : node.final
+        ? undefined
+        : node.on.get(event.type);
   const selected =
     handler === undefined
       ? emptyEvaluation()
@@ -156,11 +226,25 @@ export function takeTransition(
       ? entry(updated.context, event)
       : emptyEvaluation();
   const entered = apply(updated.context, entering);
+  const done = changes
+    ? completion(machine, next, entered.context, event)
+    : {
+        context: entered.context,
+        reused: true,
+        effects: [],
+        output: snapshot.output
+      };
   return {
-    snapshot: { value: next, context: entered.context },
+    snapshot: { value: next, context: done.context, output: done.output },
     snapshotReused: false,
-    contextReused: exited.reused && updated.reused && entered.reused,
-    effects: [...exited.effects, ...updated.effects, ...entered.effects],
+    contextReused:
+      exited.reused && updated.reused && entered.reused && done.reused,
+    effects: [
+      ...exited.effects,
+      ...updated.effects,
+      ...entered.effects,
+      ...done.effects
+    ],
     raised: [...exiting.raises, ...selected.raises, ...entering.raises]
   };
 }
@@ -219,6 +303,10 @@ export function settle(
 ): Macrostep {
   //@ verify
   //@ decreases remaining
+  // A done machine leaves the loop before the budget is counted, and the
+  // runtime discards its queue.
+  if (completed(machine, step.snapshot.value))
+    return { settled: true, step, queue: [], trace: [] };
   if (remaining <= 0) return { settled: false, step, queue, trace: [] };
   const selected = select
     ? alwaysSelected(machine, step.snapshot, event)
@@ -288,15 +376,21 @@ export type CompoundNode = {
   >;
   entry: (context: Record<string, number>, event: Event) => Evaluation;
   exit: (context: Record<string, number>, event: Event) => Evaluation;
+  final: boolean;
+  output: (context: Record<string, number>, event: Event) => number;
 };
 export type CompoundMachine = {
   root: string;
   context: Record<string, number>;
   nodes: Record<string, CompoundNode>;
+  hasOutput: boolean;
+  output: (context: Record<string, number>, event: Event) => number;
 };
+// Output stays undefined until the machine completes.
 export type CompoundSnapshot = {
   path: readonly string[];
   context: Record<string, number>;
+  output: number | undefined;
 };
 export type Selection = {
   id: string;
@@ -308,6 +402,23 @@ export type CompoundStep = {
   snapshotReused: boolean;
   contextReused: boolean;
   effects: readonly Effect[];
+  raised: readonly Event[];
+};
+export type CompoundCompletion = {
+  context: Record<string, number>;
+  reused: boolean;
+  effects: readonly Effect[];
+  raised: readonly Event[];
+  output: number | undefined;
+};
+// A guard in the loop can stop it without a budget failure; the adapter
+// refuses such a run.
+export type CompoundMacrostep = {
+  settled: boolean;
+  refused: boolean;
+  step: CompoundStep;
+  queue: readonly Event[];
+  trace: readonly CompoundStep[];
 };
 
 export function declaredPath(
@@ -350,7 +461,11 @@ export function select(
   const handler = on.get(event.type);
   const evaluation =
     handler === undefined ? emptyEvaluation() : handler(context, event);
-  if (evaluation.result !== undefined || evaluation.effects.length > 0) {
+  if (
+    evaluation.result !== undefined ||
+    evaluation.effects.length > 0 ||
+    evaluation.raises.length > 0
+  ) {
     return { id, node, evaluation };
   }
   return select(nodes, path.slice(0, path.length - 1), context, event);
@@ -427,7 +542,8 @@ export function lifecycle(
   //@ requires declaredPath(nodes, path)
   //@ ensures path.length === 0 ==> \result.context === context
   //@ decreases path.length
-  if (path.length === 0) return { context, reused: true, effects: [] };
+  if (path.length === 0)
+    return { context, reused: true, effects: [], raises: [] };
   const node = lookupNode(nodes, path[0]);
   const exit = node.exit;
   const entry = node.entry;
@@ -437,7 +553,8 @@ export function lifecycle(
   return {
     context: rest.context,
     reused: first.reused && rest.reused,
-    effects: [...first.effects, ...rest.effects]
+    effects: [...first.effects, ...rest.effects],
+    raises: [...first.raises, ...rest.raises]
   };
 }
 
@@ -474,6 +591,74 @@ export function ready(
   return declaredPath(machine.nodes, destination.initialPath);
 }
 
+// The machine is done when the active leaf is a final child of the root.
+export function compoundDone(
+  machine: CompoundMachine,
+  path: readonly string[]
+): boolean {
+  //@ verify
+  //@ requires declaredPath(machine.nodes, path)
+  if (path.length < 2) return false;
+  if (path[path.length - 2] !== machine.root) return false;
+  return lookupNode(machine.nodes, path[path.length - 1]).final;
+}
+
+// Entering a final leaf queues a done event for its parent after the entry
+// raises. When the parent is the root, the machine completes instead: the
+// root output is resolved from the entered context and a done event carrying
+// the final output, then every active node exits from the leaf up.
+export function compoundCompletion(
+  machine: CompoundMachine,
+  path: readonly string[],
+  entering: boolean,
+  context: Record<string, number>,
+  event: Event
+): CompoundCompletion {
+  //@ verify
+  //@ requires declaredPath(machine.nodes, path)
+  if (!entering || path.length < 2)
+    return {
+      context,
+      reused: true,
+      effects: [],
+      raised: [],
+      output: undefined
+    };
+  const leafId = path[path.length - 1];
+  const leaf = lookupNode(machine.nodes, leafId);
+  if (!leaf.final)
+    return {
+      context,
+      reused: true,
+      effects: [],
+      raised: [],
+      output: undefined
+    };
+  const leafOutput = leaf.output;
+  const finalOutput = leafOutput(context, event);
+  const parentId = path[path.length - 2];
+  if (parentId !== machine.root)
+    return {
+      context,
+      reused: true,
+      effects: [],
+      raised: [doneEvent(parentId, finalOutput)],
+      output: undefined
+    };
+  const rootOutput = machine.output;
+  const output = machine.hasOutput
+    ? rootOutput(context, doneEvent(leafId, finalOutput))
+    : finalOutput;
+  const exited = lifecycle(machine.nodes, reverse(path), context, event, true);
+  return {
+    context: exited.context,
+    reused: exited.reused,
+    effects: exited.effects,
+    raised: [],
+    output
+  };
+}
+
 export function compoundInitialTransition(
   machine: CompoundMachine,
   event: Event
@@ -485,11 +670,13 @@ export function compoundInitialTransition(
   //@ ensures !\result.snapshotReused
   const path = descend(machine.nodes, machine.root);
   const entered = lifecycle(machine.nodes, path, machine.context, event, false);
+  const done = compoundCompletion(machine, path, true, entered.context, event);
   return {
-    snapshot: { path, context: entered.context },
+    snapshot: { path, context: done.context, output: done.output },
     snapshotReused: false,
-    contextReused: entered.reused,
-    effects: entered.effects
+    contextReused: entered.reused && done.reused,
+    effects: [...entered.effects, ...done.effects],
+    raised: [...entered.raises, ...done.raised]
   };
 }
 
@@ -503,6 +690,15 @@ export function compoundTransition(
   //@ requires ready(machine, snapshot, event)
   //@ requires forall(k: string, k in machine.nodes ==> initialWitness(machine.nodes, k))
   //@ ensures \result.snapshotReused ==> \result.snapshot === snapshot
+  // A done machine processes no events.
+  if (compoundDone(machine, snapshot.path))
+    return {
+      snapshot,
+      snapshotReused: true,
+      contextReused: true,
+      effects: [],
+      raised: []
+    };
   const selected = select(
     machine.nodes,
     snapshot.path,
@@ -510,7 +706,13 @@ export function compoundTransition(
     event
   );
   if (selected === undefined) {
-    return { snapshot, snapshotReused: true, contextReused: true, effects: [] };
+    return {
+      snapshot,
+      snapshotReused: true,
+      contextReused: true,
+      effects: [],
+      raised: []
+    };
   }
   const result = selected.evaluation.result;
   const target = result === undefined ? undefined : result.target;
@@ -545,12 +747,102 @@ export function compoundTransition(
     event,
     false
   );
+  const done = compoundCompletion(
+    machine,
+    nextPath,
+    entryPath.length > 0,
+    entered.context,
+    event
+  );
   return {
-    snapshot: { path: nextPath, context: entered.context },
+    snapshot: { path: nextPath, context: done.context, output: done.output },
     snapshotReused: false,
-    contextReused: exited.reused && updated.reused && entered.reused,
-    effects: [...exited.effects, ...updated.effects, ...entered.effects]
+    contextReused:
+      exited.reused && updated.reused && entered.reused && done.reused,
+    effects: [
+      ...exited.effects,
+      ...updated.effects,
+      ...entered.effects,
+      ...done.effects
+    ],
+    raised: [
+      ...exited.raises,
+      ...updated.raises,
+      ...entered.raises,
+      ...done.raised
+    ]
   };
+}
+
+// Raised events are processed in FIFO order, each counting against the
+// budget. A done machine leaves the loop before the budget is counted and
+// discards its queue.
+export function compoundSettle(
+  machine: CompoundMachine,
+  step: CompoundStep,
+  queue: readonly Event[],
+  remaining: number
+): CompoundMacrostep {
+  //@ verify
+  //@ requires forall(k: string, k in machine.nodes ==> initialWitness(machine.nodes, k))
+  //@ decreases remaining
+  if (!declaredPath(machine.nodes, step.snapshot.path))
+    return { settled: false, refused: true, step, queue, trace: [] };
+  if (compoundDone(machine, step.snapshot.path))
+    return { settled: true, refused: false, step, queue: [], trace: [] };
+  if (remaining <= 0)
+    return { settled: false, refused: false, step, queue, trace: [] };
+  if (queue.length === 0)
+    return { settled: true, refused: false, step, queue, trace: [] };
+  if (!ready(machine, step.snapshot, queue[0]))
+    return { settled: false, refused: true, step, queue, trace: [] };
+  const next = compoundTransition(machine, step.snapshot, queue[0]);
+  const rest = compoundSettle(
+    machine,
+    {
+      snapshot: next.snapshot,
+      snapshotReused: step.snapshotReused && next.snapshotReused,
+      contextReused: step.contextReused && next.contextReused,
+      effects: [...step.effects, ...next.effects],
+      raised: [...step.raised, ...next.raised]
+    },
+    [...queue.slice(1), ...next.raised],
+    remaining - 1
+  );
+  return {
+    settled: rest.settled,
+    refused: rest.refused,
+    step: rest.step,
+    queue: rest.queue,
+    trace: [next, ...rest.trace]
+  };
+}
+
+export function compoundInitialMacrostep(
+  machine: CompoundMachine,
+  event: Event,
+  maxIterations: number
+): CompoundMacrostep {
+  //@ verify
+  //@ requires machine.root in machine.nodes
+  //@ requires declaredPath(machine.nodes, lookupNode(machine.nodes, machine.root).initialPath)
+  //@ requires forall(k: string, k in machine.nodes ==> initialWitness(machine.nodes, k))
+  const first = compoundInitialTransition(machine, event);
+  return compoundSettle(machine, first, first.raised, maxIterations);
+}
+
+export function compoundMacrostep(
+  machine: CompoundMachine,
+  snapshot: CompoundSnapshot,
+  event: Event,
+  maxIterations: number
+): CompoundMacrostep {
+  //@ verify
+  //@ requires declaredPath(machine.nodes, snapshot.path)
+  //@ requires ready(machine, snapshot, event)
+  //@ requires forall(k: string, k in machine.nodes ==> initialWitness(machine.nodes, k))
+  const first = compoundTransition(machine, snapshot, event);
+  return compoundSettle(machine, first, first.raised, maxIterations);
 }
 
 export type ParallelMachine = {
@@ -686,7 +978,8 @@ export function runLifecycle(
   exiting: boolean
 ): Applied {
   //@ verify
-  if (!declaredPath(nodes, path)) return { context, reused: true, effects: [] };
+  if (!declaredPath(nodes, path))
+    return { context, reused: true, effects: [], raises: [] };
   return lifecycle(nodes, path, context, event, exiting);
 }
 
@@ -1015,13 +1308,15 @@ export function applyAll(
   //@ verify
   //@ ensures selections.length === 0 ==> \result.context === context
   //@ decreases selections.length
-  if (selections.length === 0) return { context, reused: true, effects: [] };
+  if (selections.length === 0)
+    return { context, reused: true, effects: [], raises: [] };
   const first = apply(context, selections[0].evaluation);
   const rest = applyAll(first.context, selections.slice(1));
   return {
     context: rest.context,
     reused: first.reused && rest.reused,
-    effects: [...first.effects, ...rest.effects]
+    effects: [...first.effects, ...rest.effects],
+    raises: [...first.raises, ...rest.raises]
   };
 }
 
