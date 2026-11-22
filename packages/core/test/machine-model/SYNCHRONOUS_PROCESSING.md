@@ -16,9 +16,10 @@ model claims; the open decisions are listed at the end.
 | v5 runtime                 | `xstate@5.33.4` from npm                                                                                                       |
 | SCXML                      | [W3C Recommendation, 1 September 2015](https://www.w3.org/TR/2015/REC-scxml-20150901/), sections 3.7, 3.13, 5.10.1, Appendix D |
 | Node and package manager   | Node 24.17.0, pnpm 11.8.0                                                                                                      |
-| Runtime source of interest | `macrostep`, `microstep`, `selectEventlessTransitions`, `enterStates` in `packages/core/src/stateUtils.ts`                      |
+| Runtime source of interest | `macrostep`, `microstep`, `selectEventlessTransitions`, `enterStates` in `packages/core/src/stateUtils.ts`                     |
 
-The probes are executable and assert every observation below:
+The vitest probes assert every v6 observation below. The v5 file prints its
+observations as JSON without asserting them:
 
 - [`synchronousProcessing.probes.test.ts`](./synchronousProcessing.probes.test.ts)
   covers ordering, selection, completion, and snapshot identity.
@@ -171,11 +172,14 @@ transition raising `T` into a final state whose entry raises `E` produces
 `T`, `E`, then the parent's `onDone`. Section 3.7 orders the done event after
 the final state's `onentry`.
 
-**A parallel node completes once, when every region is final.** `[SCXML]`
+**A parallel node completes when every region is final.** `[SCXML]`
 One region finishing produces only that region's `onDone`. The second region
 finishing produces its own `onDone` and then the parallel node's, with output
 `{ r1: 1, r2: 2 }`. The runtime prevents a second done event for the same
-node in one microstep.
+node in one microstep. Issue #38 later found two exceptions in v6: a parallel
+node whose regions stay final can complete again in a later microstep, and
+an atomic final region counts as final before it is entered (potential bugs
+17 and 18 in the run log).
 
 **Nested final output reaches the root.** `[runtime]` Output from an inner
 final state passes through each `onDone` event to the root's final output.
@@ -267,8 +271,11 @@ them.
 4. Root `output` ignores context changes made by exit functions at completion.
    Filed as statelyai/xstate#5949.
 
-Both filed reports reproduce on the published `xstate@6.0.0-beta.4` and on
-`xstate@5.33.4`, and both ask which rule upstream intends. Until upstream
+Both filed reports reproduce on the published `xstate@6.0.0-beta.4`. On
+`xstate@5.33.4` the selection mismatch and the root output reproduce, but the
+lost eventless write does not: v5 runs both `assign` actions in sequence, and
+probe `V5` ends with `log: 'PBb'`. Both reports ask which rule upstream
+intends. Until upstream
 answers, the model states the observed v6 behavior and keeps decision 5's
 refusal of `always` in machines with parallel nodes.
 
@@ -326,8 +333,9 @@ a concrete user need, and then state it for object-form transitions first.
 
 ### Adapter extensions
 
-The adapters currently refuse every feature involved. Supporting them
-requires:
+When this plan was written the adapters refused every feature involved.
+Issues #34 to #38 added the support listed below; the adapter README records
+what each adapter still refuses. Supporting them required:
 
 - An internal queue in the model state and in the comparison.
 - `enq.raise` with an event record, distinct from ordinary `enq(fn, ...args)`
