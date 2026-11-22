@@ -17,6 +17,8 @@ it('compares generated parallel completion, raised events and done events', () =
     unfinished: 0,
     refused: 0
   };
+  // Refusals by reason, so the coverage they remove is visible.
+  const refusals: Record<string, number> = {};
   fc.assert(
     fc.property(
       fc.integer({ min: 1, max: 3 }),
@@ -154,6 +156,8 @@ it('compares generated parallel completion, raised events and done events', () =
           )
             throw error;
           stats.refused++;
+          const reason = /\((.*)\)$/.exec(error.message)?.[1] ?? 'raised event';
+          refusals[reason] = (refusals[reason] ?? 0) + 1;
         }
       }
     ),
@@ -164,10 +168,17 @@ it('compares generated parallel completion, raised events and done events', () =
       markInterruptAsFailure: true
     }
   );
-  console.info('parallel completion property coverage', stats);
+  console.info('parallel completion property coverage', stats, refusals);
   expect(stats.done).toBeGreaterThan(0);
   expect(stats.parallelDoneEvents).toBeGreaterThan(0);
   expect(stats.raisedSteps).toBeGreaterThan(stats.runs / 10);
   expect(stats.unfinished).toBeGreaterThan(0);
   expect(stats.refused).toBeLessThan(stats.runs / 2);
+  // A target into an active region and a raised event the step model cannot
+  // represent are the expected refusals; any other reason is a new gap.
+  expect(
+    Object.keys(refusals).filter(
+      (reason) => reason !== 'active region target' && reason !== 'raised event'
+    )
+  ).toEqual([]);
 });

@@ -54,6 +54,46 @@ describe('parallel completion', () => {
     });
   });
 
+  it('refuses a region output object stored in context or passed to an effect', () => {
+    const machine = (onDone: unknown): Config => ({
+      id: 'm',
+      initial: 'p',
+      context: { kept: undefined },
+      states: {
+        p: {
+          type: 'parallel',
+          onDone: onDone as never,
+          states: { a: region('A', { output: () => 'a' }) }
+        }
+      }
+    });
+    const stored = ({ event }: { event: { output: unknown } }) => ({
+      context: { kept: event.output }
+    });
+    const effect = () => {};
+    const passed = (
+      { event }: { event: { output: unknown } },
+      enq: (fn: (value: unknown) => void, value: unknown) => void
+    ) => {
+      enq(effect, event.output);
+    };
+    const field = ({ event }: { event: { output: { a: unknown } } }) => ({
+      context: { kept: event.output.a }
+    });
+    expect(() =>
+      compareParallelCompletion(machine(stored), [{ type: 'A' }])
+    ).toThrow(
+      'Unsupported parallel region output stored in context or passed to an effect'
+    );
+    expect(() =>
+      compareParallelCompletion(machine(passed), [{ type: 'A' }])
+    ).toThrow(
+      'Unsupported parallel region output stored in context or passed to an effect'
+    );
+    const trace = compareParallelCompletion(machine(field), [{ type: 'A' }]);
+    expect(trace[1].context).toEqual({ kept: 'a' });
+  });
+
   it('completes a parallel root from final regions and reads its done event', () => {
     const regions = {
       x: { type: 'final' as const, output: () => 1 },

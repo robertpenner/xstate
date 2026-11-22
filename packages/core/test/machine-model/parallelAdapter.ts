@@ -395,6 +395,22 @@ export function compareParallelRun(config: Config, events: readonly Event[]) {
   // The model evaluates outputs more than once; equal region outputs share
   // one encoding so the model sees one value.
   const combined = new Map<string, number>();
+  // The model and the runtime build distinct region output objects, so one
+  // stored where values are compared by identity cannot match.
+  const regionOutputs = new Set<number>();
+  const refuseRegionOutputs = (step: model.ParallelMicro) => {
+    const { context } = step.state.snapshot;
+    const stored = Object.entries(context).some(
+      ([key, value]) => key !== '$prototype' && regionOutputs.has(value)
+    );
+    const passed = step.effects.some((effect) =>
+      effect.args.some((arg) => regionOutputs.has(arg))
+    );
+    if (stored || passed)
+      throw new Error(
+        'Unsupported parallel region output stored in context or passed to an effect'
+      );
+  };
   const outputs: model.ParallelOutputs = {
     hasOutput: config.output !== undefined,
     output: encoding.evaluateOutput(config.output),
@@ -413,6 +429,7 @@ export function compareParallelRun(config: Config, events: readonly Event[]) {
           )
         );
         combined.set(key, found);
+        regionOutputs.add(found);
       }
       return found;
     },
@@ -446,6 +463,7 @@ export function compareParallelRun(config: Config, events: readonly Event[]) {
     steps: readonly model.ParallelMicro[],
     terminates: boolean
   ) {
+    steps.forEach(refuseRegionOutputs);
     assert.equal(microsteps.length, steps.length);
     steps.forEach((step, index) => {
       const [snapshot, effects] = microsteps[index];
@@ -492,6 +510,7 @@ export function compareParallelRun(config: Config, events: readonly Event[]) {
   let expected = macrostep;
   let [actual, actualEffects] = initialTransition(runtime);
   function compare(previous: AnyMachineSnapshot | undefined) {
+    refuseRegionOutputs(expected.step);
     const { state } = expected.step;
     const status = state.done ? 'done' : 'active';
     assert.equal(actual.status, status);

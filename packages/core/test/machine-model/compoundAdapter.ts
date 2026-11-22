@@ -189,7 +189,7 @@ export function iterationBound(config: Config): number | undefined {
   plainRecord(config.options, 'options');
   fields(config.options, ['maxIterations'], 'options');
   const bound = config.options.maxIterations;
-  if (bound !== undefined && (!Number.isInteger(bound) || bound < 1))
+  if (bound !== undefined && !(Number.isSafeInteger(bound) && bound >= 1))
     throw new Error(`Unsupported options.maxIterations: ${String(bound)}`);
   return bound;
 }
