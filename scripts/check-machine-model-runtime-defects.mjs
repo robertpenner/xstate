@@ -154,6 +154,22 @@ const defects = [
               stateNodeToEnter.id,`,
     testFile: 'packages/core/test/machine-model/compoundCompletion.test.ts',
     test: 'raises a done event for the parent of a final child'
+  },
+  {
+    name: 'a parallel node completes more than once in one microstep',
+    file: 'packages/core/src/stateUtils.ts',
+    before: '!completedNodes.has(ancestorMarker) &&',
+    after: '',
+    testFile: 'packages/core/test/machine-model/parallelCompletion.test.ts',
+    test: 'queues the done event of atomic final regions between their entry raises'
+  },
+  {
+    name: 'a nested parallel region contributes no output',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'regionOutput[region.key] = regionDoneEvent?.output;',
+    after: 'regionOutput[region.key] = undefined;',
+    testFile: 'packages/core/test/machine-model/parallelCompletion.test.ts',
+    test: 'completes a nested parallel and its parent in one microstep'
   }
 ];
 try {

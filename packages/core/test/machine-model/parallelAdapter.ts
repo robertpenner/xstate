@@ -1,30 +1,43 @@
 import assert from 'node:assert/strict';
-import { createMachine, initialTransition, transition } from '../../src';
-import { collectTree, type AuthoredNode, type Config } from './compoundAdapter';
+import {
+  createMachine,
+  getInitialMicrosteps,
+  getMicrosteps,
+  initialTransition,
+  transition,
+  type AnyMachineSnapshot,
+  type ExecutableEffect
+} from '../../src';
+import {
+  collectTree,
+  iterationBound,
+  type AuthoredNode,
+  type Config
+} from './compoundAdapter';
 import {
   createEncoding,
+  expectUnfinished,
   plainRecord,
+  settledRuntime,
+  unboundedCap,
   validateResult,
-  type Event
+  type Event,
+  type Unfinished
 } from './machineAdapter';
 import * as model from './machineModel';
 
 export type { Config } from './compoundAdapter';
 
-// Throws on a refused event unless `onRefusal` is given, in which case the
-// event is skipped and the trace continues from the same snapshot.
-export function compareParallelTrace(
-  config: Config,
-  events: readonly Event[],
-  onRefusal?: (reason: RefusalReason, event: Event) => void
-) {
-  for (const event of events) {
-    plainRecord(event, 'event');
-    if (typeof event.type !== 'string')
-      throw new Error('Unsupported event.type');
-  }
-  const encoding = createEncoding();
-  const { registry, root, resolveTarget } = collectTree(config, true);
+// Builds the model machine and the runtime machine from one config and checks
+// that they list nodes in the same document order. Completion allows final
+// states, `onDone`, `output`, `options` and raised events.
+function buildParallel(config: Config, completion: boolean) {
+  const encoding = createEncoding((id) => id.slice(1));
+  const { registry, root, resolveTarget } = collectTree(
+    config,
+    true,
+    completion
+  );
   const modelId = (node: { id: string }) => `:${node.id}`;
   const authored = (id: string) => registry.get(id.slice(1))!;
   function initialPath(node: AuthoredNode): string[] {
@@ -35,12 +48,14 @@ export function compareParallelTrace(
   const parallels: string[] = [];
   for (const node of registry.values()) {
     const resolve = (target: string) => resolveTarget(node, target);
-    for (const [type, handler] of Object.entries(node.config.on ?? {})) {
-      if (!type || type.includes('*'))
-        throw new Error(`Unsupported event name: ${type}`);
+    const handlers = Object.entries(node.config.on ?? {});
+    // The runtime matches `onDone` by the done event's state id; the model
+    // keys it by the done event's type, which names the same state.
+    if (node.config.onDone !== undefined)
+      handlers.push([`xstate.done.state.${modelId(node)}`, node.config.onDone]);
+    for (const [, handler] of handlers)
       if (typeof handler !== 'function')
         validateResult(handler, resolve, false);
-    }
     if (node.config.type === 'parallel') parallels.push(modelId(node));
     nodes[modelId(node)] = {
       path: node.path,
@@ -51,15 +66,15 @@ export function compareParallelTrace(
           ? undefined
           : modelId(node.children.get(node.config.initial)!),
       on: new Map(
-        Object.entries(node.config.on ?? {}).map(([type, definition]) => [
+        handlers.map(([type, definition]) => [
           type,
-          encoding.evaluate(definition, false, resolve)
+          encoding.evaluate(definition, false, resolve, completion)
         ])
       ),
-      entry: encoding.evaluate(node.config.entry, true, resolve),
-      exit: encoding.evaluate(node.config.exit, true, resolve),
-      final: false,
-      output: encoding.evaluateOutput(undefined)
+      entry: encoding.evaluate(node.config.entry, true, resolve, completion),
+      exit: encoding.evaluate(node.config.exit, true, resolve, completion),
+      final: node.config.type === 'final',
+      output: encoding.evaluateOutput(node.config.output)
     };
   }
   const machine: model.ParallelMachine = {
@@ -98,6 +113,23 @@ export function compareParallelTrace(
     if (child.children.size === 0) return child.key;
     return { [child.key]: valueOf(child, active) };
   }
+  return { encoding, root, modelId, authored, machine, runtime, valueOf };
+}
+
+// Throws on a refused event unless `onRefusal` is given, in which case the
+// event is skipped and the trace continues from the same snapshot.
+export function compareParallelTrace(
+  config: Config,
+  events: readonly Event[],
+  onRefusal?: (reason: RefusalReason, event: Event) => void
+) {
+  for (const event of events) {
+    plainRecord(event, 'event');
+    if (typeof event.type !== 'string')
+      throw new Error('Unsupported event.type');
+  }
+  const { encoding, root, modelId, authored, machine, runtime, valueOf } =
+    buildParallel(config, false);
   let expected = model.parallelInitialTransition(machine, {
     type: 'xstate.init',
     value: encoding.encodeValue({ type: 'xstate.init', input: undefined })
@@ -332,4 +364,230 @@ export function refusalReason(
   }
   if (!model.sourcesApart(selections)) return 'comparable sources';
   throw new Error('No refusal reason for an accepted step');
+}
+
+export function compareParallelCompletion(
+  config: Config,
+  events: readonly Event[]
+) {
+  const run = compareParallelRun(config, events);
+  if (run.unfinished)
+    throw new Error(
+      `Macrostep reached maxIterations ${run.unfinished.maxIterations}`
+    );
+  return run.trace;
+}
+
+// Runs whole macrosteps: raised events, done events and machine completion.
+// Each external event and each processed raised event is compared as one
+// runtime microstep.
+export function compareParallelRun(config: Config, events: readonly Event[]) {
+  for (const event of events) {
+    plainRecord(event, 'event');
+    if (typeof event.type !== 'string' || event.type.startsWith('xstate.'))
+      throw new Error('Unsupported event.type');
+  }
+  const { encoding, root, modelId, authored, machine, runtime, valueOf } =
+    buildParallel(config, true);
+  const bound = iterationBound(config);
+  const budget = bound ?? unboundedCap;
+  const missing = encoding.encodeValue(undefined);
+  // The model evaluates outputs more than once; equal region outputs share
+  // one encoding so the model sees one value.
+  const combined = new Map<string, number>();
+  const outputs: model.ParallelOutputs = {
+    hasOutput: config.output !== undefined,
+    output: encoding.evaluateOutput(config.output),
+    regions: (id, values) => {
+      const key = `${id}|${values.join(',')}`;
+      let found = combined.get(key);
+      if (found === undefined) {
+        const regions = [...authored(id).children.values()];
+        assert.equal(values.length, regions.length);
+        found = encoding.encodeValue(
+          Object.fromEntries(
+            regions.map((region, index) => [
+              region.key,
+              encoding.decodeValue(values[index])
+            ])
+          )
+        );
+        combined.set(key, found);
+      }
+      return found;
+    },
+    missing
+  };
+  // The runtime ends a macrostep that completes the machine with a builtin
+  // termination effect, which the model represents by its done flag.
+  const withoutTermination = (
+    effects: readonly ExecutableEffect[],
+    terminates: boolean
+  ) => {
+    if (!terminates) return effects;
+    assert.equal(effects.at(-1)?.type, '@xstate.terminate');
+    return effects.slice(0, -1);
+  };
+  const settled = (macrostep: model.ParallelMacrostep) => {
+    if (macrostep.refused)
+      throw new Error('Unsupported raised event outside the model domain');
+    if (!macrostep.settled && bound === undefined)
+      throw new Error(
+        `Unsupported unbounded macrostep: no rest within ${unboundedCap} iterations`
+      );
+    return macrostep;
+  };
+  const ids = (snapshot: AnyMachineSnapshot) =>
+    [...snapshot.nodes].sort((a, b) => a.order - b.order).map(modelId);
+  function compareMicrosteps(
+    microsteps: ReadonlyArray<
+      readonly [AnyMachineSnapshot, readonly ExecutableEffect[], unknown]
+    >,
+    steps: readonly model.ParallelMicro[],
+    terminates: boolean
+  ) {
+    assert.equal(microsteps.length, steps.length);
+    steps.forEach((step, index) => {
+      const [snapshot, effects] = microsteps[index];
+      const { active, context } = step.state.snapshot;
+      assert.equal(snapshot.status, step.state.done ? 'done' : 'active');
+      assert.deepEqual(ids(snapshot), active);
+      assert.deepEqual(snapshot.value, valueOf(root, new Set(active)));
+      assert.deepEqual(encoding.encode(snapshot.context), context);
+      assert.deepEqual(
+        encoding.encodeEffects(
+          withoutTermination(effects, terminates && index === steps.length - 1)
+        ),
+        step.effects
+      );
+      if (index > 0) {
+        const [before] = microsteps[index - 1];
+        assert.equal(snapshot.context === before.context, step.contextReused);
+      }
+    });
+  }
+  const initialEvent = {
+    type: 'xstate.init',
+    value: encoding.encodeValue({ type: 'xstate.init', input: undefined })
+  };
+  let macrostep = settled(
+    model.parallelInitialMacrostep(machine, outputs, initialEvent, budget)
+  );
+  if (!macrostep.settled) {
+    expectUnfinished(() => initialTransition(runtime), bound!);
+    expectUnfinished(() => getInitialMicrosteps(runtime), bound!);
+    return {
+      trace: [] as ReturnType<typeof compare>[],
+      unfinished: { maxIterations: bound!, afterEvents: 0 } as Unfinished
+    };
+  }
+  compareMicrosteps(
+    settledRuntime(() => getInitialMicrosteps(runtime)),
+    [
+      model.parallelInitialMicro(machine, outputs, initialEvent),
+      ...macrostep.trace
+    ],
+    macrostep.step.state.done
+  );
+  let expected = macrostep;
+  let [actual, actualEffects] = initialTransition(runtime);
+  function compare(previous: AnyMachineSnapshot | undefined) {
+    const { state } = expected.step;
+    const status = state.done ? 'done' : 'active';
+    assert.equal(actual.status, status);
+    assert.deepEqual(
+      actual.output,
+      encoding.decodeValue(state.output ?? missing)
+    );
+    const active = new Set(state.snapshot.active);
+    assert.deepEqual(ids(actual), state.snapshot.active);
+    assert.deepEqual(actual.value, valueOf(root, active));
+    assert.deepEqual(encoding.encode(actual.context), state.snapshot.context);
+    assert.deepEqual(
+      Object.keys(actual.context),
+      Object.keys(encoding.decode(state.snapshot.context))
+    );
+    assert.equal(actual === previous, expected.step.snapshotReused);
+    assert.equal(
+      actual.context === (previous?.context ?? config.context),
+      expected.step.contextReused
+    );
+    const terminates = status === 'done' && previous?.status !== 'done';
+    assert.deepEqual(
+      encoding.encodeEffects(withoutTermination(actualEffects, terminates)),
+      expected.step.effects
+    );
+    for (const id of state.snapshot.active) {
+      const node = authored(id);
+      const activeChildren = [...node.children.values()].filter((child) =>
+        active.has(modelId(child))
+      );
+      assert.equal(
+        activeChildren.length,
+        node.config.type === 'parallel'
+          ? node.children.size
+          : Math.min(node.children.size, 1)
+      );
+      if (node.parent) assert.ok(active.has(modelId(node.parent)));
+    }
+    return {
+      value: actual.value,
+      status,
+      output: actual.output,
+      context: actual.context,
+      effects: encoding.decodeEffects(expected.step.effects),
+      // Raised and done events in the order the macrostep queued them.
+      raised: expected.step.raised.map((event) =>
+        event.type.startsWith('xstate.done.state.:')
+          ? `xstate.done.state.${event.type.slice(19)}`
+          : event.type
+      ),
+      microsteps: expected.trace.length + 1,
+      snapshotReused: expected.step.snapshotReused,
+      contextReused: expected.step.contextReused
+    };
+  }
+  const trace = [compare(undefined)];
+  for (const [index, event] of events.entries()) {
+    const previous = actual;
+    const state = expected.step.state;
+    const modelEvent = {
+      type: event.type,
+      value: encoding.encodeValue(event)
+    };
+    if (
+      !state.done &&
+      !model.parallelStepReady(machine, state.snapshot, modelEvent)
+    ) {
+      const reason = refusalReason(machine, state.snapshot, modelEvent);
+      throw new Error(`Unsupported step: ${event.type} (${reason})`);
+    }
+    macrostep = settled(
+      model.parallelMacrostep(machine, outputs, state, modelEvent, budget)
+    );
+    if (!macrostep.settled) {
+      expectUnfinished(() => transition(runtime, previous, event), bound!);
+      expectUnfinished(() => getMicrosteps(runtime, previous, event), bound!);
+      return {
+        trace,
+        unfinished: {
+          maxIterations: bound!,
+          afterEvents: index
+        } as Unfinished | undefined
+      };
+    }
+    if (!state.done)
+      compareMicrosteps(
+        settledRuntime(() => getMicrosteps(runtime, previous, event)),
+        [
+          model.parallelMicrostep(machine, outputs, state, modelEvent, []),
+          ...macrostep.trace
+        ],
+        macrostep.step.state.done
+      );
+    expected = macrostep;
+    [actual, actualEffects] = transition(runtime, actual, event);
+    trace.push(compare(previous));
+  }
+  return { trace, unfinished: undefined as Unfinished | undefined };
 }

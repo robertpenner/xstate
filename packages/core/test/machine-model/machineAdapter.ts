@@ -367,6 +367,7 @@ export function createEncoding(stateId = (id: string) => id) {
     }));
   return {
     encodeValue,
+    decodeValue: (value: number) => values[value],
     encode,
     decode,
     evaluate,

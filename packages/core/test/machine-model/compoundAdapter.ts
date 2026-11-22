@@ -49,7 +49,13 @@ export type AuthoredNode = {
   path: string[];
 };
 
-export function collectTree(config: Config, allowParallel: boolean) {
+// Completion fields are `onDone`, `output`, final states and the root's
+// `options`.
+export function collectTree(
+  config: Config,
+  allowParallel: boolean,
+  allowCompletion = !allowParallel
+) {
   plainRecord(config.context, 'context');
   const registry = new Map<string, AuthoredNode>();
   const rootId = config.id ?? '';
@@ -68,9 +74,9 @@ export function collectTree(config: Config, allowParallel: boolean) {
         'on',
         'entry',
         'exit',
-        ...(allowParallel ? [] : ['onDone', 'output']),
+        ...(allowCompletion ? ['onDone', 'output'] : []),
         ...(parent === undefined
-          ? ['context', ...(allowParallel ? [] : ['options'])]
+          ? ['context', ...(allowCompletion ? ['options'] : [])]
           : [])
       ],
       keyPath.join('.') || 'root'
@@ -116,10 +122,14 @@ export function collectTree(config: Config, allowParallel: boolean) {
         throw new Error(`Unsupported parallel state without regions at ${id}`);
       if (state.initial !== undefined)
         throw new Error(`Unsupported parallel initial at ${id}`);
+      if (state.output !== undefined && parent !== undefined)
+        throw new Error(`Unsupported ${id}.output`);
+      if (state.onDone !== undefined && parent === undefined)
+        throw new Error(`Unsupported ${id}.onDone`);
       return node;
     }
     if (state.type === 'final') {
-      if (allowParallel || parent === undefined)
+      if (!allowCompletion || parent === undefined)
         throw new Error(`Unsupported state type: ${state.type}`);
       if (
         node.children.size > 0 ||
@@ -174,6 +184,16 @@ export function collectTree(config: Config, allowParallel: boolean) {
   return { registry, root, resolveTarget };
 }
 
+export function iterationBound(config: Config): number | undefined {
+  if (config.options === undefined) return undefined;
+  plainRecord(config.options, 'options');
+  fields(config.options, ['maxIterations'], 'options');
+  const bound = config.options.maxIterations;
+  if (bound !== undefined && (!Number.isInteger(bound) || bound < 1))
+    throw new Error(`Unsupported options.maxIterations: ${String(bound)}`);
+  return bound;
+}
+
 export function compareCompoundTrace(config: Config, events: readonly Event[]) {
   const run = compareCompoundRun(config, events);
   if (run.unfinished)
@@ -190,13 +210,7 @@ export function compareCompoundRun(config: Config, events: readonly Event[]) {
       throw new Error('Unsupported event.type');
   }
   const { registry, root, resolveTarget } = collectTree(config, false);
-  if (config.options !== undefined) {
-    plainRecord(config.options, 'options');
-    fields(config.options, ['maxIterations'], 'options');
-    const bound = config.options.maxIterations;
-    if (bound !== undefined && (!Number.isInteger(bound) || bound < 1))
-      throw new Error(`Unsupported options.maxIterations: ${String(bound)}`);
-  }
+  const bound = iterationBound(config);
   const encoding = createEncoding((id) => id.slice(1));
   function initialPath(node: AuthoredNode): string[] {
     if (node.config.initial === undefined) return node.path;
@@ -254,7 +268,6 @@ export function compareCompoundRun(config: Config, events: readonly Event[]) {
     assert.equal(effects.at(-1)?.type, '@xstate.terminate');
     return effects.slice(0, -1);
   };
-  const bound = config.options?.maxIterations;
   const budget = bound ?? unboundedCap;
   const settled = (macrostep: model.CompoundMacrostep) => {
     if (macrostep.refused)
