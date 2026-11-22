@@ -144,6 +144,16 @@ const defects = [
     after: 'nextEvent = internalQueue.pop()!;',
     testFile: 'packages/core/test/machine-model/raised.test.ts',
     test: 'queues exit, transition and entry raises in that order'
+  },
+  {
+    name: 'a nested done event names the final child',
+    file: 'packages/core/src/stateUtils.ts',
+    before: `createDoneStateEvent(
+              parent.id,`,
+    after: `createDoneStateEvent(
+              stateNodeToEnter.id,`,
+    testFile: 'packages/core/test/machine-model/compoundCompletion.test.ts',
+    test: 'raises a done event for the parent of a final child'
   }
 ];
 try {

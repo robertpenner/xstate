@@ -57,7 +57,9 @@ export function compareParallelTrace(
         ])
       ),
       entry: encoding.evaluate(node.config.entry, true, resolve),
-      exit: encoding.evaluate(node.config.exit, true, resolve)
+      exit: encoding.evaluate(node.config.exit, true, resolve),
+      final: false,
+      output: encoding.evaluateOutput(undefined)
     };
   }
   const machine: model.ParallelMachine = {

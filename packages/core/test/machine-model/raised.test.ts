@@ -315,24 +315,25 @@ describe('raised events', () => {
     ).toThrow(message);
   });
 
-  it('refuses raises in compound machines', () => {
-    expect(() =>
-      compareCompoundTrace(
-        {
-          initial: 'a',
-          context: {},
-          states: {
-            a: {
-              on: {
-                go: (_, enq) => {
-                  enq.raise({ type: 'R' });
-                }
-              }
+  it('processes raises in compound machines', () => {
+    const trace = compareCompoundTrace(
+      {
+        initial: 'a',
+        context: {},
+        states: {
+          a: {
+            on: {
+              go: (_, enq) => {
+                enq.raise({ type: 'R' });
+              },
+              R: { target: 'b' }
             }
-          }
-        },
-        [{ type: 'go' }]
-      )
-    ).toThrow(/Unsupported enqueue operation: raise/);
+          },
+          b: {}
+        }
+      },
+      [{ type: 'go' }]
+    );
+    expect(trace[1].value).toBe('b');
   });
 });

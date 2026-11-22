@@ -105,7 +105,8 @@ describe('compound machine model', () => {
           {
             context: {},
             initial: 'p',
-            states: { p: { on: {}, ...extra } }
+            // Deliberately malformed runtime config.
+            states: { p: { on: {}, ...(extra as object) } }
           },
           []
         )
@@ -156,16 +157,13 @@ describe('compound machine model', () => {
     ).toThrow(/Unsupported relative target/);
   });
 
-  it.each(['parallel', 'history', 'final'])(
-    'refuses nested %s states',
-    (type) => {
-      const config = { context: {}, initial: 'p', states: { p: { type } } };
-      // @ts-expect-error Deliberately test an unsupported runtime state type.
-      expect(() => compareCompoundTrace(config, [])).toThrow(
-        /Unsupported state type/
-      );
-    }
-  );
+  it.each(['parallel', 'history'])('refuses nested %s states', (type) => {
+    const config = { context: {}, initial: 'p', states: { p: { type } } };
+    // @ts-expect-error Deliberately test an unsupported runtime state type.
+    expect(() => compareCompoundTrace(config, [])).toThrow(
+      /Unsupported state type/
+    );
+  });
 
   it('initializes descendants and selects the deepest enabled handler', () => {
     const trace = compareCompoundTrace(
