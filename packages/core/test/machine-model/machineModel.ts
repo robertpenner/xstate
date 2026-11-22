@@ -1436,3 +1436,663 @@ export function parallelStep(
     effects: [...exited.effects, ...updated.effects, ...entered.effects]
   };
 }
+
+// Completion in parallel machines. The adapter supplies the root output, the
+// combination of region outputs into the parallel done event's output, and
+// the encoding of `undefined`.
+export type ParallelOutputs = {
+  hasOutput: boolean;
+  output: (context: Record<string, number>, event: Event) => number;
+  regions: (id: string, outputs: readonly number[]) => number;
+  missing: number;
+};
+// Output stays undefined until the machine completes.
+export type ParallelState = {
+  snapshot: ParallelSnapshot;
+  done: boolean;
+  output: number | undefined;
+};
+export type ParallelMicro = {
+  state: ParallelState;
+  snapshotReused: boolean;
+  contextReused: boolean;
+  effects: readonly Effect[];
+  raised: readonly Event[];
+};
+// The exit and transition raises of a step, its entries in document order,
+// and the context the first entry reads.
+export type ParallelParts = {
+  raised: readonly Event[];
+  entries: readonly string[];
+  entryContext: Record<string, number>;
+};
+export type ParallelClimb = {
+  raised: readonly Event[];
+  completed: readonly string[];
+  done: boolean;
+  output: number | undefined;
+};
+export type ParallelEntered = {
+  context: Record<string, number>;
+  reused: boolean;
+  effects: readonly Effect[];
+  raised: readonly Event[];
+  done: boolean;
+  output: number | undefined;
+};
+export type ParallelMacrostep = {
+  settled: boolean;
+  refused: boolean;
+  step: ParallelMicro;
+  queue: readonly Event[];
+  trace: readonly ParallelMicro[];
+};
+
+// Mirrors the plan of `parallelStep` up to its entries.
+export function parallelParts(
+  machine: ParallelMachine,
+  snapshot: ParallelSnapshot,
+  event: Event
+): ParallelParts {
+  //@ verify
+  const selections = parallelSelections(machine, snapshot, event);
+  const nodes = machine.nodes;
+  if (selections.length === 0)
+    return { raised: [], entries: [], entryContext: snapshot.context };
+  if (selections.length < 2) {
+    const selected = selections[0];
+    const result = selected.evaluation.result;
+    const target = result === undefined ? undefined : result.target;
+    const reenter = result === undefined ? false : result.reenter;
+    if (target === undefined || !(target in nodes)) {
+      const updated = apply(snapshot.context, selected.evaluation);
+      return {
+        raised: updated.raises,
+        entries: [],
+        entryContext: updated.context
+      };
+    }
+    const plan = parallelPlan(
+      machine,
+      snapshot.active,
+      selected.id,
+      target,
+      reenter
+    );
+    const exited = runLifecycle(
+      nodes,
+      plan.exits,
+      snapshot.context,
+      event,
+      true
+    );
+    const updated = apply(exited.context, selected.evaluation);
+    return {
+      raised: [...exited.raises, ...updated.raises],
+      entries: plan.entries,
+      entryContext: updated.context
+    };
+  }
+  const active = snapshot.active;
+  const kept = removeConflicts(machine, active, selections, []);
+  const plans = selectionPlans(machine, active, kept);
+  const exits = reverse(active.filter((id) => plansExit(plans, id)));
+  const entries = machine.order.filter((id) => plansEnter(plans, id));
+  const exited = runLifecycle(nodes, exits, snapshot.context, event, true);
+  const updated = applyAll(exited.context, kept);
+  return {
+    raised: [...exited.raises, ...updated.raises],
+    entries,
+    entryContext: updated.context
+  };
+}
+
+// While entering `entries[index]`, the runtime's configuration holds the
+// final configuration less the entries that come after it.
+export function activeAt(
+  next: readonly string[],
+  entries: readonly string[],
+  index: number,
+  id: string
+): boolean {
+  //@ verify
+  if (!next.includes(id)) return false;
+  if (index < 0) return !entries.includes(id);
+  if (index + 1 >= entries.length) return true;
+  return !entries.slice(index + 1).includes(id);
+}
+
+// The runtime's `isInFinalState`: a compound node has an active final child,
+// a parallel node has only final regions, and an atomic node is final.
+export function finalAt(
+  machine: ParallelMachine,
+  next: readonly string[],
+  entries: readonly string[],
+  index: number,
+  id: string,
+  fuel: number
+): boolean {
+  //@ verify
+  //@ decreases fuel
+  if (fuel <= 0 || !(id in machine.nodes)) return false;
+  const nodes = machine.nodes;
+  const node = lookupNode(nodes, id);
+  if (machine.parallels.includes(id))
+    return node.children.every((child) =>
+      finalAt(machine, next, entries, index, child, fuel - 1)
+    );
+  if (node.children.length === 0) return node.final;
+  return node.children.some(
+    (child) =>
+      child in nodes &&
+      lookupNode(nodes, child).final &&
+      activeAt(next, entries, index, child)
+  );
+}
+
+// The output of the first queued event of the given type.
+export function queuedOutput(
+  queue: readonly Event[],
+  type: string,
+  missing: number
+): number {
+  //@ verify
+  //@ decreases queue.length
+  if (queue.length === 0) return missing;
+  if (queue[0].type === type) return queue[0].value;
+  return queuedOutput(queue.slice(1), type, missing);
+}
+
+export function finalChildOutput(
+  machine: ParallelMachine,
+  outputs: ParallelOutputs,
+  next: readonly string[],
+  entries: readonly string[],
+  index: number,
+  context: Record<string, number>,
+  event: Event,
+  children: readonly string[]
+): number {
+  //@ verify
+  //@ decreases children.length
+  if (children.length === 0) return outputs.missing;
+  const child = children[0];
+  if (
+    child in machine.nodes &&
+    lookupNode(machine.nodes, child).final &&
+    activeAt(next, entries, index, child)
+  ) {
+    const own = lookupNode(machine.nodes, child).output;
+    return own(context, event);
+  }
+  return finalChildOutput(
+    machine,
+    outputs,
+    next,
+    entries,
+    index,
+    context,
+    event,
+    children.slice(1)
+  );
+}
+
+// A final region gives its own output and a compound region its active final
+// child's, both evaluated again; a parallel region gives the output of the
+// first queued done event for it.
+export function regionOutput(
+  machine: ParallelMachine,
+  outputs: ParallelOutputs,
+  next: readonly string[],
+  entries: readonly string[],
+  index: number,
+  context: Record<string, number>,
+  event: Event,
+  queue: readonly Event[],
+  region: string
+): number {
+  //@ verify
+  if (!(region in machine.nodes)) return outputs.missing;
+  const node = lookupNode(machine.nodes, region);
+  if (node.final) {
+    const own = node.output;
+    return own(context, event);
+  }
+  if (machine.parallels.includes(region))
+    return queuedOutput(queue, doneEvent(region, 0).type, outputs.missing);
+  return finalChildOutput(
+    machine,
+    outputs,
+    next,
+    entries,
+    index,
+    context,
+    event,
+    node.children
+  );
+}
+
+export function regionOutputs(
+  machine: ParallelMachine,
+  outputs: ParallelOutputs,
+  next: readonly string[],
+  entries: readonly string[],
+  index: number,
+  context: Record<string, number>,
+  event: Event,
+  queue: readonly Event[],
+  regions: readonly string[]
+): readonly number[] {
+  //@ verify
+  //@ ensures \result.length === regions.length
+  //@ decreases regions.length
+  if (regions.length === 0) return [];
+  return [
+    regionOutput(
+      machine,
+      outputs,
+      next,
+      entries,
+      index,
+      context,
+      event,
+      queue,
+      regions[0]
+    ),
+    ...regionOutputs(
+      machine,
+      outputs,
+      next,
+      entries,
+      index,
+      context,
+      event,
+      queue,
+      regions.slice(1)
+    )
+  ];
+}
+
+// Each parallel ancestor whose regions are all final queues its done event,
+// once per microstep. Passing a parallel root completes the machine.
+export function climb(
+  machine: ParallelMachine,
+  outputs: ParallelOutputs,
+  next: readonly string[],
+  entries: readonly string[],
+  index: number,
+  context: Record<string, number>,
+  event: Event,
+  queue: readonly Event[],
+  completed: readonly string[],
+  marker: string,
+  fuel: number
+): ParallelClimb {
+  //@ verify
+  //@ decreases fuel
+  if (
+    fuel <= 0 ||
+    !(marker in machine.nodes) ||
+    !machine.parallels.includes(marker) ||
+    completed.includes(marker) ||
+    !finalAt(machine, next, entries, index, marker, machine.order.length)
+  )
+    return { raised: [], completed, done: false, output: undefined };
+  const node = lookupNode(machine.nodes, marker);
+  const combine = outputs.regions;
+  const done = doneEvent(
+    marker,
+    combine(
+      marker,
+      regionOutputs(
+        machine,
+        outputs,
+        next,
+        entries,
+        index,
+        context,
+        event,
+        queue,
+        node.children
+      )
+    )
+  );
+  const path = node.path;
+  if (path.length < 2) {
+    const rootOutput = outputs.output;
+    return {
+      raised: [done],
+      completed: [...completed, marker],
+      done: true,
+      output: rootOutput(context, done)
+    };
+  }
+  const rest = climb(
+    machine,
+    outputs,
+    next,
+    entries,
+    index,
+    context,
+    event,
+    [...queue, done],
+    [...completed, marker],
+    path[path.length - 2],
+    fuel - 1
+  );
+  return {
+    raised: [done, ...rest.raised],
+    completed: rest.completed,
+    done: rest.done,
+    output: rest.output
+  };
+}
+
+// Entering a final node queues its compound parent's done event, then climbs
+// from the nearest parallel ancestor of the final node or of that parent.
+// A final child of a compound root completes the machine.
+export function finalEntered(
+  machine: ParallelMachine,
+  outputs: ParallelOutputs,
+  next: readonly string[],
+  entries: readonly string[],
+  index: number,
+  context: Record<string, number>,
+  event: Event,
+  queue: readonly Event[],
+  completed: readonly string[]
+): ParallelClimb {
+  //@ verify
+  const none = { raised: [], completed, done: false, output: undefined };
+  if (index < 0 || index >= entries.length) return none;
+  const id = entries[index];
+  if (!(id in machine.nodes)) return none;
+  const node = lookupNode(machine.nodes, id);
+  const path = node.path;
+  if (!node.final || path.length < 2) return none;
+  const parent = path[path.length - 2];
+  const fuel = machine.order.length;
+  if (machine.parallels.includes(parent))
+    return climb(
+      machine,
+      outputs,
+      next,
+      entries,
+      index,
+      context,
+      event,
+      queue,
+      completed,
+      parent,
+      fuel
+    );
+  const own = node.output;
+  const finalOutput = own(context, event);
+  const done = doneEvent(parent, finalOutput);
+  if (path.length < 3) {
+    const rootOutput = outputs.output;
+    return {
+      raised: [done],
+      completed,
+      done: true,
+      output: outputs.hasOutput
+        ? rootOutput(context, doneEvent(id, finalOutput))
+        : finalOutput
+    };
+  }
+  const rest = climb(
+    machine,
+    outputs,
+    next,
+    entries,
+    index,
+    context,
+    event,
+    [...queue, done],
+    completed,
+    path[path.length - 3],
+    fuel
+  );
+  return {
+    raised: [done, ...rest.raised],
+    completed: rest.completed,
+    done: rest.done,
+    output: rest.output
+  };
+}
+
+// Entries run one at a time; each entry's raises are queued before the done
+// events its entry causes. `queue` holds what the runtime's internal queue
+// holds at that point, which the parallel region outputs read.
+export function parallelEnter(
+  machine: ParallelMachine,
+  outputs: ParallelOutputs,
+  next: readonly string[],
+  entries: readonly string[],
+  index: number,
+  context: Record<string, number>,
+  event: Event,
+  queue: readonly Event[],
+  completed: readonly string[]
+): ParallelEntered {
+  //@ verify
+  //@ decreases entries.length - index
+  if (index < 0 || index >= entries.length)
+    return {
+      context,
+      reused: true,
+      effects: [],
+      raised: [],
+      done: false,
+      output: undefined
+    };
+  const entered = runLifecycle(
+    machine.nodes,
+    [entries[index]],
+    context,
+    event,
+    false
+  );
+  const queued = [...queue, ...entered.raises];
+  const final = finalEntered(
+    machine,
+    outputs,
+    next,
+    entries,
+    index,
+    entered.context,
+    event,
+    queued,
+    completed
+  );
+  const rest = parallelEnter(
+    machine,
+    outputs,
+    next,
+    entries,
+    index + 1,
+    entered.context,
+    event,
+    [...queued, ...final.raised],
+    final.completed
+  );
+  return {
+    context: rest.context,
+    reused: entered.reused && rest.reused,
+    effects: [...entered.effects, ...rest.effects],
+    raised: [...entered.raises, ...final.raised, ...rest.raised],
+    done: final.done || rest.done,
+    output: rest.done ? rest.output : final.output
+  };
+}
+
+// A machine that completes exits every active node from the last in document
+// order; raises from those exits are discarded with the queue.
+export function parallelFinish(
+  machine: ParallelMachine,
+  step: ParallelStep,
+  parts: ParallelParts,
+  entered: ParallelEntered,
+  event: Event
+): ParallelMicro {
+  //@ verify
+  const raised = [...parts.raised, ...entered.raised];
+  if (!entered.done)
+    return {
+      state: { snapshot: step.snapshot, done: false, output: undefined },
+      snapshotReused: step.snapshotReused,
+      contextReused: step.contextReused,
+      effects: step.effects,
+      raised
+    };
+  const active = step.snapshot.active;
+  const exited = runLifecycle(
+    machine.nodes,
+    reverse(active),
+    step.snapshot.context,
+    event,
+    true
+  );
+  return {
+    state: {
+      snapshot: { active, context: exited.context },
+      done: true,
+      output: entered.output
+    },
+    snapshotReused: false,
+    contextReused: step.contextReused && exited.reused,
+    effects: [...step.effects, ...exited.effects],
+    raised
+  };
+}
+
+export function parallelInitialMicro(
+  machine: ParallelMachine,
+  outputs: ParallelOutputs,
+  event: Event
+): ParallelMicro {
+  //@ verify
+  const step = parallelInitialTransition(machine, event);
+  const entries = step.snapshot.active;
+  const parts = { raised: [], entries, entryContext: machine.context };
+  const entered = parallelEnter(
+    machine,
+    outputs,
+    entries,
+    entries,
+    0,
+    machine.context,
+    event,
+    [],
+    []
+  );
+  return parallelFinish(machine, step, parts, entered, event);
+}
+
+// `pending` is the internal queue after this event was taken from it.
+export function parallelMicrostep(
+  machine: ParallelMachine,
+  outputs: ParallelOutputs,
+  state: ParallelState,
+  event: Event,
+  pending: readonly Event[]
+): ParallelMicro {
+  //@ verify
+  //@ ensures \result.snapshotReused ==> \result.state === state
+  const unchanged = {
+    state,
+    snapshotReused: true,
+    contextReused: true,
+    effects: [],
+    raised: []
+  };
+  // A done machine processes no events.
+  if (state.done) return unchanged;
+  const step = parallelStep(machine, state.snapshot, event);
+  if (step.snapshotReused) return unchanged;
+  const parts = parallelParts(machine, state.snapshot, event);
+  const entered = parallelEnter(
+    machine,
+    outputs,
+    step.snapshot.active,
+    parts.entries,
+    0,
+    parts.entryContext,
+    event,
+    [...pending, ...parts.raised],
+    []
+  );
+  return parallelFinish(machine, step, parts, entered, event);
+}
+
+// Raised events are processed in FIFO order, each counting against the
+// budget. A done machine leaves the loop before the budget is counted and
+// discards its queue.
+export function parallelSettle(
+  machine: ParallelMachine,
+  outputs: ParallelOutputs,
+  step: ParallelMicro,
+  queue: readonly Event[],
+  remaining: number
+): ParallelMacrostep {
+  //@ verify
+  //@ decreases remaining
+  if (step.state.done)
+    return { settled: true, refused: false, step, queue: [], trace: [] };
+  if (remaining <= 0)
+    return { settled: false, refused: false, step, queue, trace: [] };
+  if (queue.length === 0)
+    return { settled: true, refused: false, step, queue, trace: [] };
+  if (!parallelStepReady(machine, step.state.snapshot, queue[0]))
+    return { settled: false, refused: true, step, queue, trace: [] };
+  const next = parallelMicrostep(
+    machine,
+    outputs,
+    step.state,
+    queue[0],
+    queue.slice(1)
+  );
+  const rest = parallelSettle(
+    machine,
+    outputs,
+    {
+      state: next.state,
+      snapshotReused: step.snapshotReused && next.snapshotReused,
+      contextReused: step.contextReused && next.contextReused,
+      effects: [...step.effects, ...next.effects],
+      raised: [...step.raised, ...next.raised]
+    },
+    [...queue.slice(1), ...next.raised],
+    remaining - 1
+  );
+  return {
+    settled: rest.settled,
+    refused: rest.refused,
+    step: rest.step,
+    queue: rest.queue,
+    trace: [next, ...rest.trace]
+  };
+}
+
+export function parallelInitialMacrostep(
+  machine: ParallelMachine,
+  outputs: ParallelOutputs,
+  event: Event,
+  maxIterations: number
+): ParallelMacrostep {
+  //@ verify
+  const first = parallelInitialMicro(machine, outputs, event);
+  return parallelSettle(machine, outputs, first, first.raised, maxIterations);
+}
+
+export function parallelMacrostep(
+  machine: ParallelMachine,
+  outputs: ParallelOutputs,
+  state: ParallelState,
+  event: Event,
+  maxIterations: number
+): ParallelMacrostep {
+  //@ verify
+  const first = parallelMicrostep(machine, outputs, state, event, []);
+  return parallelSettle(machine, outputs, first, first.raised, maxIterations);
+}

@@ -64,6 +64,20 @@ datatype ParallelStep = ParallelStep(snapshot: ParallelSnapshot, snapshotReused:
 
 datatype ParallelPlan = ParallelPlan(domain: seq<string>, reentered: Option<string>, extra: Option<string>, exits: seq<string>, entries: seq<string>, active: seq<string>)
 
+datatype ParallelOutputs = ParallelOutputs(hasOutput: bool, output: (map<string, int>, Event) -> int, regions: (string, seq<int>) -> int, missing: int)
+
+datatype ParallelState = ParallelState(snapshot: ParallelSnapshot, done: bool, output: Option<int>)
+
+datatype ParallelMicro = ParallelMicro(state: ParallelState, snapshotReused: bool, contextReused: bool, effects: seq<Effect>, raised: seq<Event>)
+
+datatype ParallelParts = ParallelParts(raised: seq<Event>, entries: seq<string>, entryContext: map<string, int>)
+
+datatype ParallelClimb = ParallelClimb(raised: seq<Event>, completed: seq<string>, done: bool, output: Option<int>)
+
+datatype ParallelEntered = ParallelEntered(context: map<string, int>, reused: bool, effects: seq<Effect>, raised: seq<Event>, done: bool, output: Option<int>)
+
+datatype ParallelMacrostep = ParallelMacrostep(settled: bool, refused: bool, step: ParallelMicro, queue: seq<Event>, trace: seq<ParallelMicro>)
+
 function mergePatch(context: map<string, int>, patch: seq<PatchEntry>): map<string, int>
   decreases |patch|
 {
@@ -1183,6 +1197,261 @@ function parallelStep(machine: ParallelMachine, snapshot: ParallelSnapshot, even
 lemma parallelStep_ensures(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
   ensures (parallelStep(machine, snapshot, event).snapshotReused ==> (parallelStep(machine, snapshot, event).snapshot == snapshot))
 {
+}
+
+function parallelParts(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): ParallelParts
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  var nodes := machine.nodes;
+  if (|selections| == 0) then
+    ParallelParts([], [], snapshot.context)
+  else
+    if (|selections| < 2) then
+      var selected := selections[0];
+      var result := selected.evaluation.result;
+      var target := (match result { case Some(i_result_val) => i_result_val.target case None => Option.None });
+      var reenter := (match result { case Some(i_result_val) => i_result_val.reenter case None => false });
+      match target {
+        case Some(i_target_val) =>
+          if !((i_target_val in nodes)) then
+            var updated := apply(snapshot.context, selected.evaluation);
+            ParallelParts(updated.raises, [], updated.context)
+          else
+            var plan := parallelPlan(machine, snapshot.active, selected.id, i_target_val, reenter);
+            var exited := runLifecycle(nodes, plan.exits, snapshot.context, event, true);
+            var updated := apply(exited.context, selected.evaluation);
+            ParallelParts((exited.raises + updated.raises), plan.entries, updated.context)
+        case None =>
+          var updated := apply(snapshot.context, selected.evaluation);
+          ParallelParts(updated.raises, [], updated.context)
+      }
+    else
+      var active := snapshot.active;
+      var kept := removeConflicts(machine, active, selections, []);
+      var plans := selectionPlans(machine, active, kept);
+      var exits := reverse(SeqFilter((id: string) => plansExit(plans, id), active));
+      var entries := SeqFilter((id: string) => plansEnter(plans, id), machine.order);
+      var exited := runLifecycle(nodes, exits, snapshot.context, event, true);
+      var updated := applyAll(exited.context, kept);
+      ParallelParts((exited.raises + updated.raises), entries, updated.context)
+}
+
+function activeAt(next: seq<string>, entries: seq<string>, index: int, id: string): bool
+{
+  if !((id in next)) then
+    false
+  else
+    if (index < 0) then
+      !((id in entries))
+    else
+      (((index + 1) >= |entries|) || !((id in entries[(index + 1)..])))
+}
+
+function finalAt(machine: ParallelMachine, next: seq<string>, entries: seq<string>, index: int, id: string, fuel: int): bool
+  decreases fuel
+{
+  if ((fuel <= 0) || !((id in machine.nodes))) then
+    false
+  else
+    var nodes := machine.nodes;
+    var node := lookupNode(nodes, id);
+    if (id in machine.parallels) then
+      SeqAll(node.children, (child: string) => finalAt(machine, next, entries, index, child, (fuel - 1)))
+    else
+      if (|node.children| == 0) then
+        node.final
+      else
+        (exists child :: child in node.children && (((child in nodes) && lookupNode(nodes, child).final) && activeAt(next, entries, index, child)))
+}
+
+function queuedOutput(queue: seq<Event>, type_: string, missing: int): int
+  decreases |queue|
+{
+  if (|queue| == 0) then
+    missing
+  else
+    if (queue[0].type_ == type_) then
+      queue[0].value
+    else
+      queuedOutput(queue[1..], type_, missing)
+}
+
+function finalChildOutput(machine: ParallelMachine, outputs: ParallelOutputs, next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event, children: seq<string>): int
+  decreases |children|
+{
+  if (|children| == 0) then
+    outputs.missing
+  else
+    var child := children[0];
+    if (((child in machine.nodes) && lookupNode(machine.nodes, child).final) && activeAt(next, entries, index, child)) then
+      var own := lookupNode(machine.nodes, child).output;
+      own(context, event)
+    else
+      finalChildOutput(machine, outputs, next, entries, index, context, event, children[1..])
+}
+
+function regionOutput(machine: ParallelMachine, outputs: ParallelOutputs, next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event, queue: seq<Event>, region: string): int
+{
+  if !((region in machine.nodes)) then
+    outputs.missing
+  else
+    var node := lookupNode(machine.nodes, region);
+    if node.final then
+      var own := node.output;
+      own(context, event)
+    else
+      if (region in machine.parallels) then
+        queuedOutput(queue, doneEvent(region, 0).type_, outputs.missing)
+      else
+        finalChildOutput(machine, outputs, next, entries, index, context, event, node.children)
+}
+
+function regionOutputs(machine: ParallelMachine, outputs: ParallelOutputs, next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event, queue: seq<Event>, regions: seq<string>): seq<int>
+  decreases |regions|
+{
+  if (|regions| == 0) then
+    []
+  else
+    ([regionOutput(machine, outputs, next, entries, index, context, event, queue, regions[0])] + regionOutputs(machine, outputs, next, entries, index, context, event, queue, regions[1..]))
+}
+
+lemma regionOutputs_ensures(machine: ParallelMachine, outputs: ParallelOutputs, next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event, queue: seq<Event>, regions: seq<string>)
+  ensures (|regionOutputs(machine, outputs, next, entries, index, context, event, queue, regions)| == |regions|)
+{
+}
+
+function climb(machine: ParallelMachine, outputs: ParallelOutputs, next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event, queue: seq<Event>, completed: seq<string>, marker: string, fuel: int): ParallelClimb
+  decreases fuel
+{
+  if (((((fuel <= 0) || !((marker in machine.nodes))) || !((marker in machine.parallels))) || (marker in completed)) || !(finalAt(machine, next, entries, index, marker, |machine.order|))) then
+    ParallelClimb([], completed, false, None)
+  else
+    var node := lookupNode(machine.nodes, marker);
+    var combine := outputs.regions;
+    var done := doneEvent(marker, combine(marker, regionOutputs(machine, outputs, next, entries, index, context, event, queue, node.children)));
+    var path := node.path;
+    if (|path| < 2) then
+      var rootOutput := outputs.output;
+      ParallelClimb([done], (completed + [marker]), true, Some(rootOutput(context, done)))
+    else
+      var rest := climb(machine, outputs, next, entries, index, context, event, (queue + [done]), (completed + [marker]), path[(|path| - 2)], (fuel - 1));
+      ParallelClimb(([done] + rest.raised), rest.completed, rest.done, rest.output)
+}
+
+function finalEntered(machine: ParallelMachine, outputs: ParallelOutputs, next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event, queue: seq<Event>, completed: seq<string>): ParallelClimb
+{
+  var none := ParallelClimb([], completed, false, None);
+  if ((index < 0) || (index >= |entries|)) then
+    none
+  else
+    var id := entries[index];
+    if !((id in machine.nodes)) then
+      none
+    else
+      var node := lookupNode(machine.nodes, id);
+      var path := node.path;
+      if (!(node.final) || (|path| < 2)) then
+        none
+      else
+        var parent := path[(|path| - 2)];
+        var fuel := |machine.order|;
+        if (parent in machine.parallels) then
+          climb(machine, outputs, next, entries, index, context, event, queue, completed, parent, fuel)
+        else
+          var own := node.output;
+          var finalOutput := own(context, event);
+          var done := doneEvent(parent, finalOutput);
+          if (|path| < 3) then
+            var rootOutput := outputs.output;
+            ParallelClimb([done], completed, true, Some((if outputs.hasOutput then rootOutput(context, doneEvent(id, finalOutput)) else finalOutput)))
+          else
+            var rest := climb(machine, outputs, next, entries, index, context, event, (queue + [done]), completed, path[(|path| - 3)], fuel);
+            ParallelClimb(([done] + rest.raised), rest.completed, rest.done, rest.output)
+}
+
+function parallelEnter(machine: ParallelMachine, outputs: ParallelOutputs, next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event, queue: seq<Event>, completed: seq<string>): ParallelEntered
+  decreases (|entries| - index)
+{
+  if ((index < 0) || (index >= |entries|)) then
+    ParallelEntered(context, true, [], [], false, None)
+  else
+    var entered := runLifecycle(machine.nodes, [entries[index]], context, event, false);
+    var queued := (queue + entered.raises);
+    var final := finalEntered(machine, outputs, next, entries, index, entered.context, event, queued, completed);
+    var rest := parallelEnter(machine, outputs, next, entries, (index + 1), entered.context, event, (queued + final.raised), final.completed);
+    ParallelEntered(rest.context, (entered.reused && rest.reused), (entered.effects + rest.effects), ((entered.raises + final.raised) + rest.raised), (final.done || rest.done), (if rest.done then rest.output else final.output))
+}
+
+function parallelFinish(machine: ParallelMachine, step: ParallelStep, parts: ParallelParts, entered: ParallelEntered, event: Event): ParallelMicro
+{
+  var raised := (parts.raised + entered.raised);
+  if !(entered.done) then
+    ParallelMicro(ParallelState(step.snapshot, false, None), step.snapshotReused, step.contextReused, step.effects, raised)
+  else
+    var active := step.snapshot.active;
+    var exited := runLifecycle(machine.nodes, reverse(active), step.snapshot.context, event, true);
+    ParallelMicro(ParallelState(ParallelSnapshot(active, exited.context), true, entered.output), false, (step.contextReused && exited.reused), (step.effects + exited.effects), raised)
+}
+
+function parallelInitialMicro(machine: ParallelMachine, outputs: ParallelOutputs, event: Event): ParallelMicro
+{
+  var step := parallelInitialTransition(machine, event);
+  var entries := step.snapshot.active;
+  var parts := ParallelParts([], entries, machine.context);
+  var entered := parallelEnter(machine, outputs, entries, entries, 0, machine.context, event, [], []);
+  parallelFinish(machine, step, parts, entered, event)
+}
+
+function parallelMicrostep(machine: ParallelMachine, outputs: ParallelOutputs, state: ParallelState, event: Event, pending: seq<Event>): ParallelMicro
+{
+  var unchanged_ := ParallelMicro(state, true, true, [], []);
+  if state.done then
+    unchanged_
+  else
+    var step := parallelStep(machine, state.snapshot, event);
+    if step.snapshotReused then
+      unchanged_
+    else
+      var parts := parallelParts(machine, state.snapshot, event);
+      var entered := parallelEnter(machine, outputs, step.snapshot.active, parts.entries, 0, parts.entryContext, event, (pending + parts.raised), []);
+      parallelFinish(machine, step, parts, entered, event)
+}
+
+lemma parallelMicrostep_ensures(machine: ParallelMachine, outputs: ParallelOutputs, state: ParallelState, event: Event, pending: seq<Event>)
+  ensures (parallelMicrostep(machine, outputs, state, event, pending).snapshotReused ==> (parallelMicrostep(machine, outputs, state, event, pending).state == state))
+{
+}
+
+function parallelSettle(machine: ParallelMachine, outputs: ParallelOutputs, step: ParallelMicro, queue: seq<Event>, remaining: int): ParallelMacrostep
+  decreases remaining
+{
+  if step.state.done then
+    ParallelMacrostep(true, false, step, [], [])
+  else
+    if (remaining <= 0) then
+      ParallelMacrostep(false, false, step, queue, [])
+    else
+      if (|queue| == 0) then
+        ParallelMacrostep(true, false, step, queue, [])
+      else
+        if !(parallelStepReady(machine, step.state.snapshot, queue[0])) then
+          ParallelMacrostep(false, true, step, queue, [])
+        else
+          var next := parallelMicrostep(machine, outputs, step.state, queue[0], queue[1..]);
+          var rest := parallelSettle(machine, outputs, ParallelMicro(next.state, (step.snapshotReused && next.snapshotReused), (step.contextReused && next.contextReused), (step.effects + next.effects), (step.raised + next.raised)), (queue[1..] + next.raised), (remaining - 1));
+          ParallelMacrostep(rest.settled, rest.refused, rest.step, rest.queue, ([next] + rest.trace))
+}
+
+function parallelInitialMacrostep(machine: ParallelMachine, outputs: ParallelOutputs, event: Event, maxIterations: int): ParallelMacrostep
+{
+  var first := parallelInitialMicro(machine, outputs, event);
+  parallelSettle(machine, outputs, first, first.raised, maxIterations)
+}
+
+function parallelMacrostep(machine: ParallelMachine, outputs: ParallelOutputs, state: ParallelState, event: Event, maxIterations: int): ParallelMacrostep
+{
+  var first := parallelMicrostep(machine, outputs, state, event, []);
+  parallelSettle(machine, outputs, first, first.raised, maxIterations)
 }
 
 ghost predicate ParallelNodeShape(machine: ParallelMachine, id: string)
@@ -4805,4 +5074,373 @@ lemma NestedDoneNamesParent(machine: CompoundMachine, context: map<string, int>,
   assert path[|path| - 1] == "f" && path[|path| - 2] == "p";
   assert lookupNode(machine.nodes, "f") == machine.nodes["f"];
   assert "xstate.done.state." + "p" == "xstate.done.state.p";
+}
+
+// ---- Parallel completion ----
+
+ghost function ParentOf(machine: ParallelMachine, id: string): string
+  requires id in machine.nodes && |machine.nodes[id].path| >= 2
+{
+  machine.nodes[id].path[|machine.nodes[id].path| - 2]
+}
+
+// Climbing from a marker records each parallel it completes, in order from the
+// marker upward, and queues exactly one done event per recorded parallel, in
+// the same order. A parallel is recorded only while it is final in the
+// configuration the runtime holds at that entry, and never twice. The machine
+// is done only when the climb records the root.
+lemma {:induction false} {:isolate_assertions} ClimbBookkeeping(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>, marker: string, fuel: int)
+  decreases fuel
+  ensures var c := climb(machine, outputs, next, entries, index, context, event, queue, completed, marker, fuel);
+    |completed| <= |c.completed| && c.completed[..|completed|] == completed &&
+    |c.raised| == |c.completed| - |completed| &&
+    (forall i :: 0 <= i < |c.raised| ==> c.raised[i].type_ == doneEvent(c.completed[|completed| + i], 0).type_) &&
+    (forall i :: |completed| <= i < |c.completed| ==>
+      c.completed[i] in machine.nodes && c.completed[i] in machine.parallels &&
+      finalAt(machine, next, entries, index, c.completed[i], |machine.order|)) &&
+    (|c.completed| > |completed| ==> c.completed[|completed|] == marker) &&
+    (forall i :: |completed| <= i < |c.completed| - 1 ==>
+      |machine.nodes[c.completed[i]].path| >= 2 && c.completed[i + 1] == ParentOf(machine, c.completed[i])) &&
+    (Distinct(completed) ==> Distinct(c.completed)) &&
+    (c.done <==> c.output.Some?) &&
+    (c.done ==> |c.completed| > |completed| && |machine.nodes[c.completed[|c.completed| - 1]].path| < 2)
+{
+  var c := climb(machine, outputs, next, entries, index, context, event, queue, completed, marker, fuel);
+  if fuel <= 0 || marker !in machine.nodes || marker !in machine.parallels || marker in completed ||
+     !finalAt(machine, next, entries, index, marker, |machine.order|) {
+    assert c == ParallelClimb([], completed, false, None);
+  } else {
+    var node := lookupNode(machine.nodes, marker);
+    var combine := outputs.regions;
+    var done := doneEvent(marker, combine(marker, regionOutputs(machine, outputs, next, entries, index, context, event, queue, node.children)));
+    var path := node.path;
+    if |path| < 2 {
+      assert c == ParallelClimb([done], completed + [marker], true, Some(outputs.output(context, done)));
+      assert c.completed[..|completed|] == completed;
+      if Distinct(completed) {
+        assert forall i :: 0 <= i < |completed| ==> c.completed[i] != marker;
+      }
+    } else {
+      var parent := path[|path| - 2];
+      var rest := climb(machine, outputs, next, entries, index, context, event, queue + [done], completed + [marker], parent, fuel - 1);
+      ClimbBookkeeping(machine, outputs, next, entries, index, context, event, queue + [done], completed + [marker], parent, fuel - 1);
+      assert c == ParallelClimb([done] + rest.raised, rest.completed, rest.done, rest.output);
+      var grown := completed + [marker];
+      assert rest.completed[..|grown|] == grown;
+      assert rest.completed[..|completed|] == grown[..|completed|] == completed;
+      assert rest.completed[|completed|] == marker;
+      forall i | 0 <= i < |c.raised|
+        ensures c.raised[i].type_ == doneEvent(c.completed[|completed| + i], 0).type_
+      {
+        if i > 0 {
+          assert c.raised[i] == rest.raised[i - 1];
+          assert |completed| + i == |grown| + (i - 1);
+        }
+      }
+      if |rest.completed| > |grown| {
+        assert rest.completed[|grown|] == parent;
+        assert machine.nodes[marker].path == path;
+      }
+      if Distinct(completed) {
+        assert forall i :: 0 <= i < |completed| ==> grown[i] != marker;
+        assert Distinct(grown);
+      }
+    }
+  }
+}
+
+// Entering a non-final node, or the root, completes nothing.
+lemma NonFinalEntryInert(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  requires 0 <= index < |entries| && entries[index] in machine.nodes
+  requires !machine.nodes[entries[index]].final || |machine.nodes[entries[index]].path| < 2
+  ensures finalEntered(machine, outputs, next, entries, index, context, event, queue, completed) ==
+    ParallelClimb([], completed, false, None)
+{
+}
+
+// A final region of a parallel climbs from that parallel.
+lemma FinalRegionClimbs(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  requires 0 <= index < |entries| && entries[index] in machine.nodes
+  requires machine.nodes[entries[index]].final && |machine.nodes[entries[index]].path| >= 2
+  requires ParentOf(machine, entries[index]) in machine.parallels
+  ensures finalEntered(machine, outputs, next, entries, index, context, event, queue, completed) ==
+    climb(machine, outputs, next, entries, index, context, event, queue, completed,
+      ParentOf(machine, entries[index]), |machine.order|)
+{
+}
+
+// A final child of a compound node queues that node's done event, carrying
+// the child's output, before any parallel completion it causes. A final child
+// of a compound root completes the machine with the root output, which falls
+// back to the child's output.
+lemma FinalChildQueuesParentDone(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  requires 0 <= index < |entries| && entries[index] in machine.nodes
+  requires machine.nodes[entries[index]].final && |machine.nodes[entries[index]].path| >= 2
+  requires ParentOf(machine, entries[index]) !in machine.parallels
+  ensures var id := entries[index];
+    var path := machine.nodes[id].path;
+    var finalOutput := machine.nodes[id].output(context, event);
+    var done := doneEvent(ParentOf(machine, id), finalOutput);
+    var f := finalEntered(machine, outputs, next, entries, index, context, event, queue, completed);
+    |f.raised| > 0 && f.raised[0] == done &&
+    (|path| < 3 ==> f == ParallelClimb([done], completed, true,
+      Some(if outputs.hasOutput then outputs.output(context, doneEvent(id, finalOutput)) else finalOutput))) &&
+    (|path| >= 3 ==> f.raised[1..] == climb(machine, outputs, next, entries, index, context, event,
+      queue + [done], completed, path[|path| - 3], |machine.order|).raised)
+{
+}
+
+// Entering runs each entry's lifecycle in order from the planned context, so
+// completion changes neither the entered context nor the entry effects.
+lemma {:induction false} {:isolate_assertions} ParallelEnterLifecycle(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  requires 0 <= index <= |entries|
+  requires declaredPath(machine.nodes, entries)
+  decreases |entries| - index
+  ensures var e := parallelEnter(machine, outputs, next, entries, index, context, event, queue, completed);
+    var l := lifecycle(machine.nodes, entries[index..], context, event, false);
+    e.context == l.context && e.reused == l.reused && e.effects == l.effects
+{
+  var e := parallelEnter(machine, outputs, next, entries, index, context, event, queue, completed);
+  if index == |entries| {
+    assert entries[index..] == [];
+  } else {
+    var nodes := machine.nodes;
+    var tail := entries[index..];
+    assert tail[0] == entries[index] && tail[1..] == entries[index + 1..];
+    assert declaredPath(nodes, tail) && declaredPath(nodes, [entries[index]]);
+    var entered := runLifecycle(nodes, [entries[index]], context, event, false);
+    LifecycleCons(nodes, [entries[index]], context, event, false);
+    assert [entries[index]][1..] == [];
+    LifecycleCons(nodes, tail, context, event, false);
+    var queued := queue + entered.raises;
+    var final := finalEntered(machine, outputs, next, entries, index, entered.context, event, queued, completed);
+    ParallelEnterLifecycle(machine, outputs, next, entries, index + 1, entered.context, event, queued + final.raised, final.completed);
+  }
+}
+
+// The completion plan repeats the step's planning up to its entries: running
+// the planned entries from the planned context reproduces the step's context.
+lemma {:isolate_assertions} ParallelPartsAgree(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  ensures var step := parallelStep(machine, snapshot, event);
+    var parts := parallelParts(machine, snapshot, event);
+    !step.snapshotReused ==>
+      step.snapshot.context == runLifecycle(machine.nodes, parts.entries, parts.entryContext, event, false).context
+{
+}
+
+// A step that completes nothing keeps the step's snapshot and effects, and a
+// step that completes the machine keeps its configuration. In both cases the
+// entered context equals the step's context.
+lemma {:isolate_assertions} ParallelMicroKeepsStep(machine: ParallelMachine, outputs: ParallelOutputs,
+  state: ParallelState, event: Event, pending: seq<Event>)
+  requires ParallelWellFormed(machine) && !state.done
+  ensures var step := parallelStep(machine, state.snapshot, event);
+    var micro := parallelMicrostep(machine, outputs, state, event, pending);
+    !step.snapshotReused ==>
+      micro.state.snapshot.active == step.snapshot.active &&
+      (!micro.state.done ==> micro.state.snapshot == step.snapshot && micro.effects == step.effects) &&
+      (micro.state.done <==> micro.state.output.Some?) &&
+      (micro.state.done ==>
+        micro.state.snapshot.context ==
+          runLifecycle(machine.nodes, reverse(step.snapshot.active), step.snapshot.context, event, true).context)
+{
+  hide *;
+  var step := parallelStep(machine, state.snapshot, event);
+  if !step.snapshotReused {
+    reveal parallelMicrostep();
+    var parts := parallelParts(machine, state.snapshot, event);
+    var entered := parallelEnter(machine, outputs, step.snapshot.active, parts.entries, 0, parts.entryContext, event,
+      pending + parts.raised, []);
+    assert parallelMicrostep(machine, outputs, state, event, pending) == parallelFinish(machine, step, parts, entered, event);
+    reveal parallelFinish();
+    EnteredDoneHasOutput(machine, outputs, step.snapshot.active, parts.entries, 0, parts.entryContext, event,
+      pending + parts.raised, []);
+  }
+}
+
+// An entry pass that completes the machine reports its output.
+lemma {:induction false} EnteredDoneHasOutput(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  decreases |entries| - index
+  ensures var e := parallelEnter(machine, outputs, next, entries, index, context, event, queue, completed);
+    e.done ==> e.output.Some?
+{
+  if 0 <= index < |entries| {
+    var entered := runLifecycle(machine.nodes, [entries[index]], context, event, false);
+    var queued := queue + entered.raises;
+    var final := finalEntered(machine, outputs, next, entries, index, entered.context, event, queued, completed);
+    FinalEnteredDoneHasOutput(machine, outputs, next, entries, index, entered.context, event, queued, completed);
+    EnteredDoneHasOutput(machine, outputs, next, entries, index + 1, entered.context, event, queued + final.raised, final.completed);
+  }
+}
+
+lemma FinalEnteredDoneHasOutput(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  ensures var f := finalEntered(machine, outputs, next, entries, index, context, event, queue, completed);
+    f.done <==> f.output.Some?
+{
+  if 0 <= index < |entries| && entries[index] in machine.nodes {
+    var node := machine.nodes[entries[index]];
+    var path := node.path;
+    if node.final && |path| >= 2 {
+      var parent := path[|path| - 2];
+      if parent in machine.parallels {
+        ClimbBookkeeping(machine, outputs, next, entries, index, context, event, queue, completed, parent, |machine.order|);
+      } else if |path| >= 3 {
+        var done := doneEvent(parent, node.output(context, event));
+        ClimbBookkeeping(machine, outputs, next, entries, index, context, event, queue + [done], completed, path[|path| - 3], |machine.order|);
+      }
+    }
+  }
+}
+
+// A microstep from a valid configuration leaves a valid configuration.
+lemma ParallelMicroValid(machine: ParallelMachine, outputs: ParallelOutputs,
+  state: ParallelState, event: Event, pending: seq<Event>)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, state.snapshot.active)
+  requires parallelStepReady(machine, state.snapshot, event)
+  ensures ParallelValid(machine, parallelMicrostep(machine, outputs, state, event, pending).state.snapshot.active)
+{
+  if !state.done && !parallelStep(machine, state.snapshot, event).snapshotReused {
+    MultiStepValid(machine, state.snapshot, event);
+  }
+}
+
+// Settling a done machine stops at once and discards the queue.
+lemma ParallelSettleDone(machine: ParallelMachine, outputs: ParallelOutputs, step: ParallelMicro,
+  queue: seq<Event>, remaining: int)
+  requires step.state.done
+  ensures parallelSettle(machine, outputs, step, queue, remaining) == ParallelMacrostep(true, false, step, [], [])
+{
+}
+
+// An active machine with an exhausted budget reports an unsettled macrostep,
+// keeping its queue.
+lemma ParallelSettleBudget(machine: ParallelMachine, outputs: ParallelOutputs, step: ParallelMicro,
+  queue: seq<Event>, remaining: int)
+  requires !step.state.done && remaining <= 0
+  ensures parallelSettle(machine, outputs, step, queue, remaining) == ParallelMacrostep(false, false, step, queue, [])
+{
+}
+
+// A queued event the step model cannot represent refuses the macrostep before
+// any of its effects.
+lemma ParallelSettleRefuses(machine: ParallelMachine, outputs: ParallelOutputs, step: ParallelMicro,
+  queue: seq<Event>, remaining: int)
+  requires !step.state.done && remaining > 0 && |queue| > 0
+  requires !parallelStepReady(machine, step.state.snapshot, queue[0])
+  ensures parallelSettle(machine, outputs, step, queue, remaining) == ParallelMacrostep(false, true, step, queue, [])
+{
+}
+
+// Raised and done events are processed first-in, first-out; a microstep's
+// raises reach the back of the queue, and the rest of the queue is visible to
+// the microstep's region outputs.
+lemma ParallelSettleDequeue(machine: ParallelMachine, outputs: ParallelOutputs, step: ParallelMicro,
+  queue: seq<Event>, remaining: int)
+  requires !step.state.done && remaining > 0 && |queue| > 0
+  requires parallelStepReady(machine, step.state.snapshot, queue[0])
+  ensures var next := parallelMicrostep(machine, outputs, step.state, queue[0], queue[1..]);
+    var advanced := ParallelMicro(next.state, step.snapshotReused && next.snapshotReused,
+      step.contextReused && next.contextReused, step.effects + next.effects, step.raised + next.raised);
+    var rest := parallelSettle(machine, outputs, advanced, queue[1..] + next.raised, remaining - 1);
+    parallelSettle(machine, outputs, step, queue, remaining) ==
+      ParallelMacrostep(rest.settled, rest.refused, rest.step, rest.queue, [next] + rest.trace)
+{
+}
+
+// Every microstep of a settled macrostep, and its final state, keeps a valid
+// configuration.
+lemma {:induction false} ParallelSettleValid(machine: ParallelMachine, outputs: ParallelOutputs, step: ParallelMicro,
+  queue: seq<Event>, remaining: int)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, step.state.snapshot.active)
+  decreases remaining
+  ensures var m := parallelSettle(machine, outputs, step, queue, remaining);
+    ParallelValid(machine, m.step.state.snapshot.active) &&
+    forall i :: 0 <= i < |m.trace| ==> ParallelValid(machine, m.trace[i].state.snapshot.active)
+{
+  if !step.state.done && remaining > 0 && |queue| > 0 && parallelStepReady(machine, step.state.snapshot, queue[0]) {
+    var next := parallelMicrostep(machine, outputs, step.state, queue[0], queue[1..]);
+    ParallelMicroValid(machine, outputs, step.state, queue[0], queue[1..]);
+    var advanced := ParallelMicro(next.state, step.snapshotReused && next.snapshotReused,
+      step.contextReused && next.contextReused, step.effects + next.effects, step.raised + next.raised);
+    ParallelSettleValid(machine, outputs, advanced, queue[1..] + next.raised, remaining - 1);
+    ParallelSettleDequeue(machine, outputs, step, queue, remaining);
+    var rest := parallelSettle(machine, outputs, advanced, queue[1..] + next.raised, remaining - 1);
+    forall i | 0 <= i < |[next] + rest.trace|
+      ensures ParallelValid(machine, ([next] + rest.trace)[i].state.snapshot.active)
+    {
+      if i > 0 { assert ([next] + rest.trace)[i] == rest.trace[i - 1]; }
+    }
+  }
+}
+
+// Initialization keeps the initial configuration whether or not it completes
+// the machine.
+lemma ParallelInitialMicroValid(machine: ParallelMachine, outputs: ParallelOutputs, event: Event)
+  requires ParallelWellFormed(machine)
+  ensures ParallelValid(machine, parallelInitialMicro(machine, outputs, event).state.snapshot.active)
+{
+  ParallelInitialValid(machine, event);
+}
+
+// While entering `entries[index]`, a node counts as active when the step's
+// next configuration holds it and no later entry enters it.
+lemma ActiveAtMeaning(next: seq<string>, entries: seq<string>, index: int, id: string)
+  requires 0 <= index
+  ensures activeAt(next, entries, index, id) <==>
+    id in next && forall j :: index < j < |entries| ==> entries[j] != id
+{
+  if id in next && index + 1 < |entries| {
+    var later := entries[index + 1..];
+    assert forall k :: 0 <= k < |later| ==> later[k] == entries[k + index + 1];
+    assert forall j :: index < j < |entries| ==> entries[j] == later[j - index - 1];
+  }
+}
+
+lemma SeqAllMeaning<T>(xs: seq<T>, p: T -> bool)
+  ensures SeqAll(xs, p) <==> forall x :: x in xs ==> p(x)
+{
+  if |xs| > 0 {
+    SeqAllMeaning(xs[1..], p);
+    assert forall x :: x in xs <==> x == xs[0] || x in xs[1..];
+  }
+}
+
+// The runtime's final test: a parallel is final when all its regions are, a
+// compound node when one of its final children is active, and an atomic node
+// when it is a final node, whether or not it has been entered yet.
+lemma FinalAtMeaning(machine: ParallelMachine, next: seq<string>, entries: seq<string>, index: int, id: string, fuel: int)
+  requires fuel > 0 && id in machine.nodes
+  ensures var node := machine.nodes[id];
+    finalAt(machine, next, entries, index, id, fuel) <==>
+      if id in machine.parallels then
+        forall child :: child in node.children ==> finalAt(machine, next, entries, index, child, fuel - 1)
+      else if |node.children| == 0 then node.final
+      else (exists child ::
+              child in node.children && child in machine.nodes &&
+              machine.nodes[child].final && activeAt(next, entries, index, child))
+{
+  var node := machine.nodes[id];
+  SeqAllMeaning(node.children, (child: string) => finalAt(machine, next, entries, index, child, fuel - 1));
+}
+
+// A done machine processes no events.
+lemma ParallelDoneInert(machine: ParallelMachine, outputs: ParallelOutputs,
+  state: ParallelState, event: Event, pending: seq<Event>)
+  requires state.done
+  ensures parallelMicrostep(machine, outputs, state, event, pending) == ParallelMicro(state, true, true, [], [])
+{
 }

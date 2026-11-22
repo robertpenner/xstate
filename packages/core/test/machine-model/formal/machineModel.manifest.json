@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 742,
+  "verifiedCount": 883,
   "functions": [
     "mergePatch",
     "apply",
@@ -67,7 +67,23 @@
     "compoundCompletion",
     "compoundSettle",
     "compoundInitialMacrostep",
-    "compoundMacrostep"
+    "compoundMacrostep",
+    "parallelParts",
+    "activeAt",
+    "finalAt",
+    "queuedOutput",
+    "finalChildOutput",
+    "regionOutput",
+    "regionOutputs",
+    "climb",
+    "finalEntered",
+    "parallelEnter",
+    "parallelFinish",
+    "parallelInitialMicro",
+    "parallelMicrostep",
+    "parallelSettle",
+    "parallelInitialMacrostep",
+    "parallelMacrostep"
   ],
   "contracts": [
     "mergePatch_ensures",
@@ -94,7 +110,9 @@
     "parallelStep_ensures",
     "eventlessStep_ensures",
     "takeTransition_ensures",
-    "completion_ensures"
+    "completion_ensures",
+    "regionOutputs_ensures",
+    "parallelMicrostep_ensures"
   ],
   "specFunctions": [
     "Selected",
@@ -151,7 +169,8 @@
     "OnDeclared",
     "Proceeds",
     "TraceRaised",
-    "Done"
+    "Done",
+    "ParentOf"
   ],
   "laws": [
     "LastPatchCons",
@@ -354,7 +373,27 @@
     "CompoundSettleDequeue",
     "CompoundSettleBudget",
     "CompoundInitialCompletion",
-    "NestedDoneNamesParent"
+    "NestedDoneNamesParent",
+    "ClimbBookkeeping",
+    "NonFinalEntryInert",
+    "FinalRegionClimbs",
+    "FinalChildQueuesParentDone",
+    "ParallelEnterLifecycle",
+    "ParallelPartsAgree",
+    "ParallelMicroKeepsStep",
+    "EnteredDoneHasOutput",
+    "FinalEnteredDoneHasOutput",
+    "ParallelMicroValid",
+    "ParallelSettleDone",
+    "ParallelSettleBudget",
+    "ParallelSettleRefuses",
+    "ParallelSettleDequeue",
+    "ParallelSettleValid",
+    "ParallelInitialMicroValid",
+    "ActiveAtMeaning",
+    "SeqAllMeaning",
+    "FinalAtMeaning",
+    "ParallelDoneInert"
   ],
   "defects": [
     {
@@ -679,8 +718,8 @@
     },
     {
       "name": "compound completion keeps the queue",
-      "before": "    return { settled: true, refused: false, step, queue: [], trace: [] };",
-      "after": "    return { settled: true, refused: false, step, queue, trace: [] };"
+      "before": "  if (compoundDone(machine, step.snapshot.path))\n    return { settled: true, refused: false, step, queue: [], trace: [] };",
+      "after": "  if (compoundDone(machine, step.snapshot.path))\n    return { settled: true, refused: false, step, queue, trace: [] };"
     },
     {
       "name": "compound budget checked before completion",
@@ -689,8 +728,8 @@
     },
     {
       "name": "compound raised events processed last-in first-out",
-      "before": "    [...queue.slice(1), ...next.raised],",
-      "after": "    [...next.raised, ...queue.slice(1)],"
+      "before": "      snapshot: next.snapshot,\n      snapshotReused: step.snapshotReused && next.snapshotReused,\n      contextReused: step.contextReused && next.contextReused,\n      effects: [...step.effects, ...next.effects],\n      raised: [...step.raised, ...next.raised]\n    },\n    [...queue.slice(1), ...next.raised],",
+      "after": "      snapshot: next.snapshot,\n      snapshotReused: step.snapshotReused && next.snapshotReused,\n      contextReused: step.contextReused && next.contextReused,\n      effects: [...step.effects, ...next.effects],\n      raised: [...step.raised, ...next.raised]\n    },\n    [...next.raised, ...queue.slice(1)],"
     },
     {
       "name": "done compound machine still transitions",
@@ -701,6 +740,96 @@
       "name": "compound initialization skips completion",
       "before": "  const done = compoundCompletion(machine, path, true, entered.context, event);",
       "after": "  const done = compoundCompletion(machine, path, false, entered.context, event);"
+    },
+    {
+      "name": "parallel completes twice in one microstep",
+      "before": "    !machine.parallels.includes(marker) ||\n    completed.includes(marker) ||\n",
+      "after": "    !machine.parallels.includes(marker) ||\n"
+    },
+    {
+      "name": "parallel completes before its regions are final",
+      "before": "    !finalAt(machine, next, entries, index, marker, machine.order.length)\n  )",
+      "after": "    false\n  )"
+    },
+    {
+      "name": "climb forgets the completed parallel",
+      "before": "    [...completed, marker],\n    path[path.length - 2],",
+      "after": "    completed,\n    path[path.length - 2],"
+    },
+    {
+      "name": "climb skips a parallel ancestor",
+      "before": "    path[path.length - 2],\n    fuel - 1\n  );",
+      "after": "    path[0],\n    fuel - 1\n  );"
+    },
+    {
+      "name": "parallel root completion leaves the machine active",
+      "before": "      completed: [...completed, marker],\n      done: true,",
+      "after": "      completed: [...completed, marker],\n      done: false,"
+    },
+    {
+      "name": "compound root completion ignores the root output",
+      "before": "      output: outputs.hasOutput\n        ? rootOutput(context, doneEvent(id, finalOutput))\n        : finalOutput",
+      "after": "      output: finalOutput"
+    },
+    {
+      "name": "compound done event follows the parallel done events",
+      "before": "  return {\n    raised: [done, ...rest.raised],\n    completed: rest.completed,\n    done: rest.done,\n    output: rest.output\n  };\n}\n\n// Entries run",
+      "after": "  return {\n    raised: [...rest.raised, done],\n    completed: rest.completed,\n    done: rest.done,\n    output: rest.output\n  };\n}\n\n// Entries run"
+    },
+    {
+      "name": "final region climbs from the root",
+      "before": "      queue,\n      completed,\n      parent,\n      fuel\n    );",
+      "after": "      queue,\n      completed,\n      path[0],\n      fuel\n    );"
+    },
+    {
+      "name": "later entries start from the planned context",
+      "before": "    index + 1,\n    entered.context,",
+      "after": "    index + 1,\n    context,"
+    },
+    {
+      "name": "completed machine skips its exits",
+      "before": "    reverse(active),\n    step.snapshot.context,",
+      "after": "    [],\n    step.snapshot.context,"
+    },
+    {
+      "name": "completed machine clears its configuration",
+      "before": "      snapshot: { active, context: exited.context },",
+      "after": "      snapshot: { active: [], context: exited.context },"
+    },
+    {
+      "name": "completion enters from the snapshot context",
+      "before": "    entries,\n    entryContext: updated.context\n  };",
+      "after": "    entries,\n    entryContext: snapshot.context\n  };"
+    },
+    {
+      "name": "current entry counts as a later entry",
+      "before": "entries.slice(index + 1).includes(id)",
+      "after": "entries.slice(index).includes(id)"
+    },
+    {
+      "name": "compound node is final without an active final child",
+      "before": "      lookupNode(nodes, child).final &&\n      activeAt(next, entries, index, child)\n",
+      "after": "      lookupNode(nodes, child).final\n"
+    },
+    {
+      "name": "done parallel machine keeps settling",
+      "before": "  if (step.state.done)\n    return { settled: true, refused: false, step, queue: [], trace: [] };\n  if (remaining <= 0)\n    return { settled: false, refused: false, step, queue, trace: [] };\n  if (queue.length === 0)\n    return { settled: true, refused: false, step, queue, trace: [] };\n  if (!parallelStepReady",
+      "after": "  if (remaining <= 0)\n    return { settled: false, refused: false, step, queue, trace: [] };\n  if (queue.length === 0)\n    return { settled: true, refused: false, step, queue, trace: [] };\n  if (!parallelStepReady"
+    },
+    {
+      "name": "parallel settle skips the readiness check",
+      "before": "  if (!parallelStepReady(machine, step.state.snapshot, queue[0]))\n    return { settled: false, refused: true, step, queue, trace: [] };\n  const next = parallelMicrostep(",
+      "after": "  const next = parallelMicrostep("
+    },
+    {
+      "name": "parallel settle drops microstep raises",
+      "before": "  const rest = parallelSettle(\n    machine,\n    outputs,\n    {\n      state: next.state,\n      snapshotReused: step.snapshotReused && next.snapshotReused,\n      contextReused: step.contextReused && next.contextReused,\n      effects: [...step.effects, ...next.effects],\n      raised: [...step.raised, ...next.raised]\n    },\n    [...queue.slice(1), ...next.raised],\n    remaining - 1",
+      "after": "  const rest = parallelSettle(\n    machine,\n    outputs,\n    {\n      state: next.state,\n      snapshotReused: step.snapshotReused && next.snapshotReused,\n      contextReused: step.contextReused && next.contextReused,\n      effects: [...step.effects, ...next.effects],\n      raised: [...step.raised, ...next.raised]\n    },\n    queue.slice(1),\n    remaining - 1"
+    },
+    {
+      "name": "done parallel machine takes transitions",
+      "before": "  // A done machine processes no events.\n  if (state.done) return unchanged;\n  const step = parallelStep(",
+      "after": "  const step = parallelStep("
     }
   ],
   "proofDefects": [
