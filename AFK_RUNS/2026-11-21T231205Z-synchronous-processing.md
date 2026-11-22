@@ -202,20 +202,26 @@ Each entry says what was observed, where, and what happened to it.
    atomic state's ancestor chain, while `transitionNode` lets a region's
    handler hide the parallel ancestor's handler. Evidence: probe
    `[runtime][v5] selects eventless transitions per atomic state but events
-region-first` and v5 probe `V5`. Filed as statelyai/xstate#5948.
+region-first` and v5 probe `V5`. Filed as statelyai/xstate#5948, closed
+   by statelyai/xstate#5950, which changed both to per-leaf SCXML-style
+   selection.
 2. **Simultaneous eventless patches lose a write** (runtime, v6 only). Two
    eventless transitions selected in one microstep both compute patches from
    the pre-step context, and the later one in document order wins. v5 runs
    `assign` actions in sequence. Included in statelyai/xstate#5948.
 3. **Root `output` ignores exit-function context** (runtime, v5 too). Exit
    functions run after `getMachineOutput` at completion. Filed as
-   statelyai/xstate#5949.
+   statelyai/xstate#5949, closed by statelyai/xstate#5951, which documents
+   the order as intended.
 4. **An empty context patch from `always` loops forever** (runtime).
    `mergeContextPatch` returns a new object for `{}`, so the reselection rule
    sees a new snapshot. Evidence: probe `[runtime] loops on an eventless
 callback that returns an empty context patch`. Not filed, by decision 4 in
    `SYNCHRONOUS_PROCESSING.md`; the owner's statelyai/xstate#5945 covers the
-   `xstate/fsm` counterpart.
+   `xstate/fsm` counterpart and already mentions the `createMachine` loop on
+   `{ context }` patches. On upstream `next` (a82fa99), `() => ({})` settles,
+   while `{ context: {} }`, a same-value patch, and `({ context })` loop. v5
+   `assign` loops the same way. Not filed after the due-diligence review.
 5. **The preconstruct dev entry cannot be imported as ESM** (tooling).
    `packages/core/dist/xstate.cjs.js` in a dev checkout is a Babel
    require-hook stub; `import` from Node fails, `require` works, and Node's
@@ -231,13 +237,17 @@ callback that returns an empty context patch`. Not filed, by decision 4 in
    the last entry of the microstep list, so `getMicrosteps` reports a
    different object for that microstep than the loop used to decide
    reselection. Inferred from reading `completeMacrostep`; no test exercises
-   it. The adapter compares snapshot identity per macrostep only.
+   it. The adapter compares snapshot identity per macrostep only. Not
+   observable through the public API; not filed.
 8. **An unhandled event returns the previous snapshot together with eventless
    effects** (runtime observation). With an effect-only `always`, sending an
    unhandled event returns the same snapshot object and a non-empty effect
    list. Consistent with "unchanged snapshot", but callers that treat
    `snapshot === previous` as "nothing happened" would skip those effects.
-   Not filed.
+   On v6 this contradicts the documented `transition` contract:
+   `isUnhandled` returns `false` and `onUnhandledEvent` is not called. v5
+   also returns the same snapshot with the action. Filed as a question,
+   statelyai/xstate#5958.
 9. **Runtime-defect test filters are regular expressions** (tooling, this
    repo). A test name containing `+` passed to `vitest -t` matched no tests;
    vitest exited 0 and the lane failed with "Undetected runtime defect", which
@@ -261,7 +271,9 @@ callback that returns an empty context patch`. Not filed, by decision 4 in
     on entering `b` is dequeued after `p` has left its final child and still
     takes `p.onDone`. Evidence: a scratch probe outside the repo; no committed
     test runs this machine. The model adapter refuses any transitions on final
-    nodes. Not filed yet.
+    nodes. Reproduces on v5.33.4, v6.0.0-beta.4, and upstream `next`; the
+    upstream docs say final states take no transitions. Filed as
+    statelyai/xstate#5955.
 12. **Wall-clock proof timeouts under shared load** (tooling). With the load
     average between 30 and 55, lemmas that verify in a few seconds alone
     (`PlanFromFacts`, `SettleAccumulates`, `DomainActive`) intermittently pass
@@ -300,19 +312,23 @@ callback that returns an empty context patch`. Not filed, by decision 4 in
     `{ N: { n1: 'n1', n2: 'n2' }, R: 'r' }`. Compound regions do not have this
     problem because their output is reevaluated from the active final child.
     Evidence: `parallelCompletion.test.ts` test `loses the output of a nested
-parallel region that completed earlier`. Not filed yet.
+parallel region that completed earlier`. Reproduces on v6.0.0-beta.4 and
+    upstream `next`; v5 does not aggregate region outputs. Filed with bug 16
+    as statelyai/xstate#5956.
 16. **Region outputs in a parallel done event are reevaluated** (runtime
     observation). A compound region's own done event carries its final
     child's output evaluated on entry, but the parallel done event evaluates
     that output again with the context current when the last region finishes.
     In the probe, region `R`'s done event carried `1` and the parallel's
-    output reported `R: 2` after a context update in between.
+    output reported `R: 2` after a context update in between. An output
+    mapper that reads `event` receives the event that completed the last
+    region. Included in statelyai/xstate#5956.
 17. **An already complete parallel completes again** (runtime observation,
     SCXML-consistent). While every region stays final, a region transition
     from one final child to another queues the region's done event and then
     the parallel's done event a second time. `completedNodes` only prevents a
     second done event within one microstep. SCXML's `enterStates` behaves the
-    same way, so the model mirrors it.
+    same way, so the model mirrors it. v5 behaves the same; not filed.
 18. **An atomic final region counts as final before it is entered** (runtime,
     no SCXML counterpart). The runtime's `isInFinalState` treats an atomic node
     as final when its type is `final`, without checking that it is active. A
@@ -326,5 +342,7 @@ parallel region that completed earlier`. Not filed yet.
     `parallelCompletion.test.ts` test
     `queues the done event of atomic final regions between their entry raises`,
     which also rejects the runtime
-    mutant `a parallel node completes more than once in one microstep`. Not
-    filed yet.
+    mutant `a parallel node completes more than once in one microstep`.
+    Reproduces on v5.33.4, v6.0.0-beta.4, and upstream `next`; the parallel's
+    output also runs before `y`'s `entry`, contradicting the upstream docs.
+    Filed as statelyai/xstate#5957.
