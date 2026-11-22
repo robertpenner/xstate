@@ -1,13 +1,15 @@
 # AFK Run — Synchronous processing (#23 PRD, #34–#38)
 
-**Status:** active
+**Status:** completed
 
 **Branch:** `machine-sync-34-38`, in the sibling worktree `xstate-sync-model`,
 based on `investigate/sync-event-processing` (PR #33) at `dbe2265`.
 
-**Pull request:** [#39](https://github.com/robertpenner/xstate/pull/39) (draft), base `investigate/sync-event-processing`.
+**Pull request:** [#39](https://github.com/robertpenner/xstate/pull/39) (ready for review), base `investigate/sync-event-processing`.
 
 **Started:** 2026-11-21 23:12:05 UTC
+
+**Ended:** 2026-11-22 10:35:15 UTC (duration 11 h 23 min, measured with `date -u`)
 
 **Goal:** Extend the verified machine model to eventless transitions (#34),
 immediate raised events (#35), completion (#37), and combined compound and
@@ -179,6 +181,16 @@ On `f756e58`, in the worktree:
 - `pnpm build`, `pnpm typecheck`, `pnpm lint`, `pnpm format:check`: exit 0.
 - `pnpm test:core`: 3352 passed, 28 skipped, 3 todo (206 files).
 - `pnpm test:machine-model`: 259 passed (16 files).
+
+Hosted CI on `d7b95b3`: `Node CI` run 45012402249, job `build` passed in
+9m5s.
+
+**Result:** #34 to #38 are integrated and verified on PR #39, which is ready
+for review. The model proves 223 laws over 887 Dafny tasks and rejects 88
+model defects and 19 runtime mutants. Two upstream reports were filed
+(statelyai/xstate#5948, statelyai/xstate#5949); 18 potential bugs are listed
+below. Bugs 11, 15, and 18 are runtime behaviors that have not been reported
+upstream; bug 4 is deliberately not filed (decision 4).
 
 ### Potential bugs
 
