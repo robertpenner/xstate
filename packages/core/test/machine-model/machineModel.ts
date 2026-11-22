@@ -7,9 +7,11 @@ export type Result = {
   patch: readonly PatchEntry[] | undefined;
   reenter: boolean;
 };
+// Raised events stay apart from ordinary effects: the runtime queues them.
 export type Evaluation = {
   result: Result | undefined;
   effects: readonly Effect[];
+  raises: readonly Event[];
 };
 export type Node = {
   on: Map<
@@ -31,11 +33,13 @@ export type Step = {
   snapshotReused: boolean;
   contextReused: boolean;
   effects: readonly Effect[];
+  raised: readonly Event[];
 };
 // A macrostep that runs out of budget is unfinished: settled is false.
 export type Macrostep = {
   settled: boolean;
   step: Step;
+  queue: readonly Event[];
   trace: readonly Step[];
 };
 
@@ -75,7 +79,7 @@ export function apply(
 export function emptyEvaluation(): Evaluation {
   //@ verify
   //@ ensures \result.result === undefined
-  return { result: undefined, effects: [] };
+  return { result: undefined, effects: [], raises: [] };
 }
 
 export function initialTransition(machine: Machine, event: Event): Step {
@@ -83,15 +87,15 @@ export function initialTransition(machine: Machine, event: Event): Step {
   //@ ensures \result.snapshot.value === machine.initial
   const node = machine.states.get(machine.initial);
   const entry = node === undefined ? undefined : node.entry;
-  const applied = apply(
-    machine.context,
-    entry === undefined ? emptyEvaluation() : entry(machine.context, event)
-  );
+  const entering =
+    entry === undefined ? emptyEvaluation() : entry(machine.context, event);
+  const applied = apply(machine.context, entering);
   return {
     snapshot: { value: machine.initial, context: applied.context },
     snapshotReused: false,
     contextReused: applied.reused,
-    effects: applied.effects
+    effects: applied.effects,
+    raised: entering.raises
   };
 }
 
@@ -120,8 +124,18 @@ export function takeTransition(
 ): Step {
   //@ verify
   //@ ensures \result.snapshotReused ==> \result.snapshot === snapshot
-  if (selected.result === undefined && selected.effects.length === 0) {
-    return { snapshot, snapshotReused: true, contextReused: true, effects: [] };
+  if (
+    selected.result === undefined &&
+    selected.effects.length === 0 &&
+    selected.raises.length === 0
+  ) {
+    return {
+      snapshot,
+      snapshotReused: true,
+      contextReused: true,
+      effects: [],
+      raised: []
+    };
   }
   const result = selected.result;
   const target = result === undefined ? undefined : result.target;
@@ -129,26 +143,25 @@ export function takeTransition(
   const reenter = result === undefined ? false : result.reenter;
   const changes = target !== undefined && (next !== snapshot.value || reenter);
   const exit = node === undefined ? undefined : node.exit;
-  const exited = apply(
-    snapshot.context,
+  const exiting =
     changes && exit !== undefined
       ? exit(snapshot.context, event)
-      : emptyEvaluation()
-  );
+      : emptyEvaluation();
+  const exited = apply(snapshot.context, exiting);
   const updated = apply(exited.context, selected);
   const destination = machine.states.get(next);
   const entry = destination === undefined ? undefined : destination.entry;
-  const entered = apply(
-    updated.context,
+  const entering =
     changes && entry !== undefined
       ? entry(updated.context, event)
-      : emptyEvaluation()
-  );
+      : emptyEvaluation();
+  const entered = apply(updated.context, entering);
   return {
     snapshot: { value: next, context: entered.context },
     snapshotReused: false,
     contextReused: exited.reused && updated.reused && entered.reused,
-    effects: [...exited.effects, ...updated.effects, ...entered.effects]
+    effects: [...exited.effects, ...updated.effects, ...entered.effects],
+    raised: [...exiting.raises, ...selected.raises, ...entering.raises]
   };
 }
 
@@ -187,42 +200,58 @@ export function eventlessStep(
     snapshot: kept ? snapshot : taken.snapshot,
     snapshotReused: kept,
     contextReused: taken.contextReused,
-    effects: taken.effects
+    effects: taken.effects,
+    raised: taken.raised
   };
 }
 
 // Each call is one iteration of the runtime's macrostep loop, which counts
-// the final selection that finds nothing enabled.
+// the final selection that finds nothing enabled. Eventless transitions run
+// before the next raised event is dequeued; after a dequeue they are always
+// reselected and see the dequeued event.
 export function settle(
   machine: Machine,
   step: Step,
   event: Event,
   select: boolean,
+  queue: readonly Event[],
   remaining: number
 ): Macrostep {
   //@ verify
   //@ decreases remaining
-  if (remaining <= 0) return { settled: false, step, trace: [] };
-  if (!select) return { settled: true, step, trace: [] };
-  const selected = alwaysSelected(machine, step.snapshot, event);
-  const enabled = selected.result !== undefined || selected.effects.length > 0;
-  if (!enabled) return { settled: true, step, trace: [] };
-  const next = eventlessStep(machine, step.snapshot, event, selected);
+  if (remaining <= 0) return { settled: false, step, queue, trace: [] };
+  const selected = select
+    ? alwaysSelected(machine, step.snapshot, event)
+    : emptyEvaluation();
+  const enabled =
+    selected.result !== undefined ||
+    selected.effects.length > 0 ||
+    selected.raises.length > 0;
+  if (!enabled && queue.length === 0)
+    return { settled: true, step, queue, trace: [] };
+  const processed = enabled ? event : queue[0];
+  const next = enabled
+    ? eventlessStep(machine, step.snapshot, event, selected)
+    : transition(machine, step.snapshot, processed);
+  const waiting = enabled ? queue : queue.slice(1);
   const rest = settle(
     machine,
     {
       snapshot: next.snapshot,
       snapshotReused: step.snapshotReused && next.snapshotReused,
       contextReused: step.contextReused && next.contextReused,
-      effects: [...step.effects, ...next.effects]
+      effects: [...step.effects, ...next.effects],
+      raised: [...step.raised, ...next.raised]
     },
-    event,
-    !next.snapshotReused,
+    processed,
+    !enabled || !next.snapshotReused,
+    [...waiting, ...next.raised],
     remaining - 1
   );
   return {
     settled: rest.settled,
     step: rest.step,
+    queue: rest.queue,
     trace: [next, ...rest.trace]
   };
 }
@@ -233,13 +262,8 @@ export function initialMacrostep(
   maxIterations: number
 ): Macrostep {
   //@ verify
-  return settle(
-    machine,
-    initialTransition(machine, event),
-    event,
-    true,
-    maxIterations
-  );
+  const first = initialTransition(machine, event);
+  return settle(machine, first, event, true, first.raised, maxIterations);
 }
 
 export function transitionMacrostep(
@@ -249,13 +273,8 @@ export function transitionMacrostep(
   maxIterations: number
 ): Macrostep {
   //@ verify
-  return settle(
-    machine,
-    transition(machine, snapshot, event),
-    event,
-    true,
-    maxIterations
-  );
+  const first = transition(machine, snapshot, event);
+  return settle(machine, first, event, true, first.raised, maxIterations);
 }
 
 export type CompoundNode = {

@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 521,
+  "verifiedCount": 568,
   "functions": [
     "mergePatch",
     "apply",
@@ -132,7 +132,16 @@
     "AlwaysEnabled",
     "NextEventless",
     "NodeAt",
-    "TraceEffects"
+    "TraceEffects",
+    "Continues",
+    "FinalEvent",
+    "NextEvent",
+    "NextQueue",
+    "NextSelect",
+    "NextStep",
+    "OnDeclared",
+    "Proceeds",
+    "TraceRaised"
   ],
   "laws": [
     "LastPatchCons",
@@ -313,7 +322,12 @@
     "SettleSteps",
     "SettleStops",
     "SettleUnfold",
-    "SettleValid"
+    "SettleValid",
+    "DequeueDeclared",
+    "DequeueUnhandled",
+    "MacrostepQueues",
+    "SettleDequeue",
+    "SettleEventless"
   ],
   "defects": [
     {
@@ -348,8 +362,8 @@
     },
     {
       "name": "unhandled event copies snapshot",
-      "before": "if (selected.result === undefined && selected.effects.length === 0) {\n    return { snapshot, snapshotReused: true, contextReused: true, effects: [] };",
-      "after": "if (selected.result === undefined && selected.effects.length === 0) {\n    return { snapshot, snapshotReused: false, contextReused: true, effects: [] };"
+      "before": "      snapshotReused: true,\n      contextReused: true,\n      effects: [],\n      raised: []",
+      "after": "      snapshotReused: false,\n      contextReused: true,\n      effects: [],\n      raised: []"
     },
     {
       "name": "reversed lifecycle effects",
@@ -368,8 +382,8 @@
     },
     {
       "name": "effect-only transition declines",
-      "before": "selected.result === undefined && selected.effects.length === 0",
-      "after": "selected.result === undefined && selected.effects.length >= 0"
+      "before": "selected.effects.length === 0 &&\n    selected.raises.length === 0",
+      "after": "selected.effects.length >= 0 &&\n    selected.raises.length === 0"
     },
     {
       "name": "ignored self reentry",
@@ -498,18 +512,18 @@
     },
     {
       "name": "eventless identity step is reselected",
-      "before": "    !next.snapshotReused,\n    remaining - 1",
-      "after": "    true,\n    remaining - 1"
+      "before": "    !enabled || !next.snapshotReused,",
+      "after": "    true,"
     },
     {
       "name": "macrostep budget allows one extra iteration",
-      "before": "if (remaining <= 0) return { settled: false, step, trace: [] };",
-      "after": "if (remaining < 0) return { settled: false, step, trace: [] };"
+      "before": "if (remaining <= 0) return { settled: false, step, queue, trace: [] };",
+      "after": "if (remaining < 0) return { settled: false, step, queue, trace: [] };"
     },
     {
       "name": "settled check precedes the budget check",
-      "before": "  if (remaining <= 0) return { settled: false, step, trace: [] };\n  if (!select) return { settled: true, step, trace: [] };",
-      "after": "  if (!select) return { settled: true, step, trace: [] };\n  if (remaining <= 0) return { settled: false, step, trace: [] };"
+      "before": "  if (remaining <= 0) return { settled: false, step, queue, trace: [] };\n  const selected",
+      "after": "  if (remaining <= 0 && !select && queue.length === 0)\n    return { settled: true, step, queue, trace: [] };\n  if (remaining <= 0) return { settled: false, step, queue, trace: [] };\n  const selected"
     },
     {
       "name": "macrostep snapshot reuse reads only the last step",
@@ -538,8 +552,58 @@
     },
     {
       "name": "effect-only eventless transitions are not enabled",
-      "before": "const enabled = selected.result !== undefined || selected.effects.length > 0;",
-      "after": "const enabled = selected.result !== undefined;"
+      "before": "    selected.result !== undefined ||\n    selected.effects.length > 0 ||\n    selected.raises.length > 0;",
+      "after": "    selected.result !== undefined ||\n    selected.raises.length > 0;"
+    },
+    {
+      "name": "raised events join the front of the queue",
+      "before": "[...waiting, ...next.raised]",
+      "after": "[...next.raised, ...waiting]"
+    },
+    {
+      "name": "transition raises are dropped",
+      "before": "raised: [...exiting.raises, ...selected.raises, ...entering.raises]",
+      "after": "raised: [...exiting.raises, ...entering.raises]"
+    },
+    {
+      "name": "entry raises precede exit raises",
+      "before": "raised: [...exiting.raises, ...selected.raises, ...entering.raises]",
+      "after": "raised: [...entering.raises, ...selected.raises, ...exiting.raises]"
+    },
+    {
+      "name": "a dequeue skips eventless reselection",
+      "before": "    !enabled || !next.snapshotReused,",
+      "after": "    !next.snapshotReused,"
+    },
+    {
+      "name": "a macrostep settles with raised events still queued",
+      "before": "if (!enabled && queue.length === 0)",
+      "after": "if (!enabled)"
+    },
+    {
+      "name": "raise-only eventless transitions are not enabled",
+      "before": "    selected.effects.length > 0 ||\n    selected.raises.length > 0;",
+      "after": "    selected.effects.length > 0;"
+    },
+    {
+      "name": "raise-only transitions decline",
+      "before": "selected.effects.length === 0 &&\n    selected.raises.length === 0\n  ) {",
+      "after": "selected.effects.length === 0\n  ) {"
+    },
+    {
+      "name": "a dequeued event is processed as the macrostep event",
+      "before": ": transition(machine, step.snapshot, processed);",
+      "after": ": transition(machine, step.snapshot, event);"
+    },
+    {
+      "name": "initial raises are not queued",
+      "before": "const first = initialTransition(machine, event);\n  return settle(machine, first, event, true, first.raised, maxIterations);",
+      "after": "const first = initialTransition(machine, event);\n  return settle(machine, first, event, true, [], maxIterations);"
+    },
+    {
+      "name": "initial entry raises are dropped",
+      "before": "raised: entering.raises",
+      "after": "raised: []"
     }
   ],
   "proofDefects": [

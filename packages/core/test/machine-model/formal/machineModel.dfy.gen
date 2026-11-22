@@ -26,7 +26,7 @@ datatype Effect = Effect(action: int, args: seq<int>)
 
 datatype Result = Result(target: Option<string>, patch: Option<seq<PatchEntry>>, reenter: bool)
 
-datatype Evaluation = Evaluation(result: Option<Result>, effects: seq<Effect>)
+datatype Evaluation = Evaluation(result: Option<Result>, effects: seq<Effect>, raises: seq<Event>)
 
 datatype Node = Node(on: map<string, (map<string, int>, Event) -> Evaluation>, always: (map<string, int>, Event) -> Evaluation, entry: (map<string, int>, Event) -> Evaluation, exit: (map<string, int>, Event) -> Evaluation)
 
@@ -34,9 +34,9 @@ datatype Machine = Machine(initial: string, context: map<string, int>, states: m
 
 datatype Snapshot = Snapshot(value: string, context: map<string, int>)
 
-datatype Step = Step(snapshot: Snapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>)
+datatype Step = Step(snapshot: Snapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>, raised: seq<Event>)
 
-datatype Macrostep = Macrostep(settled: bool, step: Step, trace: seq<Step>)
+datatype Macrostep = Macrostep(settled: bool, step: Step, queue: seq<Event>, trace: seq<Step>)
 
 datatype Applied = Applied(context: map<string, int>, reused: bool, effects: seq<Effect>)
 
@@ -87,7 +87,7 @@ lemma apply_ensures(context: map<string, int>, evaluation: Evaluation)
 
 function emptyEvaluation(): Evaluation
 {
-  Evaluation(None, [])
+  Evaluation(None, [], [])
 }
 
 lemma emptyEvaluation_ensures()
@@ -99,8 +99,9 @@ function initialTransition(machine: Machine, event: Event): Step
 {
   var node := (if machine.initial in machine.states then Some(machine.states[machine.initial]) else None);
   var entry := (match node { case Some(i_node_val) => Option.Some(i_node_val.entry) case None => Option.None });
-  var applied := apply(machine.context, (match entry { case Some(i_entry_val) => i_entry_val(machine.context, event) case None => emptyEvaluation() }));
-  Step(Snapshot(machine.initial, applied.context), false, applied.reused, applied.effects)
+  var entering := (match entry { case Some(i_entry_val) => i_entry_val(machine.context, event) case None => emptyEvaluation() });
+  var applied := apply(machine.context, entering);
+  Step(Snapshot(machine.initial, applied.context), false, applied.reused, applied.effects, entering.raises)
 }
 
 lemma initialTransition_ensures(machine: Machine, event: Event)
@@ -123,8 +124,8 @@ lemma transition_ensures(machine: Machine, snapshot: Snapshot, event: Event)
 
 function takeTransition(machine: Machine, snapshot: Snapshot, event: Event, node: Option<Node>, selected: Evaluation): Step
 {
-  if ((match selected.result { case Some(i_) => false case None => true }) && (|selected.effects| == 0)) then
-    Step(snapshot, true, true, [])
+  if (((match selected.result { case Some(i_) => false case None => true }) && (|selected.effects| == 0)) && (|selected.raises| == 0)) then
+    Step(snapshot, true, true, [], [])
   else
     var result := selected.result;
     var target := (match result { case Some(i_result_val) => i_result_val.target case None => Option.None });
@@ -132,12 +133,14 @@ function takeTransition(machine: Machine, snapshot: Snapshot, event: Event, node
     var reenter := (match result { case Some(i_result_val) => i_result_val.reenter case None => false });
     var changes := ((match target { case Some(i_) => true case None => false }) && ((next != snapshot.value) || reenter));
     var exit := (match node { case Some(i_node_val) => Option.Some(i_node_val.exit) case None => Option.None });
-    var exited := apply(snapshot.context, (match exit { case Some(i_exit_val) => (if changes then i_exit_val(snapshot.context, event) else emptyEvaluation()) case None => emptyEvaluation() }));
+    var exiting := (match exit { case Some(i_exit_val) => (if changes then i_exit_val(snapshot.context, event) else emptyEvaluation()) case None => emptyEvaluation() });
+    var exited := apply(snapshot.context, exiting);
     var updated := apply(exited.context, selected);
     var destination := (if next in machine.states then Some(machine.states[next]) else None);
     var entry := (match destination { case Some(i_destination_val) => Option.Some(i_destination_val.entry) case None => Option.None });
-    var entered := apply(updated.context, (match entry { case Some(i_entry_val) => (if changes then i_entry_val(updated.context, event) else emptyEvaluation()) case None => emptyEvaluation() }));
-    Step(Snapshot(next, entered.context), false, ((exited.reused && updated.reused) && entered.reused), ((exited.effects + updated.effects) + entered.effects))
+    var entering := (match entry { case Some(i_entry_val) => (if changes then i_entry_val(updated.context, event) else emptyEvaluation()) case None => emptyEvaluation() });
+    var entered := apply(updated.context, entering);
+    Step(Snapshot(next, entered.context), false, ((exited.reused && updated.reused) && entered.reused), ((exited.effects + updated.effects) + entered.effects), ((exiting.raises + selected.raises) + entering.raises))
 }
 
 lemma takeTransition_ensures(machine: Machine, snapshot: Snapshot, event: Event, node: Option<Node>, selected: Evaluation)
@@ -161,7 +164,7 @@ function eventlessStep(machine: Machine, snapshot: Snapshot, event: Event, selec
 {
   var taken := takeTransition(machine, snapshot, event, (if snapshot.value in machine.states then Some(machine.states[snapshot.value]) else None), selected);
   var kept := ((taken.snapshot.value == snapshot.value) && taken.contextReused);
-  Step((if kept then snapshot else taken.snapshot), kept, taken.contextReused, taken.effects)
+  Step((if kept then snapshot else taken.snapshot), kept, taken.contextReused, taken.effects, taken.raised)
 }
 
 lemma eventlessStep_ensures(machine: Machine, snapshot: Snapshot, event: Event, selected: Evaluation)
@@ -169,33 +172,34 @@ lemma eventlessStep_ensures(machine: Machine, snapshot: Snapshot, event: Event, 
 {
 }
 
-function settle(machine: Machine, step: Step, event: Event, select: bool, remaining: int): Macrostep
+function settle(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>, remaining: int): Macrostep
   decreases remaining
 {
   if (remaining <= 0) then
-    Macrostep(false, step, [])
+    Macrostep(false, step, queue, [])
   else
-    if !(select) then
-      Macrostep(true, step, [])
+    var selected := (if select then alwaysSelected(machine, step.snapshot, event) else emptyEvaluation());
+    var enabled := (((match selected.result { case Some(i_) => true case None => false }) || (|selected.effects| > 0)) || (|selected.raises| > 0));
+    if (!(enabled) && (|queue| == 0)) then
+      Macrostep(true, step, queue, [])
     else
-      var selected := alwaysSelected(machine, step.snapshot, event);
-      var enabled := ((match selected.result { case Some(i_) => true case None => false }) || (|selected.effects| > 0));
-      if !(enabled) then
-        Macrostep(true, step, [])
-      else
-        var next := eventlessStep(machine, step.snapshot, event, selected);
-        var rest := settle(machine, Step(next.snapshot, (step.snapshotReused && next.snapshotReused), (step.contextReused && next.contextReused), (step.effects + next.effects)), event, !(next.snapshotReused), (remaining - 1));
-        Macrostep(rest.settled, rest.step, ([next] + rest.trace))
+      var processed := (if enabled then event else queue[0]);
+      var next := (if enabled then eventlessStep(machine, step.snapshot, event, selected) else transition(machine, step.snapshot, processed));
+      var waiting := (if enabled then queue else queue[1..]);
+      var rest := settle(machine, Step(next.snapshot, (step.snapshotReused && next.snapshotReused), (step.contextReused && next.contextReused), (step.effects + next.effects), (step.raised + next.raised)), processed, (!(enabled) || !(next.snapshotReused)), (waiting + next.raised), (remaining - 1));
+      Macrostep(rest.settled, rest.step, rest.queue, ([next] + rest.trace))
 }
 
 function initialMacrostep(machine: Machine, event: Event, maxIterations: int): Macrostep
 {
-  settle(machine, initialTransition(machine, event), event, true, maxIterations)
+  var first := initialTransition(machine, event);
+  settle(machine, first, event, true, first.raised, maxIterations)
 }
 
 function transitionMacrostep(machine: Machine, snapshot: Snapshot, event: Event, maxIterations: int): Macrostep
 {
-  settle(machine, transition(machine, snapshot, event), event, true, maxIterations)
+  var first := transition(machine, snapshot, event);
+  settle(machine, first, event, true, first.raised, maxIterations)
 }
 
 function declaredPath(nodes: map<string, CompoundNode>, path: seq<string>): bool
