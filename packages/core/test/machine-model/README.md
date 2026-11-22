@@ -27,9 +27,9 @@ multiple-and-nested-parallel initialization
 unmodified LemmaScript 0.6.6. Dafny 4.11.0 proves its contracts and the laws in
 [`formal/machineModel.dfy`](./formal/machineModel.dfy).
 [`formal/machineModel.manifest.json`](./formal/machineModel.manifest.json) lists
-201 laws (including proof helpers and concrete lifecycle and done-event
-witnesses), 24 generated contract lemmas, and 69 deliberately incorrect model
-edits. The complete proof currently checks 742 verification tasks. Function postconditions support
+223 laws (including proof helpers and concrete lifecycle and done-event
+witnesses), 27 generated contract lemmas, and 88 deliberately incorrect model
+edits. The complete proof currently checks 887 verification tasks. Function postconditions support
 composition; they are also checked against the generated bodies.
 Eleven additional proof-weakening probes check that generated contracts cannot
 gain restrictive preconditions or lose their original postconditions.
@@ -62,9 +62,10 @@ The laws establish:
   reuses the snapshot (`EventlessIdentity`), and the macrostep then stops
   reselecting, so effect-only and non-reentering self-targeting eventless
   transitions run once (`IdentityStepRunsOnce`). A macrostep settles exactly
-  when it takes fewer eventless steps than its iteration bound
-  (`SettleBudget`), which matches the runtime counting the final selection
-  that finds nothing enabled. It stops only at an identity step or when no
+  when it takes fewer microsteps than its iteration bound or the machine is
+  done (`SettleBudget`). Eventless steps, dequeues, and the final selection
+  that finds nothing enabled all count against the bound, as in the
+  runtime. It stops only at an identity step or when no
   eventless transition is enabled (`SettleRest`, `SettleSteps`). Its
   effects concatenate in step order and its snapshot and context reuse
   flags hold only when every step reused them (`SettleAccumulates`). A larger
@@ -107,8 +108,9 @@ The laws establish:
 - Compound completion follows the same rules one level at a time. Entering a
   final child of a non-root compound node raises that parent's done event,
   `xstate.done.state.<parent>` carrying the final child's output, after the
-  exit, transition and entry raises (`NestedFinalRaisesDone`,
-  `NestedDoneNamesParent`); an `onDone` handler on the parent consumes it
+  exit, transition and entry raises (`CompoundLifecycleMeaning`,
+  `CompoundInitialCompletion`); that completion queues exactly the one done
+  event (`NestedFinalRaisesDone`, `NestedDoneNamesParent`); an `onDone` handler on the parent consumes it
   through the ordinary queue (`CompoundSettleDequeue`). Entering a final child
   of the root completes the machine with the same output order as the flat
   model and exits every active node from the leaf up
@@ -127,8 +129,11 @@ The laws establish:
   first (`FinalChildQueuesParentDone`); a final region climbs from its
   parallel node (`FinalRegionClimbs`). Climbing records each parallel ancestor
   whose regions are all final, queues one done event for each in order from
-  the innermost, never records a node twice in one microstep, and completes
-  the machine only when it records the root (`ClimbBookkeeping`). A non-final
+  the innermost, never records a node twice, and completes the machine only
+  when it records the root (`ClimbBookkeeping`). Across the entries of one
+  microstep, each climb starts from every parallel completed by earlier
+  entries, so a parallel node's done event is queued at most once per
+  microstep (`FinalEnteredBookkeeping`, `ParallelEnterCompletesOnce`). A non-final
   entry completes nothing (`NonFinalEntryInert`). The final test mirrors the
   runtime's `isInFinalState`: an atomic final node counts as final whether or
   not it has been entered yet (`FinalAtMeaning`, `ActiveAtMeaning`).
@@ -343,8 +348,11 @@ compound and parallel nodes, and `output` on final states and the root, under
 the compound rules. It compares each runtime microstep, the done status and
 the machine output. A parallel done event's output is an object with one key
 per region, built from the region outputs the model computes; machine output
-is compared structurally because the runtime allocates that object. A raised
-or done event the step model cannot represent refuses the macrostep.
+is compared structurally because the runtime allocates that object. Context
+and effect arguments are compared by identity, so a step that stores a region
+output object in context or passes it to an effect is refused; callbacks may
+read its fields. A raised or done event the step model cannot represent
+refuses the macrostep.
 A target must be a string, so array (multi-target)
 transitions are refused. Each step is checked against the model's
 `parallelStepReady` before it runs. With fewer than two selections, this is
@@ -499,7 +507,9 @@ nesting levels, the done-event dequeue counted against `maxIterations` (a
 bound of 1 is unfinished and 2 settles), and refusals.
 
 [`parallelCompletion.test.ts`](./parallelCompletion.test.ts) compares
-parallel completion: a done event only when every region is final, a parallel
+parallel completion: a done event only when every region is final, the
+refusal of a region output object stored in context or passed to an effect
+(reading one of its fields is compared), a parallel
 root completed by final regions with and without a root `output` (region keys
 without output are present with `undefined`), the done event of atomic final
 regions queued between their entry raises, a nested parallel and its parent
@@ -513,7 +523,10 @@ generates 400 trees using seed 3838 with up to three levels, parallel and
 compound nodes, final states (including atomic final regions), `onDone`
 handlers that may raise or target, raising transitions, an optional root
 `output`, and `maxIterations: 8`, then compares each macrostep and its
-microsteps.
+microsteps. It reports refusals by reason and fails on any reason other than
+a target into an active region or a raised event the step model cannot
+represent; with this seed, 70 and 11 runs of 400 are refused for those
+reasons.
 
 [`machineModel.property.test.ts`](./machineModel.property.test.ts) generates
 500 flat two-state machines using seed 8911. Each machine has up to two handlers
@@ -762,7 +775,8 @@ planned context, skip or clear the configuration of a completed machine,
 enter from the snapshot context, count the current entry as a later entry,
 treat a compound node as final without an active final child, keep settling
 a done machine, skip the readiness check while settling, drop microstep
-raises, and let a done machine take transitions. It also checks that a
+raises, let a done machine take transitions, and let the entry pass forget
+the parallels completed by earlier entries. It also checks that a
 behavior-preserving rewrite changes the generated
 artifact and still proves after regeneration.
 
