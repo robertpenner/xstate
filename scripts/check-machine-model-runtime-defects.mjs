@@ -136,6 +136,14 @@ const defects = [
     after: 'shouldSelectEventlessTransitions = false;',
     testFile: 'packages/core/test/machine-model/eventless.test.ts',
     test: 'chains eventless targets during initialization'
+  },
+  {
+    name: 'raised events are dequeued last in, first out',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'nextEvent = internalQueue.shift()!;',
+    after: 'nextEvent = internalQueue.pop()!;',
+    testFile: 'packages/core/test/machine-model/raised.test.ts',
+    test: 'queues exit, transition and entry raises in that order'
   }
 ];
 try {

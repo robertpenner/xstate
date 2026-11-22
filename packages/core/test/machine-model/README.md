@@ -27,9 +27,9 @@ multiple-and-nested-parallel initialization
 unmodified LemmaScript 0.6.6. Dafny 4.11.0 proves its contracts and the laws in
 [`formal/machineModel.dfy`](./formal/machineModel.dfy).
 [`formal/machineModel.manifest.json`](./formal/machineModel.manifest.json) lists
-179 laws (including proof helpers and a concrete lifecycle witness), 24 generated
-contract lemmas, and 45 deliberately incorrect model edits. The complete proof
-currently checks 521 verification tasks. Function postconditions support
+184 laws (including proof helpers and a concrete lifecycle witness), 24 generated
+contract lemmas, and 55 deliberately incorrect model edits. The complete proof
+currently checks 535 verification tasks. Function postconditions support
 composition; they are also checked against the generated bodies.
 Eleven additional proof-weakening probes check that generated contracts cannot
 gain restrictive preconditions or lose their original postconditions.
@@ -73,6 +73,23 @@ The laws establish:
   (`EventlessDeclared`, `SettleValid`). An eventless transition that always
   returns an empty patch never settles (`EmptyPatchLoops`), because every
   supplied patch copies context.
+- Immediate raised events are kept apart from effects. A flat step raises the
+  exit callback's events, then the transition's, then the entry callback's
+  (`LifecycleOrderAndContext`, `TargetlessLifecycle`, `InitialLifecycle`); a
+  callback that only raises handles the event (`EffectOnlyHandled`,
+  `HandledIdentity`). Initial and event macrosteps start with that step's
+  raises as the queue (`MacrostepQueues`). An enabled eventless transition
+  runs before the next dequeue and appends its raises to the back of the queue
+  (`SettleEventless`). Otherwise the head of the queue is processed as an
+  event, the step's raises are appended, and eventless transitions are
+  reselected against the dequeued event (`SettleDequeue`). A dequeued event
+  that no transition handles still takes a microstep that reuses the snapshot
+  (`DequeueUnhandled`). A macrostep settles only with an empty queue and no
+  enabled eventless transition (`SettleStops`, `SettleRest`), and eventless and
+  dequeue microsteps count against the same bound (`SettleBudget`). Raised
+  events accumulate in step order (`SettleAccumulates`). Declared `on` and
+  eventless targets keep every microstep's value declared (`DequeueDeclared`,
+  `SettleValid`).
 - Compound initialization and event steps preserve declared active nodes,
   required ancestors, and exactly one active direct child for each active
   compound node, assuming a well-formed normalized machine and valid targets.
@@ -207,7 +224,11 @@ that bound is compared as an `InfiniteTransitionError` carrying the bound.
 Without a bound, the runtime iterates without limit. The adapter then runs the
 model to 1000 iterations and refuses a macrostep that is still unfinished.
 Arrays of eventless transitions are refused, and the compound and parallel
-adapters refuse `always`. Local target names are nonempty strings without dots or hashes.
+adapters refuse `always`. Flat callbacks may call `enq.raise(event)` from
+transitions, eventless transitions, entry and exit. The raised event must be a
+plain record with a nonempty string `type` that does not start with `xstate.`;
+it reaches the handler as the same object. Delayed raises and raise options
+are refused, and the compound and parallel adapters refuse `enq.raise`. Local target names are nonempty strings without dots or hashes.
 Exact event names may not contain `*`; the empty event name is refused.
 Transition definitions are objects, callbacks, or an explicit `undefined`
 event block. Objects and callback results accept `target`, `context`, `reenter`.
@@ -220,7 +241,8 @@ non-enumerable properties, symbol keys and custom prototypes are refused before
 comparison. Context values and ordinary effect arguments may be opaque values,
 including references, `undefined`, `NaN` and signed zero. Configuration and
 callback-result fields not listed above cause explicit refusal. Unknown
-callback arguments and enqueue operations also cause explicit refusal.
+callback arguments and enqueue operations other than flat `raise` also cause
+explicit refusal.
 Refusals remain fatal to comparison even if an authored callback catches the
 exception. Probes for unsupported capabilities, enumeration, and prototype
 inspection of callback argument/enqueue objects are refused. Direct membership
@@ -290,9 +312,9 @@ target refusal still covers the statelyai/xstate#5895 reproduction. All
 remaining comparable-domain cases are subject to the same listed readiness
 checks as other steps.
 
-Choices, history, completion, eventless transitions outside flat machines,
-raised events, timers, actors, routes, state input and persistence remain
-refused.
+Choices, history, completion, eventless transitions and raised events outside
+flat machines, delayed raises, timers, actors, routes, state input and
+persistence remain refused.
 Refusal is not a statement that
 the runtime lacks these features.
 [`SYNCHRONOUS_PROCESSING.md`](./SYNCHRONOUS_PROCESSING.md) records how the
@@ -380,6 +402,15 @@ reach the bound, the bound boundary (K steps finish with bound K + 1 and stop
 at bound K), and refusals. Each compared macrostep also checks every runtime
 microstep from `getInitialMicrosteps` or `getMicrosteps` against the model
 trace.
+
+[`raised.test.ts`](./raised.test.ts) compares the exit, transition and entry
+order of raised events, a raise cascade within one macrostep, raises from
+separate external events, an entry raise during initialization, the dequeue
+counted against the bound, an unhandled raised event and the event then seen
+by eventless callbacks, eventless transitions taken before a dequeue, a
+handler that only raises, the identity of the raised event object, a
+raise-only eventless cycle and a cycle of eventless and raised transitions
+that reach the bound, and refusals.
 
 [`machineModel.property.test.ts`](./machineModel.property.test.ts) generates
 500 flat two-state machines using seed 8911. Each machine has up to two handlers
@@ -617,7 +648,7 @@ artifact and still proves after regeneration.
 The runtime-defect command temporarily changes a clean production file, runs
 the corresponding differential test, requires an assertion failure, and restores
 the original bytes in `finally`. Run it only in a dedicated checkout with no
-other test/build process. Its fifteen mutations test targetless source reentry,
+other test/build process. Its sixteen mutations test targetless source reentry,
 an ignored fast-path target, a dropped
 context patch, compound exits ordered ancestor-before-descendant, a parallel
 domain that is never narrowed to a region, regions entered in reverse
@@ -628,7 +659,7 @@ narrowed only one level, a parallel node whose own handler overrides a
 single region's selection, regions of a nested parallel node selected in
 reverse order, a deeper conflicting source preempting a shallower one, an iteration bound
 that stops one eventless step early, and eventless transitions that are not
-reselected after a microstep.
+reselected after a microstep, and raised events dequeued last in, first out.
 Mutations that drop
 a nested region at initialization are not listed: the runtime adds missing
 regions in `getInitialStateNodes`, `addAncestorStatesToEnter`, and

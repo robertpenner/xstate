@@ -14,10 +14,13 @@ import * as model from './machineModel';
 export type Context = Record<string, unknown>;
 export type Event = { type: string; [key: string]: unknown };
 type Result = { target?: string; context?: Context; reenter?: boolean };
-type Enqueue = (
+type Enqueue = ((
   action: (...args: unknown[]) => void,
   ...args: unknown[]
-) => void;
+) => void) & {
+  // Accepted by the flat adapter only.
+  raise: (event: Event) => void;
+};
 export type Callback = (
   args: { context: Context; event: Event },
   enq: Enqueue
@@ -186,22 +189,37 @@ export function createEncoding() {
     (
       definition: Transition,
       lifecycle: boolean,
-      resolveTarget: (target: string) => string
+      resolveTarget: (target: string) => string,
+      // Only models that queue raised events may accept `enq.raise`.
+      raising = false
     ) =>
     (context: Record<string, number>, event: model.Event): model.Evaluation => {
       const effects: model.Effect[] = [];
+      const raises: model.Event[] = [];
       let unsupported: Error | undefined;
       const refuse = (message: string): never => {
         unsupported ??= new Error(message);
         throw unsupported;
       };
-      const enqueueAccess = (_target: Enqueue, key: string | symbol): never =>
+      const raise = (raised: unknown, ...options: unknown[]) => {
+        if (options.length > 0) refuse('Unsupported raise options');
+        try {
+          plainRecord(raised, 'raised event');
+        } catch (error) {
+          refuse((error as Error).message);
+        }
+        const type = (raised as { type?: unknown }).type;
+        if (typeof type !== 'string' || !type || type.startsWith('xstate.'))
+          refuse(`Unsupported raised event type: ${String(type)}`);
+        raises.push({ type: type as string, value: encodeValue(raised) });
+      };
+      const enqueueAccess = (_target: unknown, key: string | symbol): never =>
         refuse(`Unsupported enqueue operation: ${String(key)}`);
       const argumentKey = (key: string | symbol) => {
         if (key !== 'context' && key !== 'event')
           refuse(`Unsupported callback argument: ${String(key)}`);
       };
-      const enqueue: Enqueue = new Proxy(
+      const enqueue = new Proxy(
         (action: (...args: unknown[]) => void, ...args: unknown[]) => {
           if (typeof action !== 'function') refuse('Unsupported effect');
           effects.push({
@@ -210,7 +228,8 @@ export function createEncoding() {
           });
         },
         {
-          get: enqueueAccess,
+          get: (target, key) =>
+            raising && key === 'raise' ? raise : enqueueAccess(target, key),
           has: enqueueAccess,
           getOwnPropertyDescriptor: enqueueAccess,
           ownKeys: () => refuse('Unsupported enqueue enumeration'),
@@ -245,7 +264,7 @@ export function createEncoding() {
                     refuse('Unsupported callback argument prototype inspection')
                 }
               ),
-              enqueue
+              enqueue as Enqueue
             )
           : definition;
       if (unsupported) throw unsupported;
@@ -270,7 +289,8 @@ export function createEncoding() {
                         ([key, value]) => ({ key, value })
                       )
               },
-        effects
+        effects,
+        raises
       };
     };
   const encodeEffects = (effects: readonly ExecutableEffect[]) =>
@@ -339,15 +359,15 @@ export function compareRun(config: Config, events: readonly Event[]) {
           on: new Map(
             Object.entries(node.on ?? {}).map(([event, result]) => [
               event,
-              evaluate(result, false, resolveTarget)
+              evaluate(result, false, resolveTarget, true)
             ])
           ),
           always:
             node.always === undefined
               ? declining
-              : evaluate(node.always, false, resolveTarget),
-          entry: evaluate(node.entry, true, resolveTarget),
-          exit: evaluate(node.exit, true, resolveTarget)
+              : evaluate(node.always, false, resolveTarget, true),
+          entry: evaluate(node.entry, true, resolveTarget, true),
+          exit: evaluate(node.exit, true, resolveTarget, true)
         }
       ])
     )
@@ -458,7 +478,11 @@ export function compareRun(config: Config, events: readonly Event[]) {
   return { trace, unfinished: undefined as Unfinished | undefined };
 }
 
-const declining = (): model.Evaluation => ({ result: undefined, effects: [] });
+const declining = (): model.Evaluation => ({
+  result: undefined,
+  effects: [],
+  raises: []
+});
 
 // The model settled, so a runtime InfiniteTransitionError is a disagreement.
 function settledRuntime<T>(run: () => T): T {

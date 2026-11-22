@@ -302,8 +302,8 @@ describe('flat machine model', () => {
             a: {
               on: {
                 event: (_, enq) => {
-                  // @ts-expect-error Deliberately unsupported enqueue operation.
-                  enq.raise({ type: 'event' });
+                  // @ts-expect-error Delayed raises are unsupported.
+                  enq.raise({ type: 'event' }, { delay: 1 });
                 }
               }
             }
@@ -311,6 +311,6 @@ describe('flat machine model', () => {
         },
         [{ type: 'event' }]
       )
-    ).toThrow(/Unsupported.*raise/);
+    ).toThrow(/Unsupported raise options/);
   });
 });
