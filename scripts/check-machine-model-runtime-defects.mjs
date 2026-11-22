@@ -119,6 +119,23 @@ const defects = [
     before: 'if (targets?.length && reenter && domain === transition.source) {',
     after: 'if (reenter && domain === transition.source) {',
     test: 'keeps targetless-reentry patches and effects without lifecycle callbacks'
+  },
+  {
+    name: 'the iteration bound stops one eventless step early',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'if (iterationCount > maxIterations) {',
+    after: 'if (iterationCount >= maxIterations) {',
+    testFile: 'packages/core/test/machine-model/eventless.test.ts',
+    test: 'finishes K eventless steps with one spare iteration'
+  },
+  {
+    name: 'eventless transitions are not reselected after a microstep',
+    file: 'packages/core/src/stateUtils.ts',
+    before:
+      'shouldSelectEventlessTransitions = nextSnapshot !== previousState;',
+    after: 'shouldSelectEventlessTransitions = false;',
+    testFile: 'packages/core/test/machine-model/eventless.test.ts',
+    test: 'chains eventless targets during initialization'
   }
 ];
 try {

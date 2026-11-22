@@ -27,9 +27,9 @@ multiple-and-nested-parallel initialization
 unmodified LemmaScript 0.6.6. Dafny 4.11.0 proves its contracts and the laws in
 [`formal/machineModel.dfy`](./formal/machineModel.dfy).
 [`formal/machineModel.manifest.json`](./formal/machineModel.manifest.json) lists
-166 laws (including proof helpers and a concrete lifecycle witness), 22 generated
-contract lemmas, and 36 deliberately incorrect model edits. The complete proof
-currently checks 492 verification tasks. Function postconditions support
+179 laws (including proof helpers and a concrete lifecycle witness), 24 generated
+contract lemmas, and 45 deliberately incorrect model edits. The complete proof
+currently checks 521 verification tasks. Function postconditions support
 composition; they are also checked against the generated bodies.
 Eleven additional proof-weakening probes check that generated contracts cannot
 gain restrictive preconditions or lose their original postconditions.
@@ -55,6 +55,24 @@ The laws establish:
   effects still apply. A targetless selection has no lifecycle plan or
   conflict exits and passes the multi-selection readiness check
   (`TargetlessSelectionLifecycle`).
+- A flat macrostep runs the initial or event microstep, then eventless
+  microsteps, through the same `takeTransition` used for events
+  (`EventStepShared`). The macrostep event is passed to every eventless
+  callback. An eventless step that keeps the value and the context object
+  reuses the snapshot (`EventlessIdentity`), and the macrostep then stops
+  reselecting, so effect-only and non-reentering self-targeting eventless
+  transitions run once (`IdentityStepRunsOnce`). A macrostep settles exactly
+  when it takes fewer eventless steps than its iteration bound
+  (`SettleBudget`), which matches the runtime counting the final selection
+  that finds nothing enabled. It stops only at an identity step or when no
+  eventless transition is enabled (`SettleRest`, `SettleSteps`). Its
+  effects concatenate in step order and its snapshot and context reuse
+  flags hold only when every step reused them (`SettleAccumulates`). A larger
+  bound extends the trace and leaves a settled result unchanged
+  (`SettleStable`). Declared eventless targets keep the value declared
+  (`EventlessDeclared`, `SettleValid`). An eventless transition that always
+  returns an empty patch never settles (`EmptyPatchLoops`), because every
+  supplied patch copies context.
 - Compound initialization and event steps preserve declared active nodes,
   required ancestors, and exactly one active direct child for each active
   compound node, assuming a well-formed normalized machine and valid targets.
@@ -182,8 +200,14 @@ values before deciding whether to copy. No FSM reuse law is imported here.
 ## Supported domain and explicit refusals
 
 The flat adapter accepts a root with a declared `initial`, a plain `context`
-record, and flat atomic `states`. State definitions accept `on`, `entry` and
-`exit`. Local target names are nonempty strings without dots or hashes.
+record, and flat atomic `states`. State definitions accept `on`, a single `always`
+transition, `entry` and `exit`. The root accepts `options.maxIterations` as an
+integer of at least one. An eventless macrostep that does not settle within
+that bound is compared as an `InfiniteTransitionError` carrying the bound.
+Without a bound, the runtime iterates without limit. The adapter then runs the
+model to 1000 iterations and refuses a macrostep that is still unfinished.
+Arrays of eventless transitions are refused, and the compound and parallel
+adapters refuse `always`. Local target names are nonempty strings without dots or hashes.
 Exact event names may not contain `*`; the empty event name is refused.
 Transition definitions are objects, callbacks, or an explicit `undefined`
 event block. Objects and callback results accept `target`, `context`, `reenter`.
@@ -266,7 +290,7 @@ target refusal still covers the statelyai/xstate#5895 reproduction. All
 remaining comparable-domain cases are subject to the same listed readiness
 checks as other steps.
 
-Choices, history, completion, eventless transitions,
+Choices, history, completion, eventless transitions outside flat machines,
 raised events, timers, actors, routes, state input and persistence remain
 refused.
 Refusal is not a statement that
@@ -347,6 +371,15 @@ missing/declined/blocked/handled events, effect-only callbacks, self-transition
 and reentry, lifecycle context observations, absent keys, present `undefined`,
 `NaN`, signed zero, unchanged patches, opaque references, prototype-looking
 string keys, unsupported fields and object shapes.
+
+[`eventless.test.ts`](./eventless.test.ts) compares eventless chains during
+initialization and after an event, the event seen by eventless callbacks,
+effect-only and self-targeting eventless transitions, snapshot reuse after an
+unhandled event, a settling counter, an empty patch and a two-state cycle that
+reach the bound, the bound boundary (K steps finish with bound K + 1 and stop
+at bound K), and refusals. Each compared macrostep also checks every runtime
+microstep from `getInitialMicrosteps` or `getMicrosteps` against the model
+trace.
 
 [`machineModel.property.test.ts`](./machineModel.property.test.ts) generates
 500 flat two-state machines using seed 8911. Each machine has up to two handlers
@@ -584,7 +617,7 @@ artifact and still proves after regeneration.
 The runtime-defect command temporarily changes a clean production file, runs
 the corresponding differential test, requires an assertion failure, and restores
 the original bytes in `finally`. Run it only in a dedicated checkout with no
-other test/build process. Its thirteen mutations test targetless source reentry,
+other test/build process. Its fifteen mutations test targetless source reentry,
 an ignored fast-path target, a dropped
 context patch, compound exits ordered ancestor-before-descendant, a parallel
 domain that is never narrowed to a region, regions entered in reverse
@@ -593,7 +626,9 @@ child at initialization, a later conflicting transition preempting an earlier
 one, kept transition patches merged in reverse order, a parallel domain
 narrowed only one level, a parallel node whose own handler overrides a
 single region's selection, regions of a nested parallel node selected in
-reverse order, and a deeper conflicting source preempting a shallower one.
+reverse order, a deeper conflicting source preempting a shallower one, an iteration bound
+that stops one eventless step early, and eventless transitions that are not
+reselected after a microstep.
 Mutations that drop
 a nested region at initialization are not listed: the runtime adds missing
 regions in `getInitialStateNodes`, `addAncestorStatesToEnter`, and

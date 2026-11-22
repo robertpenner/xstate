@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import {
   createMachine,
+  getInitialMicrosteps,
+  getMicrosteps,
+  InfiniteTransitionError,
   initialTransition,
   transition,
   type AnyMachineSnapshot,
@@ -22,6 +25,7 @@ export type Callback = (
 export type Transition = Result | Callback | undefined;
 type State = {
   on?: Record<string, Transition>;
+  always?: Transition;
   entry?: Callback;
   exit?: Callback;
 };
@@ -29,7 +33,12 @@ export type Config = {
   initial: string;
   context: Context;
   states: Record<string, State>;
+  options?: { maxIterations?: number };
 };
+
+// The runtime's default bound is unlimited. Without an explicit bound the
+// adapter runs the model to this cap and refuses a macrostep that reaches it.
+const unboundedCap = 1000;
 
 export function plainRecord(
   value: unknown,
@@ -90,7 +99,13 @@ export function validateResult(
 }
 
 function validateConfig(config: Config) {
-  fields(config, ['initial', 'context', 'states'], 'config');
+  fields(config, ['initial', 'context', 'states', 'options'], 'config');
+  if (config.options !== undefined) {
+    fields(config.options, ['maxIterations'], 'options');
+    const bound = config.options.maxIterations;
+    if (bound !== undefined && !(Number.isSafeInteger(bound) && bound >= 1))
+      throw new Error(`Unsupported options.maxIterations: ${String(bound)}`);
+  }
   plainRecord(config.states, 'states');
   plainRecord(config.context, 'context');
   if (
@@ -102,7 +117,15 @@ function validateConfig(config: Config) {
   for (const [name, node] of Object.entries(config.states)) {
     if (!name || /[.#]/.test(name))
       throw new Error(`Unsupported flat state name: ${name}`);
-    fields(node, ['on', 'entry', 'exit'], `states.${name}`);
+    fields(node, ['on', 'always', 'entry', 'exit'], `states.${name}`);
+    if (Array.isArray(node.always))
+      throw new Error(`Unsupported states.${name}.always array`);
+    if (node.always !== undefined && typeof node.always !== 'function')
+      validateResult(
+        node.always,
+        (target) => flatTarget(config, target),
+        false
+      );
     for (const kind of ['entry', 'exit'] as const) {
       if (node[kind] !== undefined && typeof node[kind] !== 'function') {
         throw new Error(`Unsupported states.${name}.${kind}`);
@@ -279,7 +302,18 @@ export function createEncoding() {
   };
 }
 
+export type Unfinished = { maxIterations: number; afterEvents: number };
+
 export function compareTrace(config: Config, events: readonly Event[]) {
+  const run = compareRun(config, events);
+  if (run.unfinished)
+    throw new Error(
+      `Macrostep reached maxIterations ${run.unfinished.maxIterations}`
+    );
+  return run.trace;
+}
+
+export function compareRun(config: Config, events: readonly Event[]) {
   validateConfig(config);
   for (const event of events) {
     plainRecord(event, 'event');
@@ -308,6 +342,10 @@ export function compareTrace(config: Config, events: readonly Event[]) {
               evaluate(result, false, resolveTarget)
             ])
           ),
+          always:
+            node.always === undefined
+              ? declining
+              : evaluate(node.always, false, resolveTarget),
           entry: evaluate(node.entry, true, resolveTarget),
           exit: evaluate(node.exit, true, resolveTarget)
         }
@@ -315,11 +353,59 @@ export function compareTrace(config: Config, events: readonly Event[]) {
     )
   };
   const runtime = createMachine(config);
-  let expected = model.initialTransition(machine, {
+  const bound = config.options?.maxIterations;
+  const budget = bound ?? unboundedCap;
+  const settled = (macrostep: model.Macrostep) => {
+    if (!macrostep.settled && bound === undefined)
+      throw new Error(
+        `Unsupported unbounded macrostep: no rest within ${unboundedCap} iterations`
+      );
+    return macrostep;
+  };
+  const initialEvent = {
     type: 'xstate.init',
     value: encodeValue({ type: 'xstate.init', input: undefined })
-  });
+  };
+  let macrostep = settled(
+    model.initialMacrostep(machine, initialEvent, budget)
+  );
+  if (!macrostep.settled) {
+    expectUnfinished(() => initialTransition(runtime), bound!);
+    expectUnfinished(() => getInitialMicrosteps(runtime), bound!);
+    return {
+      trace: [] as ReturnType<typeof compare>[],
+      unfinished: { maxIterations: bound!, afterEvents: 0 } as Unfinished
+    };
+  }
+  compareMicrosteps(
+    settledRuntime(() => getInitialMicrosteps(runtime)),
+    model.initialTransition(machine, initialEvent),
+    macrostep.trace
+  );
+  let expected = macrostep.step;
   let [actual, actualEffects] = initialTransition(runtime);
+  function compareMicrosteps(
+    microsteps: ReadonlyArray<
+      readonly [AnyMachineSnapshot, readonly ExecutableEffect[], unknown]
+    >,
+    first: model.Step,
+    eventless: readonly model.Step[]
+  ) {
+    assert.equal(microsteps.length, 1 + eventless.length);
+    [first, ...eventless].forEach((step, index) => {
+      const [snapshot, effects] = microsteps[index];
+      assert.equal(snapshot.value, step.snapshot.value);
+      assert.deepEqual(encode(snapshot.context), step.snapshot.context);
+      assert.deepEqual(encodeEffects(effects), step.effects);
+      // Snapshot identity is compared per macrostep only: the runtime replaces
+      // the last microstep's snapshot with a clone when a handled macrostep
+      // would otherwise return the previous snapshot.
+      if (index > 0) {
+        const [before] = microsteps[index - 1];
+        assert.equal(snapshot.context === before.context, step.contextReused);
+      }
+    });
+  }
   function compare(previous: AnyMachineSnapshot | undefined) {
     assert.equal(actual.status, 'active');
     assert.equal(actual.value, expected.snapshot.value);
@@ -343,14 +429,51 @@ export function compareTrace(config: Config, events: readonly Event[]) {
     };
   }
   const trace = [compare(undefined)];
-  for (const event of events) {
+  for (const [index, event] of events.entries()) {
     const previous = actual;
-    expected = model.transition(machine, expected.snapshot, {
-      type: event.type,
-      value: encodeValue(event)
-    });
+    const modelEvent = { type: event.type, value: encodeValue(event) };
+    macrostep = settled(
+      model.transitionMacrostep(machine, expected.snapshot, modelEvent, budget)
+    );
+    if (!macrostep.settled) {
+      expectUnfinished(() => transition(runtime, previous, event), bound!);
+      expectUnfinished(() => getMicrosteps(runtime, previous, event), bound!);
+      return {
+        trace,
+        unfinished: {
+          maxIterations: bound!,
+          afterEvents: index
+        } as Unfinished | undefined
+      };
+    }
+    compareMicrosteps(
+      settledRuntime(() => getMicrosteps(runtime, previous, event)),
+      model.transition(machine, expected.snapshot, modelEvent),
+      macrostep.trace
+    );
+    expected = macrostep.step;
     [actual, actualEffects] = transition(runtime, actual, event);
     trace.push(compare(previous));
   }
-  return trace;
+  return { trace, unfinished: undefined as Unfinished | undefined };
+}
+
+const declining = (): model.Evaluation => ({ result: undefined, effects: [] });
+
+// The model settled, so a runtime InfiniteTransitionError is a disagreement.
+function settledRuntime<T>(run: () => T): T {
+  let result: T | undefined;
+  assert.doesNotThrow(() => {
+    result = run();
+  });
+  return result as T;
+}
+
+function expectUnfinished(run: () => unknown, maxIterations: number) {
+  assert.throws(
+    run,
+    (error: unknown) =>
+      error instanceof InfiniteTransitionError &&
+      error.maxIterations === maxIterations
+  );
 }
