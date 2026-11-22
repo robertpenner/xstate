@@ -74,7 +74,7 @@ datatype ParallelParts = ParallelParts(raised: seq<Event>, entries: seq<string>,
 
 datatype ParallelClimb = ParallelClimb(raised: seq<Event>, completed: seq<string>, done: bool, output: Option<int>)
 
-datatype ParallelEntered = ParallelEntered(context: map<string, int>, reused: bool, effects: seq<Effect>, raised: seq<Event>, done: bool, output: Option<int>)
+datatype ParallelEntered = ParallelEntered(context: map<string, int>, reused: bool, effects: seq<Effect>, raised: seq<Event>, completed: seq<string>, done: bool, output: Option<int>)
 
 datatype ParallelMacrostep = ParallelMacrostep(settled: bool, refused: bool, step: ParallelMicro, queue: seq<Event>, trace: seq<ParallelMicro>)
 
@@ -1373,13 +1373,13 @@ function parallelEnter(machine: ParallelMachine, outputs: ParallelOutputs, next:
   decreases (|entries| - index)
 {
   if ((index < 0) || (index >= |entries|)) then
-    ParallelEntered(context, true, [], [], false, None)
+    ParallelEntered(context, true, [], [], completed, false, None)
   else
     var entered := runLifecycle(machine.nodes, [entries[index]], context, event, false);
     var queued := (queue + entered.raises);
     var final := finalEntered(machine, outputs, next, entries, index, entered.context, event, queued, completed);
     var rest := parallelEnter(machine, outputs, next, entries, (index + 1), entered.context, event, (queued + final.raised), final.completed);
-    ParallelEntered(rest.context, (entered.reused && rest.reused), (entered.effects + rest.effects), ((entered.raises + final.raised) + rest.raised), (final.done || rest.done), (if rest.done then rest.output else final.output))
+    ParallelEntered(rest.context, (entered.reused && rest.reused), (entered.effects + rest.effects), ((entered.raises + final.raised) + rest.raised), rest.completed, (final.done || rest.done), (if rest.done then rest.output else final.output))
 }
 
 function parallelFinish(machine: ParallelMachine, step: ParallelStep, parts: ParallelParts, entered: ParallelEntered, event: Event): ParallelMicro
@@ -5146,6 +5146,71 @@ lemma {:induction false} {:isolate_assertions} ClimbBookkeeping(machine: Paralle
       if Distinct(completed) {
         assert forall i :: 0 <= i < |completed| ==> grown[i] != marker;
         assert Distinct(grown);
+      }
+    }
+  }
+}
+
+// Entering one node extends the completed parallels without repeating one.
+lemma FinalEnteredBookkeeping(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  ensures var f := finalEntered(machine, outputs, next, entries, index, context, event, queue, completed);
+    |completed| <= |f.completed| && f.completed[..|completed|] == completed &&
+    (forall i :: |completed| <= i < |f.completed| ==> f.completed[i] in machine.parallels) &&
+    (Distinct(completed) ==> Distinct(f.completed))
+{
+  if 0 <= index < |entries| && entries[index] in machine.nodes {
+    var node := lookupNode(machine.nodes, entries[index]);
+    var path := node.path;
+    if node.final && |path| >= 2 {
+      var parent := path[|path| - 2];
+      var fuel := |machine.order|;
+      if parent in machine.parallels {
+        ClimbBookkeeping(machine, outputs, next, entries, index, context, event, queue, completed, parent, fuel);
+      } else if |path| >= 3 {
+        var own := node.output;
+        var done := doneEvent(parent, own(context, event));
+        ClimbBookkeeping(machine, outputs, next, entries, index, context, event, queue + [done], completed, path[|path| - 3], fuel);
+      }
+    }
+  }
+}
+
+// Within one microstep each parallel node completes at most once: each
+// entry's climb starts from every parallel completed by earlier entries, the
+// pass returns an extension of what the current entry completed, and no node
+// is listed twice. A climb refuses a listed node and queues exactly one done
+// event per node it adds (`ClimbBookkeeping`).
+lemma {:induction false} ParallelEnterCompletesOnce(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  decreases |entries| - index
+  ensures var e := parallelEnter(machine, outputs, next, entries, index, context, event, queue, completed);
+    |completed| <= |e.completed| && e.completed[..|completed|] == completed &&
+    (forall i :: |completed| <= i < |e.completed| ==> e.completed[i] in machine.parallels) &&
+    (Distinct(completed) ==> Distinct(e.completed)) &&
+    (0 <= index < |entries| ==>
+      var entered := runLifecycle(machine.nodes, [entries[index]], context, event, false);
+      var f := finalEntered(machine, outputs, next, entries, index, entered.context, event, queue + entered.raises, completed);
+      |f.completed| <= |e.completed| && e.completed[..|f.completed|] == f.completed)
+{
+  if 0 <= index < |entries| {
+    var entered := runLifecycle(machine.nodes, [entries[index]], context, event, false);
+    var queued := queue + entered.raises;
+    var final := finalEntered(machine, outputs, next, entries, index, entered.context, event, queued, completed);
+    FinalEnteredBookkeeping(machine, outputs, next, entries, index, entered.context, event, queued, completed);
+    ParallelEnterCompletesOnce(machine, outputs, next, entries, index + 1, entered.context, event, queued + final.raised, final.completed);
+    var e := parallelEnter(machine, outputs, next, entries, index, context, event, queue, completed);
+    var rest := parallelEnter(machine, outputs, next, entries, index + 1, entered.context, event, queued + final.raised, final.completed);
+    assert e.completed == rest.completed;
+    assert rest.completed[..|final.completed|] == final.completed;
+    assert e.completed[..|completed|] == final.completed[..|completed|];
+    forall i | |completed| <= i < |e.completed|
+      ensures e.completed[i] in machine.parallels
+    {
+      if i < |final.completed| {
+        assert e.completed[i] == final.completed[i];
       }
     }
   }

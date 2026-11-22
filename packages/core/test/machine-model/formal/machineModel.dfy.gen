@@ -74,7 +74,7 @@ datatype ParallelParts = ParallelParts(raised: seq<Event>, entries: seq<string>,
 
 datatype ParallelClimb = ParallelClimb(raised: seq<Event>, completed: seq<string>, done: bool, output: Option<int>)
 
-datatype ParallelEntered = ParallelEntered(context: map<string, int>, reused: bool, effects: seq<Effect>, raised: seq<Event>, done: bool, output: Option<int>)
+datatype ParallelEntered = ParallelEntered(context: map<string, int>, reused: bool, effects: seq<Effect>, raised: seq<Event>, completed: seq<string>, done: bool, output: Option<int>)
 
 datatype ParallelMacrostep = ParallelMacrostep(settled: bool, refused: bool, step: ParallelMicro, queue: seq<Event>, trace: seq<ParallelMicro>)
 
@@ -1147,13 +1147,13 @@ function parallelEnter(machine: ParallelMachine, outputs: ParallelOutputs, next:
   decreases (|entries| - index)
 {
   if ((index < 0) || (index >= |entries|)) then
-    ParallelEntered(context, true, [], [], false, None)
+    ParallelEntered(context, true, [], [], completed, false, None)
   else
     var entered := runLifecycle(machine.nodes, [entries[index]], context, event, false);
     var queued := (queue + entered.raises);
     var final := finalEntered(machine, outputs, next, entries, index, entered.context, event, queued, completed);
     var rest := parallelEnter(machine, outputs, next, entries, (index + 1), entered.context, event, (queued + final.raised), final.completed);
-    ParallelEntered(rest.context, (entered.reused && rest.reused), (entered.effects + rest.effects), ((entered.raises + final.raised) + rest.raised), (final.done || rest.done), (if rest.done then rest.output else final.output))
+    ParallelEntered(rest.context, (entered.reused && rest.reused), (entered.effects + rest.effects), ((entered.raises + final.raised) + rest.raised), rest.completed, (final.done || rest.done), (if rest.done then rest.output else final.output))
 }
 
 function parallelFinish(machine: ParallelMachine, step: ParallelStep, parts: ParallelParts, entered: ParallelEntered, event: Event): ParallelMicro

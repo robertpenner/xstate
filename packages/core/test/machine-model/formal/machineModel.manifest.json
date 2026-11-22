@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 883,
+  "verifiedCount": 887,
   "functions": [
     "mergePatch",
     "apply",
@@ -375,6 +375,8 @@
     "CompoundInitialCompletion",
     "NestedDoneNamesParent",
     "ClimbBookkeeping",
+    "FinalEnteredBookkeeping",
+    "ParallelEnterCompletesOnce",
     "NonFinalEntryInert",
     "FinalRegionClimbs",
     "FinalChildQueuesParentDone",
@@ -830,6 +832,11 @@
       "name": "done parallel machine takes transitions",
       "before": "  // A done machine processes no events.\n  if (state.done) return unchanged;\n  const step = parallelStep(",
       "after": "  const step = parallelStep("
+    },
+    {
+      "name": "entry pass forgets earlier completions",
+      "before": "    [...queued, ...final.raised],\n    final.completed\n  );",
+      "after": "    [...queued, ...final.raised],\n    completed\n  );"
     }
   ],
   "proofDefects": [

@@ -1477,6 +1477,7 @@ export type ParallelEntered = {
   reused: boolean;
   effects: readonly Effect[];
   raised: readonly Event[];
+  completed: readonly string[];
   done: boolean;
   output: number | undefined;
 };
@@ -1883,6 +1884,7 @@ export function parallelEnter(
       reused: true,
       effects: [],
       raised: [],
+      completed,
       done: false,
       output: undefined
     };
@@ -1921,6 +1923,7 @@ export function parallelEnter(
     reused: entered.reused && rest.reused,
     effects: [...entered.effects, ...rest.effects],
     raised: [...entered.raises, ...final.raised, ...rest.raised],
+    completed: rest.completed,
     done: final.done || rest.done,
     output: rest.done ? rest.output : final.output
   };
