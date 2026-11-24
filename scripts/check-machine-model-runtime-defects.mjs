@@ -119,6 +119,57 @@ const defects = [
     before: 'if (targets?.length && reenter && domain === transition.source) {',
     after: 'if (reenter && domain === transition.source) {',
     test: 'keeps targetless-reentry patches and effects without lifecycle callbacks'
+  },
+  {
+    name: 'the iteration bound stops one eventless step early',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'if (iterationCount > maxIterations) {',
+    after: 'if (iterationCount >= maxIterations) {',
+    testFile: 'packages/core/test/machine-model/eventless.test.ts',
+    test: 'finishes K eventless steps with one spare iteration'
+  },
+  {
+    name: 'eventless transitions are not reselected after a microstep',
+    file: 'packages/core/src/stateUtils.ts',
+    before:
+      'shouldSelectEventlessTransitions = nextSnapshot !== previousState;',
+    after: 'shouldSelectEventlessTransitions = false;',
+    testFile: 'packages/core/test/machine-model/eventless.test.ts',
+    test: 'chains eventless targets during initialization'
+  },
+  {
+    name: 'raised events are dequeued last in, first out',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'nextEvent = internalQueue.shift()!;',
+    after: 'nextEvent = internalQueue.pop()!;',
+    testFile: 'packages/core/test/machine-model/raised.test.ts',
+    test: 'queues exit, transition and entry raises in that order'
+  },
+  {
+    name: 'a nested done event names the final child',
+    file: 'packages/core/src/stateUtils.ts',
+    before: `createDoneStateEvent(
+              parent.id,`,
+    after: `createDoneStateEvent(
+              stateNodeToEnter.id,`,
+    testFile: 'packages/core/test/machine-model/compoundCompletion.test.ts',
+    test: 'raises a done event for the parent of a final child'
+  },
+  {
+    name: 'a parallel node completes more than once in one microstep',
+    file: 'packages/core/src/stateUtils.ts',
+    before: '!completedNodes.has(ancestorMarker) &&',
+    after: '',
+    testFile: 'packages/core/test/machine-model/parallelCompletion.test.ts',
+    test: 'queues the done event of atomic final regions between their entry raises'
+  },
+  {
+    name: 'a nested parallel region contributes no output',
+    file: 'packages/core/src/stateUtils.ts',
+    before: 'regionOutput[region.key] = regionDoneEvent?.output;',
+    after: 'regionOutput[region.key] = undefined;',
+    testFile: 'packages/core/test/machine-model/parallelCompletion.test.ts',
+    test: 'completes a nested parallel and its parent in one microstep'
   }
 ];
 try {

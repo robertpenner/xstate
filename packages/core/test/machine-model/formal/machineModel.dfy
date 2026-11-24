@@ -26,27 +26,35 @@ datatype Effect = Effect(action: int, args: seq<int>)
 
 datatype Result = Result(target: Option<string>, patch: Option<seq<PatchEntry>>, reenter: bool)
 
-datatype Evaluation = Evaluation(result: Option<Result>, effects: seq<Effect>)
+datatype Evaluation = Evaluation(result: Option<Result>, effects: seq<Effect>, raises: seq<Event>)
 
-datatype Node = Node(on: map<string, (map<string, int>, Event) -> Evaluation>, entry: (map<string, int>, Event) -> Evaluation, exit: (map<string, int>, Event) -> Evaluation)
+datatype Node = Node(on: map<string, (map<string, int>, Event) -> Evaluation>, always: (map<string, int>, Event) -> Evaluation, entry: (map<string, int>, Event) -> Evaluation, exit: (map<string, int>, Event) -> Evaluation, final: bool, output: (map<string, int>, Event) -> int)
 
-datatype Machine = Machine(initial: string, context: map<string, int>, states: map<string, Node>)
+datatype Machine = Machine(initial: string, context: map<string, int>, states: map<string, Node>, hasOutput: bool, output: (map<string, int>, Event) -> int)
 
-datatype Snapshot = Snapshot(value: string, context: map<string, int>)
+datatype Snapshot = Snapshot(value: string, context: map<string, int>, output: Option<int>)
 
-datatype Step = Step(snapshot: Snapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>)
+datatype Step = Step(snapshot: Snapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>, raised: seq<Event>)
 
-datatype Applied = Applied(context: map<string, int>, reused: bool, effects: seq<Effect>)
+datatype Macrostep = Macrostep(settled: bool, step: Step, queue: seq<Event>, trace: seq<Step>)
 
-datatype CompoundNode = CompoundNode(path: seq<string>, initialPath: seq<string>, children: seq<string>, initial: Option<string>, on: map<string, (map<string, int>, Event) -> Evaluation>, entry: (map<string, int>, Event) -> Evaluation, exit: (map<string, int>, Event) -> Evaluation)
+datatype Applied = Applied(context: map<string, int>, reused: bool, effects: seq<Effect>, raises: seq<Event>)
 
-datatype CompoundMachine = CompoundMachine(root: string, context: map<string, int>, nodes: map<string, CompoundNode>)
+datatype Completion = Completion(context: map<string, int>, reused: bool, effects: seq<Effect>, output: Option<int>)
 
-datatype CompoundSnapshot = CompoundSnapshot(path: seq<string>, context: map<string, int>)
+datatype CompoundNode = CompoundNode(path: seq<string>, initialPath: seq<string>, children: seq<string>, initial: Option<string>, on: map<string, (map<string, int>, Event) -> Evaluation>, entry: (map<string, int>, Event) -> Evaluation, exit: (map<string, int>, Event) -> Evaluation, final: bool, output: (map<string, int>, Event) -> int)
+
+datatype CompoundMachine = CompoundMachine(root: string, context: map<string, int>, nodes: map<string, CompoundNode>, hasOutput: bool, output: (map<string, int>, Event) -> int)
+
+datatype CompoundSnapshot = CompoundSnapshot(path: seq<string>, context: map<string, int>, output: Option<int>)
 
 datatype Selection = Selection(id: string, node: CompoundNode, evaluation: Evaluation)
 
-datatype CompoundStep = CompoundStep(snapshot: CompoundSnapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>)
+datatype CompoundStep = CompoundStep(snapshot: CompoundSnapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>, raised: seq<Event>)
+
+datatype CompoundCompletion = CompoundCompletion(context: map<string, int>, reused: bool, effects: seq<Effect>, raised: seq<Event>, output: Option<int>)
+
+datatype CompoundMacrostep = CompoundMacrostep(settled: bool, refused: bool, step: CompoundStep, queue: seq<Event>, trace: seq<CompoundStep>)
 
 datatype ParallelMachine = ParallelMachine(root: string, context: map<string, int>, nodes: map<string, CompoundNode>, order: seq<string>, parallels: seq<string>)
 
@@ -55,6 +63,20 @@ datatype ParallelSnapshot = ParallelSnapshot(active: seq<string>, context: map<s
 datatype ParallelStep = ParallelStep(snapshot: ParallelSnapshot, snapshotReused: bool, contextReused: bool, effects: seq<Effect>)
 
 datatype ParallelPlan = ParallelPlan(domain: seq<string>, reentered: Option<string>, extra: Option<string>, exits: seq<string>, entries: seq<string>, active: seq<string>)
+
+datatype ParallelOutputs = ParallelOutputs(hasOutput: bool, output: (map<string, int>, Event) -> int, regions: (string, seq<int>) -> int, missing: int)
+
+datatype ParallelState = ParallelState(snapshot: ParallelSnapshot, done: bool, output: Option<int>)
+
+datatype ParallelMicro = ParallelMicro(state: ParallelState, snapshotReused: bool, contextReused: bool, effects: seq<Effect>, raised: seq<Event>)
+
+datatype ParallelParts = ParallelParts(raised: seq<Event>, entries: seq<string>, entryContext: map<string, int>)
+
+datatype ParallelClimb = ParallelClimb(raised: seq<Event>, completed: seq<string>, done: bool, output: Option<int>)
+
+datatype ParallelEntered = ParallelEntered(context: map<string, int>, reused: bool, effects: seq<Effect>, raised: seq<Event>, completed: seq<string>, done: bool, output: Option<int>)
+
+datatype ParallelMacrostep = ParallelMacrostep(settled: bool, refused: bool, step: ParallelMicro, queue: seq<Event>, trace: seq<ParallelMicro>)
 
 function mergePatch(context: map<string, int>, patch: seq<PatchEntry>): map<string, int>
   decreases |patch|
@@ -73,10 +95,11 @@ lemma mergePatch_ensures(context: map<string, int>, patch: seq<PatchEntry>)
 
 function apply(context: map<string, int>, evaluation: Evaluation): Applied
   ensures apply(context, evaluation).effects == evaluation.effects
+  ensures apply(context, evaluation).raises == evaluation.raises
 {
   var result := evaluation.result;
   var patch := (match result { case Some(i_result_val) => i_result_val.patch case None => Option.None });
-  Applied((match patch { case Some(i_patch_val) => mergePatch(context, i_patch_val) case None => context }), (match patch { case Some(i_) => false case None => true }), evaluation.effects)
+  Applied((match patch { case Some(i_patch_val) => mergePatch(context, i_patch_val) case None => context }), (match patch { case Some(i_) => false case None => true }), evaluation.effects, evaluation.raises)
 }
 
 lemma apply_ensures(context: map<string, int>, evaluation: Evaluation)
@@ -86,7 +109,7 @@ lemma apply_ensures(context: map<string, int>, evaluation: Evaluation)
 
 function emptyEvaluation(): Evaluation
 {
-  Evaluation(None, [])
+  Evaluation(None, [], [])
 }
 
 lemma emptyEvaluation_ensures()
@@ -94,12 +117,47 @@ lemma emptyEvaluation_ensures()
 {
 }
 
+function completed(machine: Machine, value: string): bool
+{
+  ((value in machine.states) && (var i_node_val := machine.states[value]; i_node_val.final))
+}
+
+function doneEvent(id: string, output: int): Event
+{
+  Event(("xstate.done.state." + id), output)
+}
+
+function completion(machine: Machine, value: string, context: map<string, int>, event: Event): Completion
+{
+  if (value in machine.states) then
+    var i_node_val := machine.states[value];
+    if !(i_node_val.final) then
+      Completion(context, true, [], None)
+    else
+      var finalOutputOf := i_node_val.output;
+      var finalOutput := finalOutputOf(context, event);
+      var rootOutputOf := machine.output;
+      var output := (if machine.hasOutput then rootOutputOf(context, doneEvent(value, finalOutput)) else finalOutput);
+      var exit := i_node_val.exit;
+      var exited := apply(context, exit(context, event));
+      Completion(exited.context, exited.reused, exited.effects, Some(output))
+  else
+    Completion(context, true, [], None)
+}
+
+lemma completion_ensures(machine: Machine, value: string, context: map<string, int>, event: Event)
+  ensures (!(completed(machine, value)) ==> ((((completion(machine, value, context, event).context == context) && completion(machine, value, context, event).reused) && (|completion(machine, value, context, event).effects| == 0)) && (match completion(machine, value, context, event).output { case Some(i_) => false case None => true })))
+{
+}
+
 function initialTransition(machine: Machine, event: Event): Step
 {
   var node := (if machine.initial in machine.states then Some(machine.states[machine.initial]) else None);
   var entry := (match node { case Some(i_node_val) => Option.Some(i_node_val.entry) case None => Option.None });
-  var applied := apply(machine.context, (match entry { case Some(i_entry_val) => i_entry_val(machine.context, event) case None => emptyEvaluation() }));
-  Step(Snapshot(machine.initial, applied.context), false, applied.reused, applied.effects)
+  var entering := (match entry { case Some(i_entry_val) => i_entry_val(machine.context, event) case None => emptyEvaluation() });
+  var applied := apply(machine.context, entering);
+  var done := completion(machine, machine.initial, applied.context, event);
+  Step(Snapshot(machine.initial, done.context, done.output), false, (applied.reused && done.reused), (applied.effects + done.effects), entering.raises)
 }
 
 lemma initialTransition_ensures(machine: Machine, event: Event)
@@ -110,23 +168,9 @@ lemma initialTransition_ensures(machine: Machine, event: Event)
 function transition(machine: Machine, snapshot: Snapshot, event: Event): Step
 {
   var node := (if snapshot.value in machine.states then Some(machine.states[snapshot.value]) else None);
-  var handler := (match node { case Some(i_node_val) => (if event.type_ in i_node_val.on then Some(i_node_val.on[event.type_]) else None) case None => Option.None });
+  var handler := (match node { case Some(i_node_val) => (if i_node_val.final then Option.None else (if event.type_ in i_node_val.on then Some(i_node_val.on[event.type_]) else None)) case None => Option.None });
   var selected := (match handler { case Some(i_handler_val) => i_handler_val(snapshot.context, event) case None => emptyEvaluation() });
-  if ((match selected.result { case Some(i_) => false case None => true }) && (|selected.effects| == 0)) then
-    Step(snapshot, true, true, [])
-  else
-    var result := selected.result;
-    var target := (match result { case Some(i_result_val) => i_result_val.target case None => Option.None });
-    var next := (match target { case Some(i_oc0_val) => i_oc0_val case None => snapshot.value });
-    var reenter := (match result { case Some(i_result_val) => i_result_val.reenter case None => false });
-    var changes := ((match target { case Some(i_) => true case None => false }) && ((next != snapshot.value) || reenter));
-    var exit := (match node { case Some(i_node_val) => Option.Some(i_node_val.exit) case None => Option.None });
-    var exited := apply(snapshot.context, (match exit { case Some(i_exit_val) => (if changes then i_exit_val(snapshot.context, event) else emptyEvaluation()) case None => emptyEvaluation() }));
-    var updated := apply(exited.context, selected);
-    var destination := (if next in machine.states then Some(machine.states[next]) else None);
-    var entry := (match destination { case Some(i_destination_val) => Option.Some(i_destination_val.entry) case None => Option.None });
-    var entered := apply(updated.context, (match entry { case Some(i_entry_val) => (if changes then i_entry_val(updated.context, event) else emptyEvaluation()) case None => emptyEvaluation() }));
-    Step(Snapshot(next, entered.context), false, ((exited.reused && updated.reused) && entered.reused), ((exited.effects + updated.effects) + entered.effects))
+  takeTransition(machine, snapshot, event, node, selected)
 }
 
 lemma transition_ensures(machine: Machine, snapshot: Snapshot, event: Event)
@@ -134,12 +178,97 @@ lemma transition_ensures(machine: Machine, snapshot: Snapshot, event: Event)
 {
 }
 
+function takeTransition(machine: Machine, snapshot: Snapshot, event: Event, node: Option<Node>, selected: Evaluation): Step
+{
+  if (((match selected.result { case Some(i_) => false case None => true }) && (|selected.effects| == 0)) && (|selected.raises| == 0)) then
+    Step(snapshot, true, true, [], [])
+  else
+    var result := selected.result;
+    var target := (match result { case Some(i_result_val) => i_result_val.target case None => Option.None });
+    var next := (match target { case Some(i_oc0_val) => i_oc0_val case None => snapshot.value });
+    var reenter := (match result { case Some(i_result_val) => i_result_val.reenter case None => false });
+    var changes := ((match target { case Some(i_) => true case None => false }) && ((next != snapshot.value) || reenter));
+    var exit := (match node { case Some(i_node_val) => Option.Some(i_node_val.exit) case None => Option.None });
+    var exiting := (match exit { case Some(i_exit_val) => (if changes then i_exit_val(snapshot.context, event) else emptyEvaluation()) case None => emptyEvaluation() });
+    var exited := apply(snapshot.context, exiting);
+    var updated := apply(exited.context, selected);
+    var destination := (if next in machine.states then Some(machine.states[next]) else None);
+    var entry := (match destination { case Some(i_destination_val) => Option.Some(i_destination_val.entry) case None => Option.None });
+    var entering := (match entry { case Some(i_entry_val) => (if changes then i_entry_val(updated.context, event) else emptyEvaluation()) case None => emptyEvaluation() });
+    var entered := apply(updated.context, entering);
+    var done := (if changes then completion(machine, next, entered.context, event) else Completion(entered.context, true, [], snapshot.output));
+    Step(Snapshot(next, done.context, done.output), false, (((exited.reused && updated.reused) && entered.reused) && done.reused), (((exited.effects + updated.effects) + entered.effects) + done.effects), ((exiting.raises + selected.raises) + entering.raises))
+}
+
+lemma takeTransition_ensures(machine: Machine, snapshot: Snapshot, event: Event, node: Option<Node>, selected: Evaluation)
+  ensures (takeTransition(machine, snapshot, event, node, selected).snapshotReused ==> (takeTransition(machine, snapshot, event, node, selected).snapshot == snapshot))
+{
+}
+
+function alwaysSelected(machine: Machine, snapshot: Snapshot, event: Event): Evaluation
+{
+  var source := (if snapshot.value in machine.states then Some(machine.states[snapshot.value]) else None);
+  var always := (match source { case Some(i_source_val) => Option.Some(i_source_val.always) case None => Option.None });
+  match always {
+    case Some(i_always_val) =>
+      i_always_val(snapshot.context, event)
+    case None =>
+      emptyEvaluation()
+  }
+}
+
+function eventlessStep(machine: Machine, snapshot: Snapshot, event: Event, selected: Evaluation): Step
+{
+  var taken := takeTransition(machine, snapshot, event, (if snapshot.value in machine.states then Some(machine.states[snapshot.value]) else None), selected);
+  var kept := ((taken.snapshot.value == snapshot.value) && taken.contextReused);
+  Step((if kept then snapshot else taken.snapshot), kept, taken.contextReused, taken.effects, taken.raised)
+}
+
+lemma eventlessStep_ensures(machine: Machine, snapshot: Snapshot, event: Event, selected: Evaluation)
+  ensures (eventlessStep(machine, snapshot, event, selected).snapshotReused ==> (eventlessStep(machine, snapshot, event, selected).snapshot == snapshot))
+{
+}
+
+function settle(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>, remaining: int): Macrostep
+  decreases remaining
+{
+  if completed(machine, step.snapshot.value) then
+    Macrostep(true, step, [], [])
+  else
+    if (remaining <= 0) then
+      Macrostep(false, step, queue, [])
+    else
+      var selected := (if select then alwaysSelected(machine, step.snapshot, event) else emptyEvaluation());
+      var enabled := (((match selected.result { case Some(i_) => true case None => false }) || (|selected.effects| > 0)) || (|selected.raises| > 0));
+      if (!(enabled) && (|queue| == 0)) then
+        Macrostep(true, step, queue, [])
+      else
+        var processed := (if enabled then event else queue[0]);
+        var next := (if enabled then eventlessStep(machine, step.snapshot, event, selected) else transition(machine, step.snapshot, processed));
+        var waiting := (if enabled then queue else queue[1..]);
+        var rest := settle(machine, Step(next.snapshot, (step.snapshotReused && next.snapshotReused), (step.contextReused && next.contextReused), (step.effects + next.effects), (step.raised + next.raised)), processed, (!(enabled) || !(next.snapshotReused)), (waiting + next.raised), (remaining - 1));
+        Macrostep(rest.settled, rest.step, rest.queue, ([next] + rest.trace))
+}
+
+function initialMacrostep(machine: Machine, event: Event, maxIterations: int): Macrostep
+{
+  var first := initialTransition(machine, event);
+  settle(machine, first, event, true, first.raised, maxIterations)
+}
+
+function transitionMacrostep(machine: Machine, snapshot: Snapshot, event: Event, maxIterations: int): Macrostep
+{
+  var first := transition(machine, snapshot, event);
+  settle(machine, first, event, true, first.raised, maxIterations)
+}
+
 ghost function Selected(machine: Machine, snapshot: Snapshot, event: Event): Evaluation
 {
   if snapshot.value in machine.states &&
+     !machine.states[snapshot.value].final &&
      event.type_ in machine.states[snapshot.value].on
   then machine.states[snapshot.value].on[event.type_](snapshot.context, event)
-  else Evaluation(None, [])
+  else Evaluation(None, [], [])
 }
 
 ghost function LastPatchValue(patch: seq<PatchEntry>, key: string): Option<int>
@@ -192,21 +321,21 @@ lemma PatchStoresPresentUndefinedToken(context: map<string, int>, key: string, t
 }
 
 lemma ApplyPatchMeaning(context: map<string, int>, patch: seq<PatchEntry>, target: Option<string>,
-                       reenter: bool, effects: seq<Effect>)
-  ensures apply(context, Evaluation(Some(Result(target, Some(patch), reenter)), effects)) ==
-    Applied(mergePatch(context, patch), false, effects)
+                       reenter: bool, effects: seq<Effect>, raises: seq<Event>)
+  ensures apply(context, Evaluation(Some(Result(target, Some(patch), reenter)), effects, raises)) ==
+    Applied(mergePatch(context, patch), false, effects, raises)
 {
 }
 
-lemma EmptyPatchStillCopies(context: map<string, int>, effects: seq<Effect>)
-  ensures !apply(context, Evaluation(Some(Result(None, Some([]), false)), effects)).reused
-  ensures apply(context, Evaluation(Some(Result(None, Some([]), false)), effects)).context == context
+lemma EmptyPatchStillCopies(context: map<string, int>, effects: seq<Effect>, raises: seq<Event>)
+  ensures !apply(context, Evaluation(Some(Result(None, Some([]), false)), effects, raises)).reused
+  ensures apply(context, Evaluation(Some(Result(None, Some([]), false)), effects, raises)).context == context
 {
 }
 
 lemma NoPatchReusesContext(context: map<string, int>, evaluation: Evaluation)
   requires evaluation.result.None? || evaluation.result.value.patch.None?
-  ensures apply(context, evaluation) == Applied(context, true, evaluation.effects)
+  ensures apply(context, evaluation) == Applied(context, true, evaluation.effects, evaluation.raises)
 {
 }
 
@@ -218,48 +347,53 @@ lemma InitialDeclared(machine: Machine, event: Event)
 }
 
 lemma InitialLifecycle(machine: Machine, event: Event)
-  requires machine.initial in machine.states
+  requires machine.initial in machine.states && !machine.states[machine.initial].final
   ensures initialTransition(machine, event).effects ==
     machine.states[machine.initial].entry(machine.context, event).effects
   ensures initialTransition(machine, event).snapshot.context ==
     apply(machine.context, machine.states[machine.initial].entry(machine.context, event)).context
   ensures initialTransition(machine, event).contextReused ==
     apply(machine.context, machine.states[machine.initial].entry(machine.context, event)).reused
+  ensures initialTransition(machine, event).raised ==
+    machine.states[machine.initial].entry(machine.context, event).raises
 {
 }
 
 lemma MissingEventUnhandled(machine: Machine, snapshot: Snapshot, event: Event)
   requires snapshot.value in machine.states
   requires event.type_ !in machine.states[snapshot.value].on
-  ensures transition(machine, snapshot, event) == Step(snapshot, true, true, [])
+  ensures transition(machine, snapshot, event) == Step(snapshot, true, true, [], [])
 {
 }
 
 lemma DeclinedEventUnhandled(machine: Machine, snapshot: Snapshot, event: Event)
-  requires Selected(machine, snapshot, event) == Evaluation(None, [])
-  ensures transition(machine, snapshot, event) == Step(snapshot, true, true, [])
+  requires Selected(machine, snapshot, event) == Evaluation(None, [], [])
+  ensures transition(machine, snapshot, event) == Step(snapshot, true, true, [], [])
 {
 }
 
 lemma HandledIdentity(machine: Machine, snapshot: Snapshot, event: Event)
   ensures transition(machine, snapshot, event).snapshotReused <==>
     Selected(machine, snapshot, event).result.None? &&
-    |Selected(machine, snapshot, event).effects| == 0
+    |Selected(machine, snapshot, event).effects| == 0 &&
+    |Selected(machine, snapshot, event).raises| == 0
 {
 }
 
 lemma HandledNoopCopiesSnapshot(machine: Machine, snapshot: Snapshot, event: Event)
   requires Selected(machine, snapshot, event) ==
-    Evaluation(Some(Result(None, None, false)), [])
-  ensures transition(machine, snapshot, event) == Step(snapshot, false, true, [])
+    Evaluation(Some(Result(None, None, false)), [], [])
+  ensures transition(machine, snapshot, event) == Step(snapshot, false, true, [], [])
 {
 }
 
 lemma EffectOnlyHandled(machine: Machine, snapshot: Snapshot, event: Event)
   requires Selected(machine, snapshot, event).result.None?
-  requires |Selected(machine, snapshot, event).effects| > 0
+  requires |Selected(machine, snapshot, event).effects| > 0 ||
+           |Selected(machine, snapshot, event).raises| > 0
   ensures transition(machine, snapshot, event) ==
-    Step(snapshot, false, true, Selected(machine, snapshot, event).effects)
+    Step(snapshot, false, true, Selected(machine, snapshot, event).effects,
+         Selected(machine, snapshot, event).raises)
 {
 }
 
@@ -283,10 +417,11 @@ lemma StepDeclared(machine: Machine, snapshot: Snapshot, event: Event)
 }
 
 lemma TargetlessLifecycle(machine: Machine, snapshot: Snapshot, event: Event, patch: Option<seq<PatchEntry>>,
-                         effects: seq<Effect>)
-  requires Selected(machine, snapshot, event) == Evaluation(Some(Result(None, patch, false)), effects)
+                         effects: seq<Effect>, raises: seq<Event>)
+  requires Selected(machine, snapshot, event) == Evaluation(Some(Result(None, patch, false)), effects, raises)
   ensures transition(machine, snapshot, event).snapshot.value == snapshot.value
   ensures transition(machine, snapshot, event).effects == effects
+  ensures transition(machine, snapshot, event).raised == raises
   ensures transition(machine, snapshot, event).snapshot.context ==
     apply(snapshot.context, Selected(machine, snapshot, event)).context
   ensures transition(machine, snapshot, event).contextReused == patch.None?
@@ -294,10 +429,11 @@ lemma TargetlessLifecycle(machine: Machine, snapshot: Snapshot, event: Event, pa
 }
 
 lemma NonReenteringSelf(machine: Machine, snapshot: Snapshot, event: Event,
-                       patch: Option<seq<PatchEntry>>, effects: seq<Effect>)
+                       patch: Option<seq<PatchEntry>>, effects: seq<Effect>, raises: seq<Event>)
   requires Selected(machine, snapshot, event) ==
-    Evaluation(Some(Result(Some(snapshot.value), patch, false)), effects)
+    Evaluation(Some(Result(Some(snapshot.value), patch, false)), effects, raises)
   ensures transition(machine, snapshot, event).effects == effects
+  ensures transition(machine, snapshot, event).raised == raises
   ensures transition(machine, snapshot, event).snapshot.context ==
     apply(snapshot.context, Selected(machine, snapshot, event)).context
   ensures transition(machine, snapshot, event).contextReused == patch.None?
@@ -306,29 +442,34 @@ lemma NonReenteringSelf(machine: Machine, snapshot: Snapshot, event: Event,
 
 lemma LifecycleOrderAndContext(machine: Machine, snapshot: Snapshot, event: Event,
                               target: string, patch: Option<seq<PatchEntry>>, reenter: bool,
-                              effects: seq<Effect>)
+                              effects: seq<Effect>, raises: seq<Event>)
   requires snapshot.value in machine.states && target in machine.states
   requires target != snapshot.value || reenter
+  requires !machine.states[snapshot.value].final && !machine.states[target].final
   requires Selected(machine, snapshot, event) ==
-    Evaluation(Some(Result(Some(target), patch, reenter)), effects)
-  ensures var exited := apply(snapshot.context, machine.states[snapshot.value].exit(snapshot.context, event));
-          var updated := apply(exited.context, Evaluation(Some(Result(Some(target), patch, reenter)), effects));
-          var entered := apply(updated.context, machine.states[target].entry(updated.context, event));
+    Evaluation(Some(Result(Some(target), patch, reenter)), effects, raises)
+  ensures var exiting := machine.states[snapshot.value].exit(snapshot.context, event);
+          var exited := apply(snapshot.context, exiting);
+          var updated := apply(exited.context, Evaluation(Some(Result(Some(target), patch, reenter)), effects, raises));
+          var entering := machine.states[target].entry(updated.context, event);
+          var entered := apply(updated.context, entering);
           transition(machine, snapshot, event) ==
-            Step(Snapshot(target, entered.context), false,
+            Step(Snapshot(target, entered.context, None), false,
                  exited.reused && updated.reused && entered.reused,
-                 exited.effects + effects + entered.effects)
+                 exited.effects + effects + entered.effects,
+                 exiting.raises + raises + entering.raises)
 {
 }
 
 lemma TargetlessReentryLifecycle(machine: Machine, snapshot: Snapshot, event: Event,
-                                        patch: Option<seq<PatchEntry>>, effects: seq<Effect>)
+                                        patch: Option<seq<PatchEntry>>, effects: seq<Effect>,
+                                        raises: seq<Event>)
   requires snapshot.value in machine.states
-  requires Selected(machine, snapshot, event) == Evaluation(Some(Result(None, patch, true)), effects)
+  requires Selected(machine, snapshot, event) == Evaluation(Some(Result(None, patch, true)), effects, raises)
   ensures var updated := apply(snapshot.context, Selected(machine, snapshot, event));
           transition(machine, snapshot, event) ==
-            Step(Snapshot(snapshot.value, updated.context), false,
-                 updated.reused, effects)
+            Step(Snapshot(snapshot.value, updated.context, snapshot.output), false,
+                 updated.reused, effects, raises)
 {
 }
 
@@ -366,7 +507,7 @@ function select(nodes: map<string, CompoundNode>, path: seq<string>, context: ma
     var on := node.on;
     var handler := (if event.type_ in on then Some(on[event.type_]) else None);
     var evaluation := (match handler { case Some(i_handler_val) => i_handler_val(context, event) case None => emptyEvaluation() });
-    if ((match evaluation.result { case Some(i_) => true case None => false }) || (|evaluation.effects| > 0)) then
+    if (((match evaluation.result { case Some(i_) => true case None => false }) || (|evaluation.effects| > 0)) || (|evaluation.raises| > 0)) then
       Some(Selection(id, node, evaluation))
     else
       select(nodes, path[0..(|path| - 1)], context, event)
@@ -463,10 +604,10 @@ lemma reverse_ensures(path: seq<string>)
 function lifecycle(nodes: map<string, CompoundNode>, path: seq<string>, context: map<string, int>, event: Event, exiting: bool): Applied
   requires declaredPath(nodes, path)
   decreases |path|
-  ensures |path| == 0 ==> lifecycle(nodes, path, context, event, exiting) == Applied(context, true, [])
+  ensures |path| == 0 ==> lifecycle(nodes, path, context, event, exiting) == Applied(context, true, [], [])
 {
   if (|path| == 0) then
-    Applied(context, true, [])
+    Applied(context, true, [], [])
   else
     var node := lookupNode(nodes, path[0]);
     var exit := node.exit;
@@ -474,7 +615,7 @@ function lifecycle(nodes: map<string, CompoundNode>, path: seq<string>, context:
     var evaluation := (if exiting then exit(context, event) else entry(context, event));
     var first := apply(context, evaluation);
     var rest := lifecycle(nodes, path[1..], first.context, event, exiting);
-    Applied(rest.context, (first.reused && rest.reused), (first.effects + rest.effects))
+    Applied(rest.context, (first.reused && rest.reused), (first.effects + rest.effects), (first.raises + rest.raises))
 }
 
 lemma lifecycle_ensures(nodes: map<string, CompoundNode>, path: seq<string>, context: map<string, int>, event: Event, exiting: bool)
@@ -524,6 +665,41 @@ function ready(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Even
   }
 }
 
+function compoundDone(machine: CompoundMachine, path: seq<string>): bool
+  requires declaredPath(machine.nodes, path)
+{
+  if (|path| < 2) then
+    false
+  else
+    if (path[(|path| - 2)] != machine.root) then
+      false
+    else
+      lookupNode(machine.nodes, path[(|path| - 1)]).final
+}
+
+function compoundCompletion(machine: CompoundMachine, path: seq<string>, entering: bool, context: map<string, int>, event: Event): CompoundCompletion
+  requires declaredPath(machine.nodes, path)
+{
+  if (!(entering) || (|path| < 2)) then
+    CompoundCompletion(context, true, [], [], None)
+  else
+    var leafId := path[(|path| - 1)];
+    var leaf := lookupNode(machine.nodes, leafId);
+    if !(leaf.final) then
+      CompoundCompletion(context, true, [], [], None)
+    else
+      var leafOutput := leaf.output;
+      var finalOutput := leafOutput(context, event);
+      var parentId := path[(|path| - 2)];
+      if (parentId != machine.root) then
+        CompoundCompletion(context, true, [], [doneEvent(parentId, finalOutput)], None)
+      else
+        var rootOutput := machine.output;
+        var output := (if machine.hasOutput then rootOutput(context, doneEvent(leafId, finalOutput)) else finalOutput);
+        var exited := lifecycle(machine.nodes, reverse(path), context, event, true);
+        CompoundCompletion(exited.context, exited.reused, exited.effects, [], Some(output))
+}
+
 function compoundInitialTransition(machine: CompoundMachine, event: Event): CompoundStep
   requires (machine.root in machine.nodes)
   requires declaredPath(machine.nodes, lookupNode(machine.nodes, machine.root).initialPath)
@@ -531,7 +707,8 @@ function compoundInitialTransition(machine: CompoundMachine, event: Event): Comp
 {
   var path := descend(machine.nodes, machine.root);
   var entered := lifecycle(machine.nodes, path, machine.context, event, false);
-  CompoundStep(CompoundSnapshot(path, entered.context), false, entered.reused, entered.effects)
+  var done := compoundCompletion(machine, path, true, entered.context, event);
+  CompoundStep(CompoundSnapshot(path, done.context, done.output), false, (entered.reused && done.reused), (entered.effects + done.effects), (entered.raises + done.raised))
 }
 
 lemma compoundInitialTransition_ensures(machine: CompoundMachine, event: Event)
@@ -547,28 +724,32 @@ function compoundTransition(machine: CompoundMachine, snapshot: CompoundSnapshot
   requires ready(machine, snapshot, event)
   requires forall k :: ((k in machine.nodes) ==> initialWitness(machine.nodes, k))
 {
-  var selected := select(machine.nodes, snapshot.path, snapshot.context, event);
-  match selected {
-    case Some(i_selected_val) =>
-      var result := i_selected_val.evaluation.result;
-      var target := (match result { case Some(i_result_val) => i_result_val.target case None => Option.None });
-      var reenter := (match result { case Some(i_result_val) => i_result_val.reenter case None => false });
-      var nextPath := (match target { case Some(i_target_val) => descend(machine.nodes, i_target_val) case None => snapshot.path });
-      var targetPath := (match target { case Some(i_target_val) => lookupNode(machine.nodes, i_target_val).path case None => [] });
-      var sourcePath := i_selected_val.node.path;
-      var contained := (commonPrefix(sourcePath, targetPath) == |sourcePath|);
-      var targetAncestors := (if (|targetPath| == 0) then [] else targetPath[0..(|targetPath| - 1)]);
-      var kept := (if contained then (|sourcePath| - (if reenter then 1 else 0)) else commonPrefix(sourcePath, targetAncestors));
-      var exitKept := (if ((match target { case Some(i_value) => (i_value == machine.root) case None => false }) && !(reenter)) then 1 else kept);
-      var exitPath := (match target { case Some(i_target_val) => reverse(snapshot.path[exitKept..]) case None => [] });
-      var entryPath := (match target { case Some(i_target_val) => nextPath[kept..] case None => [] });
-      var exited := lifecycle(machine.nodes, exitPath, snapshot.context, event, true);
-      var updated := apply(exited.context, i_selected_val.evaluation);
-      var entered := lifecycle(machine.nodes, entryPath, updated.context, event, false);
-      CompoundStep(CompoundSnapshot(nextPath, entered.context), false, ((exited.reused && updated.reused) && entered.reused), ((exited.effects + updated.effects) + entered.effects))
-    case None =>
-      CompoundStep(snapshot, true, true, [])
-  }
+  if compoundDone(machine, snapshot.path) then
+    CompoundStep(snapshot, true, true, [], [])
+  else
+    var selected := select(machine.nodes, snapshot.path, snapshot.context, event);
+    match selected {
+      case Some(i_selected_val) =>
+        var result := i_selected_val.evaluation.result;
+        var target := (match result { case Some(i_result_val) => i_result_val.target case None => Option.None });
+        var reenter := (match result { case Some(i_result_val) => i_result_val.reenter case None => false });
+        var nextPath := (match target { case Some(i_target_val) => descend(machine.nodes, i_target_val) case None => snapshot.path });
+        var targetPath := (match target { case Some(i_target_val) => lookupNode(machine.nodes, i_target_val).path case None => [] });
+        var sourcePath := i_selected_val.node.path;
+        var contained := (commonPrefix(sourcePath, targetPath) == |sourcePath|);
+        var targetAncestors := (if (|targetPath| == 0) then [] else targetPath[0..(|targetPath| - 1)]);
+        var kept := (if contained then (|sourcePath| - (if reenter then 1 else 0)) else commonPrefix(sourcePath, targetAncestors));
+        var exitKept := (if ((match target { case Some(i_value) => (i_value == machine.root) case None => false }) && !(reenter)) then 1 else kept);
+        var exitPath := (match target { case Some(i_target_val) => reverse(snapshot.path[exitKept..]) case None => [] });
+        var entryPath := (match target { case Some(i_target_val) => nextPath[kept..] case None => [] });
+        var exited := lifecycle(machine.nodes, exitPath, snapshot.context, event, true);
+        var updated := apply(exited.context, i_selected_val.evaluation);
+        var entered := lifecycle(machine.nodes, entryPath, updated.context, event, false);
+        var done := compoundCompletion(machine, nextPath, (|entryPath| > 0), entered.context, event);
+        CompoundStep(CompoundSnapshot(nextPath, done.context, done.output), false, (((exited.reused && updated.reused) && entered.reused) && done.reused), (((exited.effects + updated.effects) + entered.effects) + done.effects), (((exited.raises + updated.raises) + entered.raises) + done.raised))
+      case None =>
+        CompoundStep(snapshot, true, true, [], [])
+    }
 }
 
 lemma compoundTransition_ensures(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event)
@@ -579,379 +760,46 @@ lemma compoundTransition_ensures(machine: CompoundMachine, snapshot: CompoundSna
 {
 }
 
-ghost predicate TreePath(machine: CompoundMachine, path: seq<string>)
+function compoundSettle(machine: CompoundMachine, step: CompoundStep, queue: seq<Event>, remaining: int): CompoundMacrostep
+  requires forall k :: ((k in machine.nodes) ==> initialWitness(machine.nodes, k))
+  decreases remaining
 {
-  |path| > 0 && path[0] == machine.root &&
-  declaredPath(machine.nodes, path) &&
-  |machine.nodes[path[|path| - 1]].children| == 0 &&
-  (forall i :: 0 <= i < |path| ==> machine.nodes[path[i]].path == path[..i + 1]) &&
-  (forall i :: 0 <= i < |path| - 1 ==> path[i + 1] in machine.nodes[path[i]].children)
+  if !(declaredPath(machine.nodes, step.snapshot.path)) then
+    CompoundMacrostep(false, true, step, queue, [])
+  else
+    if compoundDone(machine, step.snapshot.path) then
+      CompoundMacrostep(true, false, step, [], [])
+    else
+      if (remaining <= 0) then
+        CompoundMacrostep(false, false, step, queue, [])
+      else
+        if (|queue| == 0) then
+          CompoundMacrostep(true, false, step, queue, [])
+        else
+          if !(ready(machine, step.snapshot, queue[0])) then
+            CompoundMacrostep(false, true, step, queue, [])
+          else
+            var next := compoundTransition(machine, step.snapshot, queue[0]);
+            var rest := compoundSettle(machine, CompoundStep(next.snapshot, (step.snapshotReused && next.snapshotReused), (step.contextReused && next.contextReused), (step.effects + next.effects), (step.raised + next.raised)), (queue[1..] + next.raised), (remaining - 1));
+            CompoundMacrostep(rest.settled, rest.refused, rest.step, rest.queue, ([next] + rest.trace))
 }
 
-ghost predicate WellFormed(machine: CompoundMachine)
+function compoundInitialMacrostep(machine: CompoundMachine, event: Event, maxIterations: int): CompoundMacrostep
+  requires (machine.root in machine.nodes)
+  requires declaredPath(machine.nodes, lookupNode(machine.nodes, machine.root).initialPath)
+  requires forall k :: ((k in machine.nodes) ==> initialWitness(machine.nodes, k))
 {
-  machine.root in machine.nodes &&
-  machine.nodes[machine.root].path == [machine.root] &&
-  (forall id :: id in machine.nodes ==>
-    |machine.nodes[id].path| > 0 &&
-    machine.nodes[id].path[|machine.nodes[id].path| - 1] == id &&
-    initialWitness(machine.nodes, id) &&
-    TreePath(machine, machine.nodes[id].initialPath) &&
-    commonPrefix(machine.nodes[id].path, machine.nodes[id].initialPath) == |machine.nodes[id].path| &&
-    (forall child :: child in machine.nodes[id].children ==>
-      child in machine.nodes &&
-      machine.nodes[child].path == machine.nodes[id].path + [child]))
+  var first := compoundInitialTransition(machine, event);
+  compoundSettle(machine, first, first.raised, maxIterations)
 }
 
-ghost predicate ValidConfiguration(machine: CompoundMachine, path: seq<string>)
-{
-  TreePath(machine, path) &&
-  (forall i :: 0 <= i < |path| && |machine.nodes[path[i]].children| > 0 ==>
-    (exists child :: child in machine.nodes[path[i]].children && child in path) &&
-    (forall a, b ::
-      (a in machine.nodes[path[i]].children && a in path &&
-      b in machine.nodes[path[i]].children && b in path) ==> a == b))
-}
-
-lemma PathHasExactlyOneChild(machine: CompoundMachine, path: seq<string>)
-  requires WellFormed(machine)
-  requires TreePath(machine, path)
-  ensures ValidConfiguration(machine, path)
-{
-  forall i | 0 <= i < |path| && |machine.nodes[path[i]].children| > 0
-    ensures (exists child :: child in machine.nodes[path[i]].children && child in path) &&
-      (forall a, b ::
-        (a in machine.nodes[path[i]].children && a in path &&
-        b in machine.nodes[path[i]].children && b in path) ==> a == b)
-  {
-    assert i < |path| - 1;
-    assert path[i + 1] in machine.nodes[path[i]].children;
-    forall child | child in machine.nodes[path[i]].children && child in path
-      ensures child == path[i + 1]
-    {
-      var j :| 0 <= j < |path| && path[j] == child;
-      assert machine.nodes[child].path == path[..j + 1];
-      assert machine.nodes[child].path == path[..i + 1] + [child];
-      assert j == i + 1;
-    }
-  }
-}
-
-lemma CompoundInitialValid(machine: CompoundMachine, event: Event)
-  requires WellFormed(machine)
-  ensures ValidConfiguration(machine, compoundInitialTransition(machine, event).snapshot.path)
-{
-  PathHasExactlyOneChild(machine, machine.nodes[machine.root].initialPath);
-}
-
-lemma CompoundStepValid(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event)
-  requires WellFormed(machine)
-  requires ValidConfiguration(machine, snapshot.path)
+function compoundMacrostep(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event, maxIterations: int): CompoundMacrostep
+  requires declaredPath(machine.nodes, snapshot.path)
   requires ready(machine, snapshot, event)
-  ensures ValidConfiguration(machine, compoundTransition(machine, snapshot, event).snapshot.path)
+  requires forall k :: ((k in machine.nodes) ==> initialWitness(machine.nodes, k))
 {
-  var chosen := select(machine.nodes, snapshot.path, snapshot.context, event);
-  if chosen.Some? && chosen.value.evaluation.result.Some? &&
-     chosen.value.evaluation.result.value.target.Some? {
-    var target := chosen.value.evaluation.result.value.target.value;
-    assert target in machine.nodes;
-    PathHasExactlyOneChild(machine, machine.nodes[target].initialPath);
-  }
-}
-
-lemma InitialDescendantTraversal(nodes: map<string, CompoundNode>, id: string)
-  requires id in nodes
-  requires forall k :: k in nodes ==> initialWitness(nodes, k)
-  ensures nodes[id].initial.None? ==> descend(nodes, id) == nodes[id].path
-  ensures nodes[id].initial.Some? ==>
-    descend(nodes, id) == descend(nodes, nodes[id].initial.value)
-{
-  assert initialWitness(nodes, id);
-}
-
-ghost function NodeEvaluation(nodes: map<string, CompoundNode>, id: string,
-                              context: map<string, int>, event: Event): Evaluation
-  requires id in nodes
-{
-  if event.type_ in nodes[id].on then nodes[id].on[event.type_](context, event)
-  else Evaluation(None, [])
-}
-
-ghost predicate Enabled(evaluation: Evaluation)
-{
-  evaluation.result.Some? || |evaluation.effects| > 0
-}
-
-lemma DeepestSelection(nodes: map<string, CompoundNode>, path: seq<string>,
-                       context: map<string, int>, event: Event)
-  requires declaredPath(nodes, path)
-  ensures select(nodes, path, context, event).None? <==>
-    (forall i :: 0 <= i < |path| ==> !Enabled(NodeEvaluation(nodes, path[i], context, event)))
-  ensures select(nodes, path, context, event).Some? ==>
-    (exists i :: 0 <= i < |path| &&
-      select(nodes, path, context, event).value == Selection(path[i], nodes[path[i]], NodeEvaluation(nodes, path[i], context, event)) &&
-      Enabled(NodeEvaluation(nodes, path[i], context, event)) &&
-      (forall j :: i < j < |path| ==> !Enabled(NodeEvaluation(nodes, path[j], context, event))))
-  decreases |path|
-{
-  if |path| > 0 {
-    var last := |path| - 1;
-    if Enabled(NodeEvaluation(nodes, path[last], context, event)) {
-      assert select(nodes, path, context, event).value ==
-        Selection(path[last], nodes[path[last]], NodeEvaluation(nodes, path[last], context, event));
-    } else {
-      var prefix := path[..last];
-      DeepestSelection(nodes, prefix, context, event);
-      assert select(nodes, path, context, event) == select(nodes, prefix, context, event);
-      if select(nodes, prefix, context, event).Some? {
-        var i :| 0 <= i < last &&
-          select(nodes, prefix, context, event).value ==
-            Selection(prefix[i], nodes[prefix[i]], NodeEvaluation(nodes, prefix[i], context, event)) &&
-          Enabled(NodeEvaluation(nodes, prefix[i], context, event)) &&
-          (forall j :: i < j < last ==> !Enabled(NodeEvaluation(nodes, prefix[j], context, event)));
-        forall j | i < j < |path|
-          ensures !Enabled(NodeEvaluation(nodes, path[j], context, event))
-        {
-          if j < last {
-            assert prefix[j] == path[j];
-          }
-        }
-      } else {
-        forall i | 0 <= i < |path|
-          ensures !Enabled(NodeEvaluation(nodes, path[i], context, event))
-        {
-          if i < last {
-            assert prefix[i] == path[i];
-          }
-        }
-      }
-    }
-  }
-}
-
-lemma DecliningChildFallsBack(nodes: map<string, CompoundNode>, path: seq<string>,
-                             context: map<string, int>, event: Event)
-  requires declaredPath(nodes, path) && |path| > 0
-  requires NodeEvaluation(nodes, path[|path| - 1], context, event) == Evaluation(None, [])
-  ensures select(nodes, path, context, event) == select(nodes, path[..|path| - 1], context, event)
-{
-}
-
-lemma ExplicitBlockWins(nodes: map<string, CompoundNode>, path: seq<string>,
-                       context: map<string, int>, event: Event)
-  requires declaredPath(nodes, path) && |path| > 0
-  requires NodeEvaluation(nodes, path[|path| - 1], context, event) ==
-    Evaluation(Some(Result(None, None, false)), [])
-  ensures select(nodes, path, context, event).Some?
-  ensures select(nodes, path, context, event).value.id == path[|path| - 1]
-{
-}
-
-lemma EffectOnlyChildWins(nodes: map<string, CompoundNode>, path: seq<string>,
-                         context: map<string, int>, event: Event)
-  requires declaredPath(nodes, path) && |path| > 0
-  requires |NodeEvaluation(nodes, path[|path| - 1], context, event).effects| > 0
-  ensures select(nodes, path, context, event).Some?
-  ensures select(nodes, path, context, event).value.id == path[|path| - 1]
-{
-}
-
-lemma {:induction false} {:isolate_assertions} LifecycleCons(nodes: map<string, CompoundNode>, path: seq<string>,
-  context: map<string, int>, event: Event, exiting: bool)
-  requires declaredPath(nodes, path) && |path| > 0
-  ensures var evaluation := if exiting then nodes[path[0]].exit(context, event) else nodes[path[0]].entry(context, event);
-    var first := apply(context, evaluation);
-    var rest := lifecycle(nodes, path[1..], first.context, event, exiting);
-    lifecycle(nodes, path, context, event, exiting) ==
-      Applied(rest.context, first.reused && rest.reused, first.effects + rest.effects)
-{
-}
-
-lemma {:induction false} {:isolate_assertions} LifecycleConcatenation(nodes: map<string, CompoundNode>, a: seq<string>, b: seq<string>,
-                             context: map<string, int>, event: Event, exiting: bool)
-  requires declaredPath(nodes, a + b)
-  ensures var first := lifecycle(nodes, a, context, event, exiting);
-          var second := lifecycle(nodes, b, first.context, event, exiting);
-          lifecycle(nodes, a + b, context, event, exiting) ==
-            Applied(second.context, first.reused && second.reused, first.effects + second.effects)
-  decreases |a|
-{
-  hide *;
-  if |a| > 0 {
-    assert lookupNode(nodes, a[0]) == nodes[a[0]];
-    var evaluation := if exiting then nodes[a[0]].exit(context, event) else nodes[a[0]].entry(context, event);
-    var first := apply(context, evaluation);
-    assert a + b == [a[0]] + (a[1..] + b);
-    assert (a + b)[1..] == a[1..] + b;
-    LifecycleCons(nodes, a, context, event, exiting);
-    LifecycleCons(nodes, a + b, context, event, exiting);
-    LifecycleConcatenation(nodes, a[1..], b, first.context, event, exiting);
-    var rest := lifecycle(nodes, a[1..], first.context, event, exiting);
-    var second := lifecycle(nodes, b, rest.context, event, exiting);
-    assert lifecycle(nodes, a, context, event, exiting) ==
-      Applied(rest.context, first.reused && rest.reused, first.effects + rest.effects);
-    assert lifecycle(nodes, a[1..] + b, first.context, event, exiting) ==
-      Applied(second.context, rest.reused && second.reused, rest.effects + second.effects);
-    assert lifecycle(nodes, a + b, context, event, exiting) ==
-      Applied(second.context, first.reused && (rest.reused && second.reused),
-        first.effects + (rest.effects + second.effects));
-    assert first.effects + (rest.effects + second.effects) ==
-      (first.effects + rest.effects) + second.effects;
-  } else {
-    assert a + b == b;
-    assert lifecycle(nodes, a, context, event, exiting) == Applied(context, true, []);
-  }
-}
-
-ghost function Target(evaluation: Evaluation): Option<string>
-{
-  if evaluation.result.Some? then evaluation.result.value.target else None
-}
-
-ghost function Reenters(evaluation: Evaluation): bool
-{
-  evaluation.result.Some? && evaluation.result.value.reenter
-}
-
-ghost function Kept(source: seq<string>, target: seq<string>, reenter: bool): int
-{
-  if commonPrefix(source, target) == |source|
-  then |source| - (if reenter then 1 else 0)
-  else commonPrefix(source, if |target| == 0 then [] else target[..|target| - 1])
-}
-
-lemma {:induction false} {:isolate_assertions} CompoundLifecycleMeaning(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event)
-  requires WellFormed(machine)
-  requires ValidConfiguration(machine, snapshot.path)
-  requires ready(machine, snapshot, event)
-  ensures var chosen := select(machine.nodes, snapshot.path, snapshot.context, event);
-    chosen.None? ==> compoundTransition(machine, snapshot, event) == CompoundStep(snapshot, true, true, [])
-  ensures var chosen := select(machine.nodes, snapshot.path, snapshot.context, event);
-    chosen.Some? ==>
-      var target := Target(chosen.value.evaluation);
-      var reenter := Reenters(chosen.value.evaluation);
-      var nextPath := if target.Some? then machine.nodes[target.value].initialPath else snapshot.path;
-      var kept := if target.Some? then Kept(chosen.value.node.path, machine.nodes[target.value].path, reenter) else 0;
-      var exitKept := if target == Some(machine.root) && !reenter then 1 else kept;
-      var exits := if target.Some? then reverse(snapshot.path[exitKept..]) else [];
-      var entries := if target.Some? then nextPath[kept..] else [];
-      var exited := lifecycle(machine.nodes, exits, snapshot.context, event, true);
-      var updated := apply(exited.context, chosen.value.evaluation);
-      var entered := lifecycle(machine.nodes, entries, updated.context, event, false);
-      compoundTransition(machine, snapshot, event) ==
-        CompoundStep(CompoundSnapshot(nextPath, entered.context), false,
-          exited.reused && updated.reused && entered.reused,
-          exited.effects + chosen.value.evaluation.effects + entered.effects)
-{
-  hide *;
-  assert declaredPath(machine.nodes, snapshot.path) by {
-    reveal ValidConfiguration(), TreePath();
-  }
-  assert forall k :: k in machine.nodes ==> initialWitness(machine.nodes, k) by {
-    reveal WellFormed();
-  }
-  reveal Target(), Reenters(), Kept(), compoundTransition();
-  var chosen := select(machine.nodes, snapshot.path, snapshot.context, event);
-  if chosen.Some? {
-    var target := Target(chosen.value.evaluation);
-    var reenter := Reenters(chosen.value.evaluation);
-    if target.Some? {
-      assert target.value in machine.nodes by {
-        reveal ready();
-      }
-      assert descend(machine.nodes, target.value) == machine.nodes[target.value].initialPath by {
-        reveal WellFormed();
-      }
-      if reenter {
-        assert chosen.value.evaluation.result.value.reenter;
-      } else {
-        assert !chosen.value.evaluation.result.value.reenter;
-      }
-    } else {
-      if reenter {
-        assert chosen.value.evaluation.result.Some?;
-      } else {
-        assert !Reenters(chosen.value.evaluation);
-      }
-    }
-  }
-}
-
-lemma CompoundSelfResetsDescendants(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event)
-  requires WellFormed(machine)
-  requires ValidConfiguration(machine, snapshot.path)
-  requires ready(machine, snapshot, event)
-  requires select(machine.nodes, snapshot.path, snapshot.context, event).Some?
-  requires Target(select(machine.nodes, snapshot.path, snapshot.context, event).value.evaluation) ==
-    Some(select(machine.nodes, snapshot.path, snapshot.context, event).value.id)
-  ensures compoundTransition(machine, snapshot, event).snapshot.path ==
-    machine.nodes[select(machine.nodes, snapshot.path, snapshot.context, event).value.id].initialPath
-{
-}
-
-lemma {:induction false} ReverseLifecycleOrder(path: seq<string>, i: int)
-  requires 0 <= i < |path|
-  ensures reverse(path)[i] == path[|path| - 1 - i]
-  decreases |path|
-{
-  if i < |path| - 1 {
-    ReverseLifecycleOrder(path[1..], i);
-    assert reverse(path)[i] == reverse(path[1..])[i];
-    assert path[1..][|path| - 2 - i] == path[|path| - 1 - i];
-  } else {
-    assert reverse(path)[i] == path[0];
-  }
-}
-
-lemma PreservedAncestorsAreNotExited(path: seq<string>, kept: int, i: int)
-  requires 0 <= i < kept <= |path|
-  requires forall a, b :: 0 <= a < b < |path| ==> path[a] != path[b]
-  ensures path[i] !in reverse(path[kept..])
-{
-}
-
-lemma {:induction false} {:isolate_assertions} CompoundLifecycleWitness(reenter: bool)
-{
-  var empty: (map<string, int>, Event) -> Evaluation :=
-    (context, event) => Evaluation(None, []);
-  var rootExit: (map<string, int>, Event) -> Evaluation :=
-    (context, event) => Evaluation(None, [Effect(0, [])]);
-  var parentEntry: (map<string, int>, Event) -> Evaluation :=
-    (context, event) => Evaluation(None, [Effect(1, [])]);
-  var parentExit: (map<string, int>, Event) -> Evaluation :=
-    (context, event) => Evaluation(None, [Effect(2, [])]);
-  var childEntry: (map<string, int>, Event) -> Evaluation :=
-    (context, event) => Evaluation(None, [Effect(3, [])]);
-  var childExit: (map<string, int>, Event) -> Evaluation :=
-    (context, event) => Evaluation(None, [Effect(4, [])]);
-  var sibling: (map<string, int>, Event) -> Evaluation :=
-    (context, event) => Evaluation(Some(Result(Some("b"), None, false)), []);
-  var reset: (map<string, int>, Event) -> Evaluation :=
-    (context, event) => Evaluation(Some(Result(Some("p"), None, reenter)), []);
-  var root := CompoundNode(["r"], ["r", "p", "a"], ["p"], Some("p"), map[], empty, rootExit);
-  var parent := CompoundNode(["r", "p"], ["r", "p", "a"], ["a", "b"], Some("a"), map["reset" := reset], parentEntry, parentExit);
-  var a := CompoundNode(["r", "p", "a"], ["r", "p", "a"], [], None, map["go" := sibling], childEntry, childExit);
-  var b := CompoundNode(["r", "p", "b"], ["r", "p", "b"], [], None, map[], childEntry, childExit);
-  var machine := CompoundMachine("r", map[], map["r" := root, "p" := parent, "a" := a, "b" := b]);
-  var snapshot := CompoundSnapshot(["r", "p", "a"], map[]);
-  assert forall id :: id in machine.nodes ==> initialWitness(machine.nodes, id);
-  assert compoundTransition(machine, snapshot, Event("go", 0)).effects ==
-    [Effect(4, []), Effect(3, [])];
-  assert select(machine.nodes, snapshot.path, snapshot.context, Event("reset", 0)) ==
-    Some(Selection("p", parent, Evaluation(Some(Result(Some("p"), None, reenter)), [])));
-  if reenter {
-    LifecycleCons(machine.nodes, ["a", "p"], map[], Event("reset", 0), true);
-    LifecycleCons(machine.nodes, ["p", "a"], map[], Event("reset", 0), false);
-    assert lifecycle(machine.nodes, ["a", "p"], map[], Event("reset", 0), true).effects ==
-      [Effect(4, []), Effect(2, [])];
-    assert lifecycle(machine.nodes, ["p", "a"], map[], Event("reset", 0), false).effects ==
-      [Effect(1, []), Effect(3, [])];
-    assert compoundTransition(machine, snapshot, Event("reset", 0)).effects ==
-      [Effect(4, []), Effect(2, []), Effect(1, []), Effect(3, [])];
-  } else {
-    assert compoundTransition(machine, snapshot, Event("reset", 0)).effects ==
-      [Effect(4, []), Effect(3, [])];
-  }
+  var first := compoundTransition(machine, snapshot, event);
+  compoundSettle(machine, first, first.raised, maxIterations)
 }
 
 function below(path: seq<string>, prefix: seq<string>): bool
@@ -1035,7 +883,7 @@ function transitionDomain(parallels: seq<string>, source: seq<string>, target: s
 function runLifecycle(nodes: map<string, CompoundNode>, path: seq<string>, context: map<string, int>, event: Event, exiting: bool): Applied
 {
   if !(declaredPath(nodes, path)) then
-    Applied(context, true, [])
+    Applied(context, true, [], [])
   else
     lifecycle(nodes, path, context, event, exiting)
 }
@@ -1256,11 +1104,11 @@ function applyAll(context: map<string, int>, selections: seq<Selection>): Applie
   decreases |selections|
 {
   if (|selections| == 0) then
-    Applied(context, true, [])
+    Applied(context, true, [], [])
   else
     var first := apply(context, selections[0].evaluation);
     var rest := applyAll(first.context, selections[1..]);
-    Applied(rest.context, (first.reused && rest.reused), (first.effects + rest.effects))
+    Applied(rest.context, (first.reused && rest.reused), (first.effects + rest.effects), (first.raises + rest.raises))
 }
 
 lemma applyAll_ensures(context: map<string, int>, selections: seq<Selection>)
@@ -1349,6 +1197,261 @@ function parallelStep(machine: ParallelMachine, snapshot: ParallelSnapshot, even
 lemma parallelStep_ensures(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
   ensures (parallelStep(machine, snapshot, event).snapshotReused ==> (parallelStep(machine, snapshot, event).snapshot == snapshot))
 {
+}
+
+function parallelParts(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): ParallelParts
+{
+  var selections := parallelSelections(machine, snapshot, event);
+  var nodes := machine.nodes;
+  if (|selections| == 0) then
+    ParallelParts([], [], snapshot.context)
+  else
+    if (|selections| < 2) then
+      var selected := selections[0];
+      var result := selected.evaluation.result;
+      var target := (match result { case Some(i_result_val) => i_result_val.target case None => Option.None });
+      var reenter := (match result { case Some(i_result_val) => i_result_val.reenter case None => false });
+      match target {
+        case Some(i_target_val) =>
+          if !((i_target_val in nodes)) then
+            var updated := apply(snapshot.context, selected.evaluation);
+            ParallelParts(updated.raises, [], updated.context)
+          else
+            var plan := parallelPlan(machine, snapshot.active, selected.id, i_target_val, reenter);
+            var exited := runLifecycle(nodes, plan.exits, snapshot.context, event, true);
+            var updated := apply(exited.context, selected.evaluation);
+            ParallelParts((exited.raises + updated.raises), plan.entries, updated.context)
+        case None =>
+          var updated := apply(snapshot.context, selected.evaluation);
+          ParallelParts(updated.raises, [], updated.context)
+      }
+    else
+      var active := snapshot.active;
+      var kept := removeConflicts(machine, active, selections, []);
+      var plans := selectionPlans(machine, active, kept);
+      var exits := reverse(SeqFilter((id: string) => plansExit(plans, id), active));
+      var entries := SeqFilter((id: string) => plansEnter(plans, id), machine.order);
+      var exited := runLifecycle(nodes, exits, snapshot.context, event, true);
+      var updated := applyAll(exited.context, kept);
+      ParallelParts((exited.raises + updated.raises), entries, updated.context)
+}
+
+function activeAt(next: seq<string>, entries: seq<string>, index: int, id: string): bool
+{
+  if !((id in next)) then
+    false
+  else
+    if (index < 0) then
+      !((id in entries))
+    else
+      (((index + 1) >= |entries|) || !((id in entries[(index + 1)..])))
+}
+
+function finalAt(machine: ParallelMachine, next: seq<string>, entries: seq<string>, index: int, id: string, fuel: int): bool
+  decreases fuel
+{
+  if ((fuel <= 0) || !((id in machine.nodes))) then
+    false
+  else
+    var nodes := machine.nodes;
+    var node := lookupNode(nodes, id);
+    if (id in machine.parallels) then
+      SeqAll(node.children, (child: string) => finalAt(machine, next, entries, index, child, (fuel - 1)))
+    else
+      if (|node.children| == 0) then
+        node.final
+      else
+        (exists child :: child in node.children && (((child in nodes) && lookupNode(nodes, child).final) && activeAt(next, entries, index, child)))
+}
+
+function queuedOutput(queue: seq<Event>, type_: string, missing: int): int
+  decreases |queue|
+{
+  if (|queue| == 0) then
+    missing
+  else
+    if (queue[0].type_ == type_) then
+      queue[0].value
+    else
+      queuedOutput(queue[1..], type_, missing)
+}
+
+function finalChildOutput(machine: ParallelMachine, outputs: ParallelOutputs, next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event, children: seq<string>): int
+  decreases |children|
+{
+  if (|children| == 0) then
+    outputs.missing
+  else
+    var child := children[0];
+    if (((child in machine.nodes) && lookupNode(machine.nodes, child).final) && activeAt(next, entries, index, child)) then
+      var own := lookupNode(machine.nodes, child).output;
+      own(context, event)
+    else
+      finalChildOutput(machine, outputs, next, entries, index, context, event, children[1..])
+}
+
+function regionOutput(machine: ParallelMachine, outputs: ParallelOutputs, next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event, queue: seq<Event>, region: string): int
+{
+  if !((region in machine.nodes)) then
+    outputs.missing
+  else
+    var node := lookupNode(machine.nodes, region);
+    if node.final then
+      var own := node.output;
+      own(context, event)
+    else
+      if (region in machine.parallels) then
+        queuedOutput(queue, doneEvent(region, 0).type_, outputs.missing)
+      else
+        finalChildOutput(machine, outputs, next, entries, index, context, event, node.children)
+}
+
+function regionOutputs(machine: ParallelMachine, outputs: ParallelOutputs, next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event, queue: seq<Event>, regions: seq<string>): seq<int>
+  decreases |regions|
+{
+  if (|regions| == 0) then
+    []
+  else
+    ([regionOutput(machine, outputs, next, entries, index, context, event, queue, regions[0])] + regionOutputs(machine, outputs, next, entries, index, context, event, queue, regions[1..]))
+}
+
+lemma regionOutputs_ensures(machine: ParallelMachine, outputs: ParallelOutputs, next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event, queue: seq<Event>, regions: seq<string>)
+  ensures (|regionOutputs(machine, outputs, next, entries, index, context, event, queue, regions)| == |regions|)
+{
+}
+
+function climb(machine: ParallelMachine, outputs: ParallelOutputs, next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event, queue: seq<Event>, completed: seq<string>, marker: string, fuel: int): ParallelClimb
+  decreases fuel
+{
+  if (((((fuel <= 0) || !((marker in machine.nodes))) || !((marker in machine.parallels))) || (marker in completed)) || !(finalAt(machine, next, entries, index, marker, |machine.order|))) then
+    ParallelClimb([], completed, false, None)
+  else
+    var node := lookupNode(machine.nodes, marker);
+    var combine := outputs.regions;
+    var done := doneEvent(marker, combine(marker, regionOutputs(machine, outputs, next, entries, index, context, event, queue, node.children)));
+    var path := node.path;
+    if (|path| < 2) then
+      var rootOutput := outputs.output;
+      ParallelClimb([done], (completed + [marker]), true, Some(rootOutput(context, done)))
+    else
+      var rest := climb(machine, outputs, next, entries, index, context, event, (queue + [done]), (completed + [marker]), path[(|path| - 2)], (fuel - 1));
+      ParallelClimb(([done] + rest.raised), rest.completed, rest.done, rest.output)
+}
+
+function finalEntered(machine: ParallelMachine, outputs: ParallelOutputs, next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event, queue: seq<Event>, completed: seq<string>): ParallelClimb
+{
+  var none := ParallelClimb([], completed, false, None);
+  if ((index < 0) || (index >= |entries|)) then
+    none
+  else
+    var id := entries[index];
+    if !((id in machine.nodes)) then
+      none
+    else
+      var node := lookupNode(machine.nodes, id);
+      var path := node.path;
+      if (!(node.final) || (|path| < 2)) then
+        none
+      else
+        var parent := path[(|path| - 2)];
+        var fuel := |machine.order|;
+        if (parent in machine.parallels) then
+          climb(machine, outputs, next, entries, index, context, event, queue, completed, parent, fuel)
+        else
+          var own := node.output;
+          var finalOutput := own(context, event);
+          var done := doneEvent(parent, finalOutput);
+          if (|path| < 3) then
+            var rootOutput := outputs.output;
+            ParallelClimb([done], completed, true, Some((if outputs.hasOutput then rootOutput(context, doneEvent(id, finalOutput)) else finalOutput)))
+          else
+            var rest := climb(machine, outputs, next, entries, index, context, event, (queue + [done]), completed, path[(|path| - 3)], fuel);
+            ParallelClimb(([done] + rest.raised), rest.completed, rest.done, rest.output)
+}
+
+function parallelEnter(machine: ParallelMachine, outputs: ParallelOutputs, next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event, queue: seq<Event>, completed: seq<string>): ParallelEntered
+  decreases (|entries| - index)
+{
+  if ((index < 0) || (index >= |entries|)) then
+    ParallelEntered(context, true, [], [], completed, false, None)
+  else
+    var entered := runLifecycle(machine.nodes, [entries[index]], context, event, false);
+    var queued := (queue + entered.raises);
+    var final := finalEntered(machine, outputs, next, entries, index, entered.context, event, queued, completed);
+    var rest := parallelEnter(machine, outputs, next, entries, (index + 1), entered.context, event, (queued + final.raised), final.completed);
+    ParallelEntered(rest.context, (entered.reused && rest.reused), (entered.effects + rest.effects), ((entered.raises + final.raised) + rest.raised), rest.completed, (final.done || rest.done), (if rest.done then rest.output else final.output))
+}
+
+function parallelFinish(machine: ParallelMachine, step: ParallelStep, parts: ParallelParts, entered: ParallelEntered, event: Event): ParallelMicro
+{
+  var raised := (parts.raised + entered.raised);
+  if !(entered.done) then
+    ParallelMicro(ParallelState(step.snapshot, false, None), step.snapshotReused, step.contextReused, step.effects, raised)
+  else
+    var active := step.snapshot.active;
+    var exited := runLifecycle(machine.nodes, reverse(active), step.snapshot.context, event, true);
+    ParallelMicro(ParallelState(ParallelSnapshot(active, exited.context), true, entered.output), false, (step.contextReused && exited.reused), (step.effects + exited.effects), raised)
+}
+
+function parallelInitialMicro(machine: ParallelMachine, outputs: ParallelOutputs, event: Event): ParallelMicro
+{
+  var step := parallelInitialTransition(machine, event);
+  var entries := step.snapshot.active;
+  var parts := ParallelParts([], entries, machine.context);
+  var entered := parallelEnter(machine, outputs, entries, entries, 0, machine.context, event, [], []);
+  parallelFinish(machine, step, parts, entered, event)
+}
+
+function parallelMicrostep(machine: ParallelMachine, outputs: ParallelOutputs, state: ParallelState, event: Event, pending: seq<Event>): ParallelMicro
+{
+  var unchanged_ := ParallelMicro(state, true, true, [], []);
+  if state.done then
+    unchanged_
+  else
+    var step := parallelStep(machine, state.snapshot, event);
+    if step.snapshotReused then
+      unchanged_
+    else
+      var parts := parallelParts(machine, state.snapshot, event);
+      var entered := parallelEnter(machine, outputs, step.snapshot.active, parts.entries, 0, parts.entryContext, event, (pending + parts.raised), []);
+      parallelFinish(machine, step, parts, entered, event)
+}
+
+lemma parallelMicrostep_ensures(machine: ParallelMachine, outputs: ParallelOutputs, state: ParallelState, event: Event, pending: seq<Event>)
+  ensures (parallelMicrostep(machine, outputs, state, event, pending).snapshotReused ==> (parallelMicrostep(machine, outputs, state, event, pending).state == state))
+{
+}
+
+function parallelSettle(machine: ParallelMachine, outputs: ParallelOutputs, step: ParallelMicro, queue: seq<Event>, remaining: int): ParallelMacrostep
+  decreases remaining
+{
+  if step.state.done then
+    ParallelMacrostep(true, false, step, [], [])
+  else
+    if (remaining <= 0) then
+      ParallelMacrostep(false, false, step, queue, [])
+    else
+      if (|queue| == 0) then
+        ParallelMacrostep(true, false, step, queue, [])
+      else
+        if !(parallelStepReady(machine, step.state.snapshot, queue[0])) then
+          ParallelMacrostep(false, true, step, queue, [])
+        else
+          var next := parallelMicrostep(machine, outputs, step.state, queue[0], queue[1..]);
+          var rest := parallelSettle(machine, outputs, ParallelMicro(next.state, (step.snapshotReused && next.snapshotReused), (step.contextReused && next.contextReused), (step.effects + next.effects), (step.raised + next.raised)), (queue[1..] + next.raised), (remaining - 1));
+          ParallelMacrostep(rest.settled, rest.refused, rest.step, rest.queue, ([next] + rest.trace))
+}
+
+function parallelInitialMacrostep(machine: ParallelMachine, outputs: ParallelOutputs, event: Event, maxIterations: int): ParallelMacrostep
+{
+  var first := parallelInitialMicro(machine, outputs, event);
+  parallelSettle(machine, outputs, first, first.raised, maxIterations)
+}
+
+function parallelMacrostep(machine: ParallelMachine, outputs: ParallelOutputs, state: ParallelState, event: Event, maxIterations: int): ParallelMacrostep
+{
+  var first := parallelMicrostep(machine, outputs, state, event, []);
+  parallelSettle(machine, outputs, first, first.raised, maxIterations)
 }
 
 ghost predicate ParallelNodeShape(machine: ParallelMachine, id: string)
@@ -1705,7 +1808,7 @@ lemma {:induction false} NarrowActive(machine: ParallelMachine, active: seq<stri
   }
 }
 
-lemma DomainActive(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
+lemma {:isolate_assertions} DomainActive(machine: ParallelMachine, active: seq<string>, source: string, target: string, reenter: bool)
   requires ParallelWellFormed(machine) && ParallelValid(machine, active)
   requires source in active && target in machine.nodes
   ensures ActiveNodePath(machine, active,
@@ -2933,7 +3036,7 @@ ghost function Effects(selections: seq<Selection>): seq<Effect>
 lemma {:induction false} ApplyAllSequential(context: map<string, int>, xs: seq<Selection>, ys: seq<Selection>)
   ensures var first := applyAll(context, xs);
     var second := applyAll(first.context, ys);
-    applyAll(context, xs + ys) == Applied(second.context, first.reused && second.reused, first.effects + second.effects)
+    applyAll(context, xs + ys) == Applied(second.context, first.reused && second.reused, first.effects + second.effects, first.raises + second.raises)
   decreases |xs|
 {
   if |xs| == 0 {
@@ -3964,4 +4067,1445 @@ lemma MultiStepMeaning(machine: ParallelMachine, snapshot: ParallelSnapshot, eve
   var exits := reverse(SeqFilter((id: string) => plansExit(plans, id), active));
   var exited := lifecycle(machine.nodes, exits, snapshot.context, event, true);
   ApplyAllEffects(exited.context, kept);
+}
+
+// Eventless transitions and bounded macrosteps (robertpenner/xstate#34), with
+// raised events queued between microsteps (robertpenner/xstate#35).
+
+ghost function NodeAt(machine: Machine, value: string): Option<Node>
+{
+  if value in machine.states then Some(machine.states[value]) else None
+}
+
+ghost predicate AlwaysEnabled(machine: Machine, snapshot: Snapshot, event: Event)
+{
+  alwaysSelected(machine, snapshot, event).result.Some? ||
+  |alwaysSelected(machine, snapshot, event).effects| > 0 ||
+  |alwaysSelected(machine, snapshot, event).raises| > 0
+}
+
+ghost predicate AlwaysDeclared(machine: Machine)
+{
+  forall id, context, event ::
+    id in machine.states &&
+    machine.states[id].always(context, event).result.Some? &&
+    machine.states[id].always(context, event).result.value.target.Some? ==>
+      machine.states[id].always(context, event).result.value.target.value in machine.states
+}
+
+ghost predicate OnDeclared(machine: Machine)
+{
+  forall id, type_, context, event ::
+    id in machine.states && type_ in machine.states[id].on &&
+    machine.states[id].on[type_](context, event).result.Some? &&
+    machine.states[id].on[type_](context, event).result.value.target.Some? ==>
+      machine.states[id].on[type_](context, event).result.value.target.value in machine.states
+}
+
+ghost function TraceEffects(trace: seq<Step>): seq<Effect>
+  decreases |trace|
+{
+  if |trace| == 0 then [] else trace[0].effects + TraceEffects(trace[1..])
+}
+
+ghost function TraceRaised(trace: seq<Step>): seq<Event>
+  decreases |trace|
+{
+  if |trace| == 0 then [] else trace[0].raised + TraceRaised(trace[1..])
+}
+
+ghost predicate AllSnapshotsReused(trace: seq<Step>)
+{
+  forall i :: 0 <= i < |trace| ==> trace[i].snapshotReused
+}
+
+ghost predicate AllContextsReused(trace: seq<Step>)
+{
+  forall i :: 0 <= i < |trace| ==> trace[i].contextReused
+}
+
+ghost function NextEventless(machine: Machine, step: Step, event: Event): Step
+{
+  eventlessStep(machine, step.snapshot, event, alwaysSelected(machine, step.snapshot, event))
+}
+
+// An eventless transition is taken before the next raised event is dequeued.
+ghost predicate Proceeds(machine: Machine, step: Step, event: Event, select: bool)
+{
+  select && AlwaysEnabled(machine, step.snapshot, event)
+}
+
+// A done machine takes no further microsteps, whatever the budget.
+ghost predicate Done(machine: Machine, step: Step)
+{
+  completed(machine, step.snapshot.value)
+}
+
+ghost predicate Continues(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>)
+{
+  !Done(machine, step) && (Proceeds(machine, step, event, select) || |queue| > 0)
+}
+
+ghost function NextStep(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>): Step
+  requires Continues(machine, step, event, select, queue)
+{
+  if Proceeds(machine, step, event, select) then NextEventless(machine, step, event)
+  else transition(machine, step.snapshot, queue[0])
+}
+
+ghost function NextEvent(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>): Event
+  requires Continues(machine, step, event, select, queue)
+{
+  if Proceeds(machine, step, event, select) then event else queue[0]
+}
+
+ghost function NextSelect(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>): bool
+  requires Continues(machine, step, event, select, queue)
+{
+  !Proceeds(machine, step, event, select) || !NextStep(machine, step, event, select, queue).snapshotReused
+}
+
+ghost function NextQueue(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>): seq<Event>
+  requires Continues(machine, step, event, select, queue)
+{
+  (if Proceeds(machine, step, event, select) then queue else queue[1..]) +
+    NextStep(machine, step, event, select, queue).raised
+}
+
+ghost function Advanced(step: Step, next: Step): Step
+{
+  Step(next.snapshot, step.snapshotReused && next.snapshotReused,
+       step.contextReused && next.contextReused, step.effects + next.effects,
+       step.raised + next.raised)
+}
+
+lemma SettleUnfold(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>, remaining: int)
+  requires remaining > 0 && Continues(machine, step, event, select, queue)
+  ensures var next := NextStep(machine, step, event, select, queue);
+          var rest := settle(machine, Advanced(step, next), NextEvent(machine, step, event, select, queue),
+                             NextSelect(machine, step, event, select, queue),
+                             NextQueue(machine, step, event, select, queue), remaining - 1);
+          settle(machine, step, event, select, queue, remaining) ==
+            Macrostep(rest.settled, rest.step, rest.queue, [next] + rest.trace)
+{
+}
+
+// Eventless transitions run before a dequeue; their raises join the back of the queue.
+lemma SettleEventless(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>, remaining: int)
+  requires remaining > 0 && !Done(machine, step) && Proceeds(machine, step, event, select)
+  ensures var next := NextEventless(machine, step, event);
+          var rest := settle(machine, Advanced(step, next), event, !next.snapshotReused,
+                             queue + next.raised, remaining - 1);
+          settle(machine, step, event, select, queue, remaining) ==
+            Macrostep(rest.settled, rest.step, rest.queue, [next] + rest.trace)
+{
+  SettleUnfold(machine, step, event, select, queue, remaining);
+}
+
+// FIFO: the head of the queue is processed as an event, the step's raises are
+// appended, and eventless transitions are reselected against the dequeued event.
+lemma SettleDequeue(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>, remaining: int)
+  requires remaining > 0 && !Done(machine, step) && !Proceeds(machine, step, event, select) && |queue| > 0
+  ensures var next := transition(machine, step.snapshot, queue[0]);
+          var rest := settle(machine, Advanced(step, next), queue[0], true,
+                             queue[1..] + next.raised, remaining - 1);
+          settle(machine, step, event, select, queue, remaining) ==
+            Macrostep(rest.settled, rest.step, rest.queue, [next] + rest.trace)
+{
+  SettleUnfold(machine, step, event, select, queue, remaining);
+}
+
+lemma SettleStops(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>, remaining: int)
+  requires remaining > 0 && !Continues(machine, step, event, select, queue)
+  ensures settle(machine, step, event, select, queue, remaining) == Macrostep(true, step, [], [])
+{
+}
+
+// A raised event that no transition handles still takes a microstep.
+lemma DequeueUnhandled(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>, remaining: int)
+  requires remaining > 0 && !Done(machine, step) && !Proceeds(machine, step, event, select) && |queue| > 0
+  requires step.snapshot.value in machine.states
+  requires queue[0].type_ !in machine.states[step.snapshot.value].on
+  ensures settle(machine, step, event, select, queue, remaining).trace[0] ==
+    Step(step.snapshot, true, true, [], [])
+{
+  SettleUnfold(machine, step, event, select, queue, remaining);
+}
+
+lemma MacrostepQueues(machine: Machine, snapshot: Snapshot, event: Event, maxIterations: int)
+  ensures initialMacrostep(machine, event, maxIterations) ==
+    settle(machine, initialTransition(machine, event), event, true,
+           initialTransition(machine, event).raised, maxIterations)
+  ensures transitionMacrostep(machine, snapshot, event, maxIterations) ==
+    settle(machine, transition(machine, snapshot, event), event, true,
+           transition(machine, snapshot, event).raised, maxIterations)
+{
+}
+
+lemma EventStepShared(machine: Machine, snapshot: Snapshot, event: Event)
+  ensures transition(machine, snapshot, event) ==
+    takeTransition(machine, snapshot, event, NodeAt(machine, snapshot.value),
+      Selected(machine, snapshot, event))
+{
+}
+
+lemma EventlessIdentity(machine: Machine, snapshot: Snapshot, event: Event, selected: Evaluation)
+  ensures var taken := takeTransition(machine, snapshot, event, NodeAt(machine, snapshot.value), selected);
+          eventlessStep(machine, snapshot, event, selected) ==
+            (if taken.snapshot.value == snapshot.value && taken.contextReused
+             then Step(snapshot, true, true, taken.effects, taken.raised)
+             else Step(taken.snapshot, false, taken.contextReused, taken.effects, taken.raised))
+{
+}
+
+// Eventless and dequeue microsteps count against the same bound.
+lemma SettleBudget(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>, remaining: int)
+  requires remaining >= 0
+  ensures |settle(machine, step, event, select, queue, remaining).trace| <= remaining
+  ensures settle(machine, step, event, select, queue, remaining).settled <==>
+    |settle(machine, step, event, select, queue, remaining).trace| < remaining ||
+    Done(machine, settle(machine, step, event, select, queue, remaining).step)
+  decreases remaining
+{
+  if remaining > 0 && Continues(machine, step, event, select, queue) {
+    var next := NextStep(machine, step, event, select, queue);
+    SettleUnfold(machine, step, event, select, queue, remaining);
+    SettleBudget(machine, Advanced(step, next), NextEvent(machine, step, event, select, queue),
+                 NextSelect(machine, step, event, select, queue),
+                 NextQueue(machine, step, event, select, queue), remaining - 1);
+  }
+}
+
+// The event and selection flag in force when settle stops.
+ghost function FinalEvent(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>,
+                          remaining: int): (Event, bool)
+  decreases remaining
+{
+  if remaining > 0 && Continues(machine, step, event, select, queue) then
+    FinalEvent(machine, Advanced(step, NextStep(machine, step, event, select, queue)),
+               NextEvent(machine, step, event, select, queue),
+               NextSelect(machine, step, event, select, queue),
+               NextQueue(machine, step, event, select, queue), remaining - 1)
+  else (event, select)
+}
+
+// At rest the queue is empty and no eventless transition is enabled.
+lemma SettleRest(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>, remaining: int)
+  ensures var m := settle(machine, step, event, select, queue, remaining);
+          var final := FinalEvent(machine, step, event, select, queue, remaining);
+          m.settled ==> m.queue == [] && (Done(machine, m.step) || !Proceeds(machine, m.step, final.0, final.1))
+  ensures var m := settle(machine, step, event, select, queue, remaining);
+          m.settled && |m.trace| == 0 ==> !Continues(machine, step, event, select, queue)
+  decreases remaining
+{
+  if remaining > 0 && Continues(machine, step, event, select, queue) {
+    var next := NextStep(machine, step, event, select, queue);
+    SettleUnfold(machine, step, event, select, queue, remaining);
+    SettleRest(machine, Advanced(step, next), NextEvent(machine, step, event, select, queue),
+               NextSelect(machine, step, event, select, queue),
+               NextQueue(machine, step, event, select, queue), remaining - 1);
+  }
+}
+
+// Without raises, only the last eventless step may reuse the snapshot.
+lemma SettleSteps(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>, remaining: int)
+  ensures var m := settle(machine, step, event, select, queue, remaining);
+          (|m.trace| > 0 ==> Continues(machine, step, event, select, queue)) &&
+          (queue == [] && TraceRaised(m.trace) == [] ==>
+            forall i :: 0 <= i < |m.trace| - 1 ==> !m.trace[i].snapshotReused)
+  decreases remaining
+{
+  if remaining > 0 && Continues(machine, step, event, select, queue) {
+    var next := NextStep(machine, step, event, select, queue);
+    var rest := settle(machine, Advanced(step, next), NextEvent(machine, step, event, select, queue),
+                       NextSelect(machine, step, event, select, queue),
+                       NextQueue(machine, step, event, select, queue), remaining - 1);
+    SettleUnfold(machine, step, event, select, queue, remaining);
+    SettleSteps(machine, Advanced(step, next), NextEvent(machine, step, event, select, queue),
+                NextSelect(machine, step, event, select, queue),
+                NextQueue(machine, step, event, select, queue), remaining - 1);
+    var trace := [next] + rest.trace;
+    assert trace[1..] == rest.trace;
+    assert TraceRaised(trace) == next.raised + TraceRaised(rest.trace);
+    if queue == [] && TraceRaised(trace) == [] {
+      assert next.raised == [] && TraceRaised(rest.trace) == [];
+      assert NextQueue(machine, step, event, select, queue) == [];
+      if next.snapshotReused && remaining - 1 > 0 {
+        SettleStops(machine, Advanced(step, next), event, false, [], remaining - 1);
+      }
+      forall i | 0 <= i < |trace| - 1 ensures !trace[i].snapshotReused {
+        if i > 0 { assert trace[i] == rest.trace[i - 1]; }
+      }
+    }
+  }
+}
+
+lemma {:isolate_assertions} SettleAccumulates(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>, remaining: int)
+  ensures var m := settle(machine, step, event, select, queue, remaining);
+          m.step.snapshot == (if |m.trace| == 0 then step.snapshot else m.trace[|m.trace| - 1].snapshot) &&
+          m.step.effects == step.effects + TraceEffects(m.trace) &&
+          m.step.raised == step.raised + TraceRaised(m.trace) &&
+          m.step.snapshotReused == (step.snapshotReused && AllSnapshotsReused(m.trace)) &&
+          m.step.contextReused == (step.contextReused && AllContextsReused(m.trace))
+  decreases remaining
+{
+  if remaining > 0 && Continues(machine, step, event, select, queue) {
+    var next := NextStep(machine, step, event, select, queue);
+    var rest := settle(machine, Advanced(step, next), NextEvent(machine, step, event, select, queue),
+                       NextSelect(machine, step, event, select, queue),
+                       NextQueue(machine, step, event, select, queue), remaining - 1);
+    SettleUnfold(machine, step, event, select, queue, remaining);
+    SettleAccumulates(machine, Advanced(step, next), NextEvent(machine, step, event, select, queue),
+                      NextSelect(machine, step, event, select, queue),
+                      NextQueue(machine, step, event, select, queue), remaining - 1);
+    var trace := [next] + rest.trace;
+    assert trace[1..] == rest.trace;
+    assert TraceEffects(trace) == next.effects + TraceEffects(rest.trace);
+    assert TraceRaised(trace) == next.raised + TraceRaised(rest.trace);
+    assert AllSnapshotsReused(trace) == (next.snapshotReused && AllSnapshotsReused(rest.trace)) by {
+      if next.snapshotReused && AllSnapshotsReused(rest.trace) {
+        forall i | 0 <= i < |trace| ensures trace[i].snapshotReused {
+          if i > 0 { assert trace[i] == rest.trace[i - 1]; }
+        }
+      }
+    }
+    assert AllContextsReused(trace) == (next.contextReused && AllContextsReused(rest.trace)) by {
+      if next.contextReused && AllContextsReused(rest.trace) {
+        forall i | 0 <= i < |trace| ensures trace[i].contextReused {
+          if i > 0 { assert trace[i] == rest.trace[i - 1]; }
+        }
+      }
+    }
+  } else {
+    assert TraceEffects([]) == [];
+    assert TraceRaised([]) == [];
+  }
+}
+
+lemma SettleStable(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>,
+                   small: int, large: int)
+  requires 0 <= small <= large
+  ensures var a := settle(machine, step, event, select, queue, small);
+          var b := settle(machine, step, event, select, queue, large);
+          a.trace <= b.trace && (a.settled ==> a == b)
+  decreases small
+{
+  if small > 0 && Continues(machine, step, event, select, queue) {
+    var next := NextStep(machine, step, event, select, queue);
+    SettleUnfold(machine, step, event, select, queue, small);
+    SettleUnfold(machine, step, event, select, queue, large);
+    SettleStable(machine, Advanced(step, next), NextEvent(machine, step, event, select, queue),
+                 NextSelect(machine, step, event, select, queue),
+                 NextQueue(machine, step, event, select, queue), small - 1, large - 1);
+  } else if small > 0 {
+    SettleStops(machine, step, event, select, queue, small);
+    SettleStops(machine, step, event, select, queue, large);
+  }
+}
+
+lemma EventlessDeclared(machine: Machine, snapshot: Snapshot, event: Event)
+  requires AlwaysDeclared(machine)
+  requires snapshot.value in machine.states
+  ensures eventlessStep(machine, snapshot, event, alwaysSelected(machine, snapshot, event)).snapshot.value
+    in machine.states
+{
+  var selected := alwaysSelected(machine, snapshot, event);
+  assert selected == machine.states[snapshot.value].always(snapshot.context, event);
+}
+
+lemma DequeueDeclared(machine: Machine, snapshot: Snapshot, event: Event)
+  requires OnDeclared(machine)
+  requires snapshot.value in machine.states
+  ensures transition(machine, snapshot, event).snapshot.value in machine.states
+{
+  if !machine.states[snapshot.value].final && event.type_ in machine.states[snapshot.value].on {
+    assert Selected(machine, snapshot, event) ==
+      machine.states[snapshot.value].on[event.type_](snapshot.context, event);
+  }
+  StepDeclared(machine, snapshot, event);
+}
+
+lemma SettleValid(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>, remaining: int)
+  requires AlwaysDeclared(machine) && OnDeclared(machine)
+  requires step.snapshot.value in machine.states
+  ensures var m := settle(machine, step, event, select, queue, remaining);
+          m.step.snapshot.value in machine.states &&
+          forall i :: 0 <= i < |m.trace| ==> m.trace[i].snapshot.value in machine.states
+  decreases remaining
+{
+  if remaining > 0 && Continues(machine, step, event, select, queue) {
+    var next := NextStep(machine, step, event, select, queue);
+    if Proceeds(machine, step, event, select) {
+      EventlessDeclared(machine, step.snapshot, event);
+    } else {
+      DequeueDeclared(machine, step.snapshot, queue[0]);
+    }
+    SettleUnfold(machine, step, event, select, queue, remaining);
+    SettleValid(machine, Advanced(step, next), NextEvent(machine, step, event, select, queue),
+                NextSelect(machine, step, event, select, queue),
+                NextQueue(machine, step, event, select, queue), remaining - 1);
+  }
+}
+
+lemma IdentityStepRunsOnce(machine: Machine, step: Step, event: Event, remaining: int)
+  requires remaining >= 2 && !Done(machine, step)
+  requires AlwaysEnabled(machine, step.snapshot, event)
+  requires NextEventless(machine, step, event).snapshotReused
+  requires NextEventless(machine, step, event).raised == []
+  ensures var m := settle(machine, step, event, true, [], remaining);
+          m.settled && |m.trace| == 1
+{
+  var next := NextEventless(machine, step, event);
+  SettleEventless(machine, step, event, true, [], remaining);
+  assert [] + next.raised == [];
+  SettleStops(machine, Advanced(step, next), event, false, [], remaining - 1);
+}
+
+lemma EmptyPatchLoops(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>,
+                      remaining: int)
+  requires select
+  requires step.snapshot.value in machine.states && !machine.states[step.snapshot.value].final
+  requires forall context ::
+    (machine.states[step.snapshot.value].always(context, event).result ==
+     Some(Result(None, Some([]), false)))
+  ensures !settle(machine, step, event, select, queue, remaining).settled
+  decreases remaining
+{
+  if remaining > 0 {
+    assert alwaysSelected(machine, step.snapshot, event).result == Some(Result(None, Some([]), false));
+    var next := NextEventless(machine, step, event);
+    assert next.snapshot.value == step.snapshot.value && !next.snapshotReused;
+    SettleEventless(machine, step, event, select, queue, remaining);
+    EmptyPatchLoops(machine, Advanced(step, next), event, true, queue + next.raised, remaining - 1);
+  }
+}
+
+// Completion (robertpenner/xstate#37). In the flat model every state is a
+// child of the root, so entering a final state completes the machine.
+
+// A non-final destination completes nothing.
+lemma CompletionInert(machine: Machine, value: string, context: map<string, int>, event: Event)
+  requires !completed(machine, value)
+  ensures completion(machine, value, context, event) == Completion(context, true, [], None)
+{
+}
+
+// A final root child resolves its output from the entered context, then the
+// root output from that context and a done event carrying the final output,
+// and only then runs its exit. The runtime order is the subject of
+// statelyai/xstate#5949; exit raises are discarded.
+lemma CompletionOrder(machine: Machine, value: string, context: map<string, int>, event: Event)
+  requires completed(machine, value)
+  ensures var node := machine.states[value];
+          var finalOutput := node.output(context, event);
+          var exited := apply(context, node.exit(context, event));
+          completion(machine, value, context, event) ==
+            Completion(exited.context, exited.reused, exited.effects,
+              Some(if machine.hasOutput then machine.output(context, doneEvent(value, finalOutput))
+                   else finalOutput))
+{
+}
+
+// A done snapshot takes no transitions: same snapshot, no effects, no raises.
+lemma TerminalInert(machine: Machine, snapshot: Snapshot, event: Event)
+  requires completed(machine, snapshot.value)
+  ensures transition(machine, snapshot, event) == Step(snapshot, true, true, [], [])
+{
+}
+
+// Completion ends the macrostep before the budget is checked and discards
+// the queued raises.
+lemma SettleDone(machine: Machine, step: Step, event: Event, select: bool, queue: seq<Event>, remaining: int)
+  requires completed(machine, step.snapshot.value)
+  ensures settle(machine, step, event, select, queue, remaining) == Macrostep(true, step, [], [])
+{
+}
+
+// A later event sent to a done snapshot is a settled macrostep with no
+// microsteps beyond the event's own identity step.
+lemma TerminalMacrostep(machine: Machine, snapshot: Snapshot, event: Event, maxIterations: int)
+  requires completed(machine, snapshot.value)
+  ensures transitionMacrostep(machine, snapshot, event, maxIterations) ==
+    Macrostep(true, Step(snapshot, true, true, [], []), [], [])
+{
+  TerminalInert(machine, snapshot, event);
+}
+
+// Output is undefined while the machine is active.
+lemma ActiveOutputUndefined(machine: Machine, snapshot: Snapshot, event: Event)
+  requires snapshot.output.None?
+  requires !completed(machine, transition(machine, snapshot, event).snapshot.value)
+  ensures transition(machine, snapshot, event).snapshot.output.None?
+{
+}
+
+// Entering a final state defines the output.
+lemma EnteredFinalDefinesOutput(machine: Machine, snapshot: Snapshot, event: Event)
+  requires transition(machine, snapshot, event).snapshot.value != snapshot.value
+  requires completed(machine, transition(machine, snapshot, event).snapshot.value)
+  ensures transition(machine, snapshot, event).snapshot.output.Some?
+{
+}
+
+// An initial final state completes during initialization: the entry runs,
+// then completion, and the entry's raises are discarded by settle.
+lemma InitialCompletion(machine: Machine, event: Event, maxIterations: int)
+  requires completed(machine, machine.initial)
+  ensures var node := machine.states[machine.initial];
+          var entering := node.entry(machine.context, event);
+          var applied := apply(machine.context, entering);
+          var done := completion(machine, machine.initial, applied.context, event);
+          initialTransition(machine, event) ==
+            Step(Snapshot(machine.initial, done.context, done.output), false,
+                 applied.reused && done.reused, applied.effects + done.effects, entering.raises) &&
+          done.output.Some? &&
+          initialMacrostep(machine, event, maxIterations) ==
+            Macrostep(true, initialTransition(machine, event), [], [])
+{
+}
+
+// Compound transition proofs
+ghost predicate TreePath(machine: CompoundMachine, path: seq<string>)
+{
+  |path| > 0 && path[0] == machine.root &&
+  declaredPath(machine.nodes, path) &&
+  |machine.nodes[path[|path| - 1]].children| == 0 &&
+  (forall i :: 0 <= i < |path| ==> machine.nodes[path[i]].path == path[..i + 1]) &&
+  (forall i :: 0 <= i < |path| - 1 ==> path[i + 1] in machine.nodes[path[i]].children)
+}
+
+ghost predicate WellFormed(machine: CompoundMachine)
+{
+  machine.root in machine.nodes &&
+  machine.nodes[machine.root].path == [machine.root] &&
+  (forall id :: id in machine.nodes ==>
+    |machine.nodes[id].path| > 0 &&
+    machine.nodes[id].path[|machine.nodes[id].path| - 1] == id &&
+    initialWitness(machine.nodes, id) &&
+    TreePath(machine, machine.nodes[id].initialPath) &&
+    commonPrefix(machine.nodes[id].path, machine.nodes[id].initialPath) == |machine.nodes[id].path| &&
+    (forall child :: child in machine.nodes[id].children ==>
+      child in machine.nodes &&
+      machine.nodes[child].path == machine.nodes[id].path + [child]))
+}
+
+ghost predicate ValidConfiguration(machine: CompoundMachine, path: seq<string>)
+{
+  TreePath(machine, path) &&
+  (forall i :: 0 <= i < |path| && |machine.nodes[path[i]].children| > 0 ==>
+    (exists child :: child in machine.nodes[path[i]].children && child in path) &&
+    (forall a, b ::
+      (a in machine.nodes[path[i]].children && a in path &&
+      b in machine.nodes[path[i]].children && b in path) ==> a == b))
+}
+
+lemma PathHasExactlyOneChild(machine: CompoundMachine, path: seq<string>)
+  requires WellFormed(machine)
+  requires TreePath(machine, path)
+  ensures ValidConfiguration(machine, path)
+{
+  forall i | 0 <= i < |path| && |machine.nodes[path[i]].children| > 0
+    ensures (exists child :: child in machine.nodes[path[i]].children && child in path) &&
+      (forall a, b ::
+        (a in machine.nodes[path[i]].children && a in path &&
+        b in machine.nodes[path[i]].children && b in path) ==> a == b)
+  {
+    assert i < |path| - 1;
+    assert path[i + 1] in machine.nodes[path[i]].children;
+    forall child | child in machine.nodes[path[i]].children && child in path
+      ensures child == path[i + 1]
+    {
+      var j :| 0 <= j < |path| && path[j] == child;
+      assert machine.nodes[child].path == path[..j + 1];
+      assert machine.nodes[child].path == path[..i + 1] + [child];
+      assert j == i + 1;
+    }
+  }
+}
+
+lemma CompoundInitialValid(machine: CompoundMachine, event: Event)
+  requires WellFormed(machine)
+  ensures ValidConfiguration(machine, compoundInitialTransition(machine, event).snapshot.path)
+{
+  PathHasExactlyOneChild(machine, machine.nodes[machine.root].initialPath);
+}
+
+lemma CompoundStepValid(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event)
+  requires WellFormed(machine)
+  requires ValidConfiguration(machine, snapshot.path)
+  requires ready(machine, snapshot, event)
+  ensures ValidConfiguration(machine, compoundTransition(machine, snapshot, event).snapshot.path)
+{
+  var chosen := select(machine.nodes, snapshot.path, snapshot.context, event);
+  if compoundDone(machine, snapshot.path) {
+    assert compoundTransition(machine, snapshot, event).snapshot == snapshot;
+  } else if chosen.Some? && chosen.value.evaluation.result.Some? &&
+     chosen.value.evaluation.result.value.target.Some? {
+    var target := chosen.value.evaluation.result.value.target.value;
+    assert target in machine.nodes;
+    PathHasExactlyOneChild(machine, machine.nodes[target].initialPath);
+  }
+}
+
+lemma InitialDescendantTraversal(nodes: map<string, CompoundNode>, id: string)
+  requires id in nodes
+  requires forall k :: k in nodes ==> initialWitness(nodes, k)
+  ensures nodes[id].initial.None? ==> descend(nodes, id) == nodes[id].path
+  ensures nodes[id].initial.Some? ==>
+    descend(nodes, id) == descend(nodes, nodes[id].initial.value)
+{
+  assert initialWitness(nodes, id);
+}
+
+ghost function NodeEvaluation(nodes: map<string, CompoundNode>, id: string,
+                              context: map<string, int>, event: Event): Evaluation
+  requires id in nodes
+{
+  if event.type_ in nodes[id].on then nodes[id].on[event.type_](context, event)
+  else Evaluation(None, [], [])
+}
+
+ghost predicate Enabled(evaluation: Evaluation)
+{
+  evaluation.result.Some? || |evaluation.effects| > 0 || |evaluation.raises| > 0
+}
+
+lemma DeepestSelection(nodes: map<string, CompoundNode>, path: seq<string>,
+                       context: map<string, int>, event: Event)
+  requires declaredPath(nodes, path)
+  ensures select(nodes, path, context, event).None? <==>
+    (forall i :: 0 <= i < |path| ==> !Enabled(NodeEvaluation(nodes, path[i], context, event)))
+  ensures select(nodes, path, context, event).Some? ==>
+    (exists i :: 0 <= i < |path| &&
+      select(nodes, path, context, event).value == Selection(path[i], nodes[path[i]], NodeEvaluation(nodes, path[i], context, event)) &&
+      Enabled(NodeEvaluation(nodes, path[i], context, event)) &&
+      (forall j :: i < j < |path| ==> !Enabled(NodeEvaluation(nodes, path[j], context, event))))
+  decreases |path|
+{
+  if |path| > 0 {
+    var last := |path| - 1;
+    if Enabled(NodeEvaluation(nodes, path[last], context, event)) {
+      assert select(nodes, path, context, event).value ==
+        Selection(path[last], nodes[path[last]], NodeEvaluation(nodes, path[last], context, event));
+    } else {
+      var prefix := path[..last];
+      DeepestSelection(nodes, prefix, context, event);
+      assert select(nodes, path, context, event) == select(nodes, prefix, context, event);
+      if select(nodes, prefix, context, event).Some? {
+        var i :| 0 <= i < last &&
+          select(nodes, prefix, context, event).value ==
+            Selection(prefix[i], nodes[prefix[i]], NodeEvaluation(nodes, prefix[i], context, event)) &&
+          Enabled(NodeEvaluation(nodes, prefix[i], context, event)) &&
+          (forall j :: i < j < last ==> !Enabled(NodeEvaluation(nodes, prefix[j], context, event)));
+        forall j | i < j < |path|
+          ensures !Enabled(NodeEvaluation(nodes, path[j], context, event))
+        {
+          if j < last {
+            assert prefix[j] == path[j];
+          }
+        }
+      } else {
+        forall i | 0 <= i < |path|
+          ensures !Enabled(NodeEvaluation(nodes, path[i], context, event))
+        {
+          if i < last {
+            assert prefix[i] == path[i];
+          }
+        }
+      }
+    }
+  }
+}
+
+lemma DecliningChildFallsBack(nodes: map<string, CompoundNode>, path: seq<string>,
+                             context: map<string, int>, event: Event)
+  requires declaredPath(nodes, path) && |path| > 0
+  requires NodeEvaluation(nodes, path[|path| - 1], context, event) == Evaluation(None, [], [])
+  ensures select(nodes, path, context, event) == select(nodes, path[..|path| - 1], context, event)
+{
+}
+
+lemma ExplicitBlockWins(nodes: map<string, CompoundNode>, path: seq<string>,
+                       context: map<string, int>, event: Event)
+  requires declaredPath(nodes, path) && |path| > 0
+  requires NodeEvaluation(nodes, path[|path| - 1], context, event) ==
+    Evaluation(Some(Result(None, None, false)), [], [])
+  ensures select(nodes, path, context, event).Some?
+  ensures select(nodes, path, context, event).value.id == path[|path| - 1]
+{
+}
+
+lemma EffectOnlyChildWins(nodes: map<string, CompoundNode>, path: seq<string>,
+                         context: map<string, int>, event: Event)
+  requires declaredPath(nodes, path) && |path| > 0
+  requires |NodeEvaluation(nodes, path[|path| - 1], context, event).effects| > 0
+  ensures select(nodes, path, context, event).Some?
+  ensures select(nodes, path, context, event).value.id == path[|path| - 1]
+{
+}
+
+lemma {:induction false} {:isolate_assertions} LifecycleCons(nodes: map<string, CompoundNode>, path: seq<string>,
+  context: map<string, int>, event: Event, exiting: bool)
+  requires declaredPath(nodes, path) && |path| > 0
+  ensures var evaluation := if exiting then nodes[path[0]].exit(context, event) else nodes[path[0]].entry(context, event);
+    var first := apply(context, evaluation);
+    var rest := lifecycle(nodes, path[1..], first.context, event, exiting);
+    lifecycle(nodes, path, context, event, exiting) ==
+      Applied(rest.context, first.reused && rest.reused, first.effects + rest.effects, first.raises + rest.raises)
+{
+}
+
+lemma {:induction false} {:isolate_assertions} LifecycleConcatenation(nodes: map<string, CompoundNode>, a: seq<string>, b: seq<string>,
+                             context: map<string, int>, event: Event, exiting: bool)
+  requires declaredPath(nodes, a + b)
+  ensures var first := lifecycle(nodes, a, context, event, exiting);
+          var second := lifecycle(nodes, b, first.context, event, exiting);
+          lifecycle(nodes, a + b, context, event, exiting) ==
+            Applied(second.context, first.reused && second.reused, first.effects + second.effects, first.raises + second.raises)
+  decreases |a|
+{
+  hide *;
+  if |a| > 0 {
+    assert lookupNode(nodes, a[0]) == nodes[a[0]];
+    var evaluation := if exiting then nodes[a[0]].exit(context, event) else nodes[a[0]].entry(context, event);
+    var first := apply(context, evaluation);
+    assert a + b == [a[0]] + (a[1..] + b);
+    assert (a + b)[1..] == a[1..] + b;
+    LifecycleCons(nodes, a, context, event, exiting);
+    LifecycleCons(nodes, a + b, context, event, exiting);
+    LifecycleConcatenation(nodes, a[1..], b, first.context, event, exiting);
+    var rest := lifecycle(nodes, a[1..], first.context, event, exiting);
+    var second := lifecycle(nodes, b, rest.context, event, exiting);
+    assert lifecycle(nodes, a, context, event, exiting) ==
+      Applied(rest.context, first.reused && rest.reused, first.effects + rest.effects, first.raises + rest.raises);
+    assert lifecycle(nodes, a[1..] + b, first.context, event, exiting) ==
+      Applied(second.context, rest.reused && second.reused, rest.effects + second.effects, rest.raises + second.raises);
+    assert lifecycle(nodes, a + b, context, event, exiting) ==
+      Applied(second.context, first.reused && (rest.reused && second.reused),
+        first.effects + (rest.effects + second.effects), first.raises + (rest.raises + second.raises));
+    assert first.effects + (rest.effects + second.effects) ==
+      (first.effects + rest.effects) + second.effects;
+    assert first.raises + (rest.raises + second.raises) ==
+      (first.raises + rest.raises) + second.raises;
+  } else {
+    assert a + b == b;
+    assert lifecycle(nodes, a, context, event, exiting) == Applied(context, true, [], []);
+  }
+}
+
+ghost function Target(evaluation: Evaluation): Option<string>
+{
+  if evaluation.result.Some? then evaluation.result.value.target else None
+}
+
+ghost function Reenters(evaluation: Evaluation): bool
+{
+  evaluation.result.Some? && evaluation.result.value.reenter
+}
+
+ghost function Kept(source: seq<string>, target: seq<string>, reenter: bool): int
+{
+  if commonPrefix(source, target) == |source|
+  then |source| - (if reenter then 1 else 0)
+  else commonPrefix(source, if |target| == 0 then [] else target[..|target| - 1])
+}
+
+lemma {:induction false} {:isolate_assertions} CompoundLifecycleMeaning(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event)
+  requires WellFormed(machine)
+  requires ValidConfiguration(machine, snapshot.path)
+  requires ready(machine, snapshot, event)
+  requires !compoundDone(machine, snapshot.path)
+  ensures var chosen := select(machine.nodes, snapshot.path, snapshot.context, event);
+    chosen.None? ==> compoundTransition(machine, snapshot, event) == CompoundStep(snapshot, true, true, [], [])
+  ensures var chosen := select(machine.nodes, snapshot.path, snapshot.context, event);
+    chosen.Some? ==>
+      var target := Target(chosen.value.evaluation);
+      var reenter := Reenters(chosen.value.evaluation);
+      var nextPath := if target.Some? then machine.nodes[target.value].initialPath else snapshot.path;
+      var kept := if target.Some? then Kept(chosen.value.node.path, machine.nodes[target.value].path, reenter) else 0;
+      var exitKept := if target == Some(machine.root) && !reenter then 1 else kept;
+      var exits := if target.Some? then reverse(snapshot.path[exitKept..]) else [];
+      var entries := if target.Some? then nextPath[kept..] else [];
+      var exited := lifecycle(machine.nodes, exits, snapshot.context, event, true);
+      var updated := apply(exited.context, chosen.value.evaluation);
+      var entered := lifecycle(machine.nodes, entries, updated.context, event, false);
+      var done := compoundCompletion(machine, nextPath, |entries| > 0, entered.context, event);
+      compoundTransition(machine, snapshot, event) ==
+        CompoundStep(CompoundSnapshot(nextPath, done.context, done.output), false,
+          exited.reused && updated.reused && entered.reused && done.reused,
+          exited.effects + chosen.value.evaluation.effects + entered.effects + done.effects,
+          exited.raises + chosen.value.evaluation.raises + entered.raises + done.raised)
+{
+  hide *;
+  assert declaredPath(machine.nodes, snapshot.path) by {
+    reveal ValidConfiguration(), TreePath();
+  }
+  assert forall k :: k in machine.nodes ==> initialWitness(machine.nodes, k) by {
+    reveal WellFormed();
+  }
+  reveal Target(), Reenters(), Kept(), compoundTransition();
+  var chosen := select(machine.nodes, snapshot.path, snapshot.context, event);
+  if chosen.Some? {
+    var target := Target(chosen.value.evaluation);
+    var reenter := Reenters(chosen.value.evaluation);
+    if target.Some? {
+      assert target.value in machine.nodes by {
+        reveal ready();
+      }
+      assert descend(machine.nodes, target.value) == machine.nodes[target.value].initialPath by {
+        reveal WellFormed();
+      }
+      if reenter {
+        assert chosen.value.evaluation.result.value.reenter;
+      } else {
+        assert !chosen.value.evaluation.result.value.reenter;
+      }
+    } else {
+      if reenter {
+        assert chosen.value.evaluation.result.Some?;
+      } else {
+        assert !Reenters(chosen.value.evaluation);
+      }
+    }
+  }
+}
+
+lemma CompoundSelfResetsDescendants(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event)
+  requires WellFormed(machine)
+  requires ValidConfiguration(machine, snapshot.path)
+  requires ready(machine, snapshot, event)
+  requires !compoundDone(machine, snapshot.path)
+  requires select(machine.nodes, snapshot.path, snapshot.context, event).Some?
+  requires Target(select(machine.nodes, snapshot.path, snapshot.context, event).value.evaluation) ==
+    Some(select(machine.nodes, snapshot.path, snapshot.context, event).value.id)
+  ensures compoundTransition(machine, snapshot, event).snapshot.path ==
+    machine.nodes[select(machine.nodes, snapshot.path, snapshot.context, event).value.id].initialPath
+{
+}
+
+lemma {:induction false} ReverseLifecycleOrder(path: seq<string>, i: int)
+  requires 0 <= i < |path|
+  ensures reverse(path)[i] == path[|path| - 1 - i]
+  decreases |path|
+{
+  if i < |path| - 1 {
+    ReverseLifecycleOrder(path[1..], i);
+    assert reverse(path)[i] == reverse(path[1..])[i];
+    assert path[1..][|path| - 2 - i] == path[|path| - 1 - i];
+  } else {
+    assert reverse(path)[i] == path[0];
+  }
+}
+
+lemma PreservedAncestorsAreNotExited(path: seq<string>, kept: int, i: int)
+  requires 0 <= i < kept <= |path|
+  requires forall a, b :: 0 <= a < b < |path| ==> path[a] != path[b]
+  ensures path[i] !in reverse(path[kept..])
+{
+}
+
+lemma {:induction false} {:isolate_assertions} CompoundLifecycleWitness(reenter: bool)
+{
+  var empty: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(None, [], []);
+  var rootExit: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(None, [Effect(0, [])], []);
+  var parentEntry: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(None, [Effect(1, [])], []);
+  var parentExit: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(None, [Effect(2, [])], []);
+  var childEntry: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(None, [Effect(3, [])], []);
+  var childExit: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(None, [Effect(4, [])], []);
+  var sibling: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(Some(Result(Some("b"), None, false)), [], []);
+  var reset: (map<string, int>, Event) -> Evaluation :=
+    (context, event) => Evaluation(Some(Result(Some("p"), None, reenter)), [], []);
+  var zero: (map<string, int>, Event) -> int := (context, event) => 0;
+  var root := CompoundNode(["r"], ["r", "p", "a"], ["p"], Some("p"), map[], empty, rootExit, false, zero);
+  var parent := CompoundNode(["r", "p"], ["r", "p", "a"], ["a", "b"], Some("a"), map["reset" := reset], parentEntry, parentExit, false, zero);
+  var a := CompoundNode(["r", "p", "a"], ["r", "p", "a"], [], None, map["go" := sibling], childEntry, childExit, false, zero);
+  var b := CompoundNode(["r", "p", "b"], ["r", "p", "b"], [], None, map[], childEntry, childExit, false, zero);
+  var machine := CompoundMachine("r", map[], map["r" := root, "p" := parent, "a" := a, "b" := b], false, zero);
+  var snapshot := CompoundSnapshot(["r", "p", "a"], map[], None);
+  assert forall id :: id in machine.nodes ==> initialWitness(machine.nodes, id);
+  assert compoundTransition(machine, snapshot, Event("go", 0)).effects ==
+    [Effect(4, []), Effect(3, [])];
+  assert select(machine.nodes, snapshot.path, snapshot.context, Event("reset", 0)) ==
+    Some(Selection("p", parent, Evaluation(Some(Result(Some("p"), None, reenter)), [], [])));
+  if reenter {
+    LifecycleCons(machine.nodes, ["a", "p"], map[], Event("reset", 0), true);
+    LifecycleCons(machine.nodes, ["p", "a"], map[], Event("reset", 0), false);
+    assert lifecycle(machine.nodes, ["a", "p"], map[], Event("reset", 0), true).effects ==
+      [Effect(4, []), Effect(2, [])];
+    assert lifecycle(machine.nodes, ["p", "a"], map[], Event("reset", 0), false).effects ==
+      [Effect(1, []), Effect(3, [])];
+    assert compoundTransition(machine, snapshot, Event("reset", 0)).effects ==
+      [Effect(4, []), Effect(2, []), Effect(1, []), Effect(3, [])];
+  } else {
+    assert compoundTransition(machine, snapshot, Event("reset", 0)).effects ==
+      [Effect(4, []), Effect(3, [])];
+  }
+}
+
+// Compound completion
+
+// A done compound machine takes no transitions.
+lemma CompoundDoneInert(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event)
+  requires declaredPath(machine.nodes, snapshot.path)
+  requires ready(machine, snapshot, event)
+  requires forall k :: k in machine.nodes ==> initialWitness(machine.nodes, k)
+  requires compoundDone(machine, snapshot.path)
+  ensures compoundTransition(machine, snapshot, event) == CompoundStep(snapshot, true, true, [], [])
+{
+}
+
+// Settling a done machine stops at once and discards the queue, whatever the
+// remaining budget.
+lemma CompoundSettleDone(machine: CompoundMachine, step: CompoundStep, queue: seq<Event>, remaining: int)
+  requires forall k :: k in machine.nodes ==> initialWitness(machine.nodes, k)
+  requires declaredPath(machine.nodes, step.snapshot.path)
+  requires compoundDone(machine, step.snapshot.path)
+  ensures compoundSettle(machine, step, queue, remaining) == CompoundMacrostep(true, false, step, [], [])
+{
+}
+
+// Entering a final leaf below a non-root parent queues one done event for the
+// parent, carrying the leaf's output, and changes nothing else.
+lemma NestedFinalRaisesDone(machine: CompoundMachine, path: seq<string>, context: map<string, int>, event: Event)
+  requires declaredPath(machine.nodes, path) && |path| >= 2
+  requires machine.nodes[path[|path| - 1]].final
+  requires path[|path| - 2] != machine.root
+  ensures var leaf := machine.nodes[path[|path| - 1]];
+          compoundCompletion(machine, path, true, context, event) ==
+            CompoundCompletion(context, true, [],
+              [doneEvent(path[|path| - 2], leaf.output(context, event))], None)
+{
+}
+
+// Entering a final child of the root resolves the root output from the entered
+// context and a done event carrying the final output, then exits every active
+// node from the leaf up. Exit patches never reach the output.
+lemma RootCompletionOutput(machine: CompoundMachine, path: seq<string>, context: map<string, int>, event: Event)
+  requires declaredPath(machine.nodes, path) && |path| >= 2
+  requires machine.nodes[path[|path| - 1]].final
+  requires path[|path| - 2] == machine.root
+  ensures var leafId := path[|path| - 1];
+          var finalOutput := machine.nodes[leafId].output(context, event);
+          var exited := lifecycle(machine.nodes, reverse(path), context, event, true);
+          compoundCompletion(machine, path, true, context, event) ==
+            CompoundCompletion(exited.context, exited.reused, exited.effects, [],
+              Some(if machine.hasOutput then machine.output(context, doneEvent(leafId, finalOutput))
+                   else finalOutput))
+{
+}
+
+// A step that changes the snapshot defines output only when it completes the
+// machine.
+lemma CompoundOutputOnlyWhenDone(machine: CompoundMachine, snapshot: CompoundSnapshot, event: Event)
+  requires declaredPath(machine.nodes, snapshot.path)
+  requires ready(machine, snapshot, event)
+  requires forall k :: k in machine.nodes ==> initialWitness(machine.nodes, k)
+  ensures var next := compoundTransition(machine, snapshot, event);
+          !next.snapshotReused && next.snapshot.output.Some? ==>
+            declaredPath(machine.nodes, next.snapshot.path) &&
+            compoundDone(machine, next.snapshot.path)
+{
+  reveal compoundTransition();
+}
+
+// Raised events are processed first-in, first-out: the head of the queue is
+// processed, and the step's own raises join the back of the queue.
+lemma CompoundSettleDequeue(machine: CompoundMachine, step: CompoundStep, queue: seq<Event>, remaining: int)
+  requires forall k :: k in machine.nodes ==> initialWitness(machine.nodes, k)
+  requires declaredPath(machine.nodes, step.snapshot.path)
+  requires !compoundDone(machine, step.snapshot.path)
+  requires remaining > 0 && |queue| > 0
+  requires ready(machine, step.snapshot, queue[0])
+  ensures var next := compoundTransition(machine, step.snapshot, queue[0]);
+          var advanced := CompoundStep(next.snapshot, step.snapshotReused && next.snapshotReused,
+            step.contextReused && next.contextReused, step.effects + next.effects,
+            step.raised + next.raised);
+          var rest := compoundSettle(machine, advanced, queue[1..] + next.raised, remaining - 1);
+          compoundSettle(machine, step, queue, remaining) ==
+            CompoundMacrostep(rest.settled, rest.refused, rest.step, rest.queue, [next] + rest.trace)
+{
+}
+
+// An active machine with an exhausted budget reports an unsettled macrostep,
+// keeping its queue.
+lemma CompoundSettleBudget(machine: CompoundMachine, step: CompoundStep, queue: seq<Event>, remaining: int)
+  requires forall k :: k in machine.nodes ==> initialWitness(machine.nodes, k)
+  requires declaredPath(machine.nodes, step.snapshot.path)
+  requires !compoundDone(machine, step.snapshot.path)
+  requires remaining <= 0
+  ensures compoundSettle(machine, step, queue, remaining) == CompoundMacrostep(false, false, step, queue, [])
+{
+}
+
+// Initialization applies completion to the entered configuration, so a machine
+// whose initial leaf is a final child of the root is done before any event,
+// and a nested initial final leaf queues its parent's done event after the
+// entry raises.
+lemma CompoundInitialCompletion(machine: CompoundMachine, event: Event)
+  requires machine.root in machine.nodes
+  requires declaredPath(machine.nodes, machine.nodes[machine.root].initialPath)
+  requires forall k :: k in machine.nodes ==> initialWitness(machine.nodes, k)
+  ensures var path := descend(machine.nodes, machine.root);
+          var entered := lifecycle(machine.nodes, path, machine.context, event, false);
+          var done := compoundCompletion(machine, path, true, entered.context, event);
+          compoundInitialTransition(machine, event) ==
+            CompoundStep(CompoundSnapshot(path, done.context, done.output), false,
+              entered.reused && done.reused, entered.effects + done.effects,
+              entered.raises + done.raised)
+{
+}
+
+// A concrete instance of NestedFinalRaisesDone whose leaf and parent ids differ,
+// so a done event named for the wrong node fails quickly.
+lemma NestedDoneNamesParent(machine: CompoundMachine, context: map<string, int>, event: Event)
+  requires "r" in machine.nodes && "p" in machine.nodes && "f" in machine.nodes
+  requires machine.root == "r" && machine.nodes["f"].final
+  ensures compoundCompletion(machine, ["r", "p", "f"], true, context, event).raised ==
+            [Event("xstate.done.state.p", machine.nodes["f"].output(context, event))]
+{
+  var path := ["r", "p", "f"];
+  assert path[|path| - 1] == "f" && path[|path| - 2] == "p";
+  assert lookupNode(machine.nodes, "f") == machine.nodes["f"];
+  assert "xstate.done.state." + "p" == "xstate.done.state.p";
+}
+
+// ---- Parallel completion ----
+
+ghost function ParentOf(machine: ParallelMachine, id: string): string
+  requires id in machine.nodes && |machine.nodes[id].path| >= 2
+{
+  machine.nodes[id].path[|machine.nodes[id].path| - 2]
+}
+
+// Climbing from a marker records each parallel it completes, in order from the
+// marker upward, and queues exactly one done event per recorded parallel, in
+// the same order. A parallel is recorded only while it is final in the
+// configuration the runtime holds at that entry, and never twice. The machine
+// is done only when the climb records the root.
+lemma {:induction false} {:isolate_assertions} ClimbBookkeeping(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>, marker: string, fuel: int)
+  decreases fuel
+  ensures var c := climb(machine, outputs, next, entries, index, context, event, queue, completed, marker, fuel);
+    |completed| <= |c.completed| && c.completed[..|completed|] == completed &&
+    |c.raised| == |c.completed| - |completed| &&
+    (forall i :: 0 <= i < |c.raised| ==> c.raised[i].type_ == doneEvent(c.completed[|completed| + i], 0).type_) &&
+    (forall i :: |completed| <= i < |c.completed| ==>
+      c.completed[i] in machine.nodes && c.completed[i] in machine.parallels &&
+      finalAt(machine, next, entries, index, c.completed[i], |machine.order|)) &&
+    (|c.completed| > |completed| ==> c.completed[|completed|] == marker) &&
+    (forall i :: |completed| <= i < |c.completed| - 1 ==>
+      |machine.nodes[c.completed[i]].path| >= 2 && c.completed[i + 1] == ParentOf(machine, c.completed[i])) &&
+    (Distinct(completed) ==> Distinct(c.completed)) &&
+    (c.done <==> c.output.Some?) &&
+    (c.done ==> |c.completed| > |completed| && |machine.nodes[c.completed[|c.completed| - 1]].path| < 2)
+{
+  var c := climb(machine, outputs, next, entries, index, context, event, queue, completed, marker, fuel);
+  if fuel <= 0 || marker !in machine.nodes || marker !in machine.parallels || marker in completed ||
+     !finalAt(machine, next, entries, index, marker, |machine.order|) {
+    assert c == ParallelClimb([], completed, false, None);
+  } else {
+    var node := lookupNode(machine.nodes, marker);
+    var combine := outputs.regions;
+    var done := doneEvent(marker, combine(marker, regionOutputs(machine, outputs, next, entries, index, context, event, queue, node.children)));
+    var path := node.path;
+    if |path| < 2 {
+      assert c == ParallelClimb([done], completed + [marker], true, Some(outputs.output(context, done)));
+      assert c.completed[..|completed|] == completed;
+      if Distinct(completed) {
+        assert forall i :: 0 <= i < |completed| ==> c.completed[i] != marker;
+      }
+    } else {
+      var parent := path[|path| - 2];
+      var rest := climb(machine, outputs, next, entries, index, context, event, queue + [done], completed + [marker], parent, fuel - 1);
+      ClimbBookkeeping(machine, outputs, next, entries, index, context, event, queue + [done], completed + [marker], parent, fuel - 1);
+      assert c == ParallelClimb([done] + rest.raised, rest.completed, rest.done, rest.output);
+      var grown := completed + [marker];
+      assert rest.completed[..|grown|] == grown;
+      assert rest.completed[..|completed|] == grown[..|completed|] == completed;
+      assert rest.completed[|completed|] == marker;
+      forall i | 0 <= i < |c.raised|
+        ensures c.raised[i].type_ == doneEvent(c.completed[|completed| + i], 0).type_
+      {
+        if i > 0 {
+          assert c.raised[i] == rest.raised[i - 1];
+          assert |completed| + i == |grown| + (i - 1);
+        }
+      }
+      if |rest.completed| > |grown| {
+        assert rest.completed[|grown|] == parent;
+        assert machine.nodes[marker].path == path;
+      }
+      if Distinct(completed) {
+        assert forall i :: 0 <= i < |completed| ==> grown[i] != marker;
+        assert Distinct(grown);
+      }
+    }
+  }
+}
+
+// Entering one node extends the completed parallels without repeating one.
+lemma FinalEnteredBookkeeping(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  ensures var f := finalEntered(machine, outputs, next, entries, index, context, event, queue, completed);
+    |completed| <= |f.completed| && f.completed[..|completed|] == completed &&
+    (forall i :: |completed| <= i < |f.completed| ==> f.completed[i] in machine.parallels) &&
+    (Distinct(completed) ==> Distinct(f.completed))
+{
+  if 0 <= index < |entries| && entries[index] in machine.nodes {
+    var node := lookupNode(machine.nodes, entries[index]);
+    var path := node.path;
+    if node.final && |path| >= 2 {
+      var parent := path[|path| - 2];
+      var fuel := |machine.order|;
+      if parent in machine.parallels {
+        ClimbBookkeeping(machine, outputs, next, entries, index, context, event, queue, completed, parent, fuel);
+      } else if |path| >= 3 {
+        var own := node.output;
+        var done := doneEvent(parent, own(context, event));
+        ClimbBookkeeping(machine, outputs, next, entries, index, context, event, queue + [done], completed, path[|path| - 3], fuel);
+      }
+    }
+  }
+}
+
+// Within one microstep each parallel node completes at most once: each
+// entry's climb starts from every parallel completed by earlier entries, the
+// pass returns an extension of what the current entry completed, and no node
+// is listed twice. A climb refuses a listed node and queues exactly one done
+// event per node it adds (`ClimbBookkeeping`).
+lemma {:induction false} ParallelEnterCompletesOnce(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  decreases |entries| - index
+  ensures var e := parallelEnter(machine, outputs, next, entries, index, context, event, queue, completed);
+    |completed| <= |e.completed| && e.completed[..|completed|] == completed &&
+    (forall i :: |completed| <= i < |e.completed| ==> e.completed[i] in machine.parallels) &&
+    (Distinct(completed) ==> Distinct(e.completed)) &&
+    (0 <= index < |entries| ==>
+      var entered := runLifecycle(machine.nodes, [entries[index]], context, event, false);
+      var f := finalEntered(machine, outputs, next, entries, index, entered.context, event, queue + entered.raises, completed);
+      |f.completed| <= |e.completed| && e.completed[..|f.completed|] == f.completed)
+{
+  if 0 <= index < |entries| {
+    var entered := runLifecycle(machine.nodes, [entries[index]], context, event, false);
+    var queued := queue + entered.raises;
+    var final := finalEntered(machine, outputs, next, entries, index, entered.context, event, queued, completed);
+    FinalEnteredBookkeeping(machine, outputs, next, entries, index, entered.context, event, queued, completed);
+    ParallelEnterCompletesOnce(machine, outputs, next, entries, index + 1, entered.context, event, queued + final.raised, final.completed);
+    var e := parallelEnter(machine, outputs, next, entries, index, context, event, queue, completed);
+    var rest := parallelEnter(machine, outputs, next, entries, index + 1, entered.context, event, queued + final.raised, final.completed);
+    assert e.completed == rest.completed;
+    assert rest.completed[..|final.completed|] == final.completed;
+    assert e.completed[..|completed|] == final.completed[..|completed|];
+    forall i | |completed| <= i < |e.completed|
+      ensures e.completed[i] in machine.parallels
+    {
+      if i < |final.completed| {
+        assert e.completed[i] == final.completed[i];
+      }
+    }
+  }
+}
+
+// Entering a non-final node, or the root, completes nothing.
+lemma NonFinalEntryInert(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  requires 0 <= index < |entries| && entries[index] in machine.nodes
+  requires !machine.nodes[entries[index]].final || |machine.nodes[entries[index]].path| < 2
+  ensures finalEntered(machine, outputs, next, entries, index, context, event, queue, completed) ==
+    ParallelClimb([], completed, false, None)
+{
+}
+
+// A final region of a parallel climbs from that parallel.
+lemma FinalRegionClimbs(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  requires 0 <= index < |entries| && entries[index] in machine.nodes
+  requires machine.nodes[entries[index]].final && |machine.nodes[entries[index]].path| >= 2
+  requires ParentOf(machine, entries[index]) in machine.parallels
+  ensures finalEntered(machine, outputs, next, entries, index, context, event, queue, completed) ==
+    climb(machine, outputs, next, entries, index, context, event, queue, completed,
+      ParentOf(machine, entries[index]), |machine.order|)
+{
+}
+
+// A final child of a compound node queues that node's done event, carrying
+// the child's output, before any parallel completion it causes. A final child
+// of a compound root completes the machine with the root output, which falls
+// back to the child's output.
+lemma FinalChildQueuesParentDone(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  requires 0 <= index < |entries| && entries[index] in machine.nodes
+  requires machine.nodes[entries[index]].final && |machine.nodes[entries[index]].path| >= 2
+  requires ParentOf(machine, entries[index]) !in machine.parallels
+  ensures var id := entries[index];
+    var path := machine.nodes[id].path;
+    var finalOutput := machine.nodes[id].output(context, event);
+    var done := doneEvent(ParentOf(machine, id), finalOutput);
+    var f := finalEntered(machine, outputs, next, entries, index, context, event, queue, completed);
+    |f.raised| > 0 && f.raised[0] == done &&
+    (|path| < 3 ==> f == ParallelClimb([done], completed, true,
+      Some(if outputs.hasOutput then outputs.output(context, doneEvent(id, finalOutput)) else finalOutput))) &&
+    (|path| >= 3 ==> f.raised[1..] == climb(machine, outputs, next, entries, index, context, event,
+      queue + [done], completed, path[|path| - 3], |machine.order|).raised)
+{
+}
+
+// Entering runs each entry's lifecycle in order from the planned context, so
+// completion changes neither the entered context nor the entry effects.
+lemma {:induction false} {:isolate_assertions} ParallelEnterLifecycle(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  requires 0 <= index <= |entries|
+  requires declaredPath(machine.nodes, entries)
+  decreases |entries| - index
+  ensures var e := parallelEnter(machine, outputs, next, entries, index, context, event, queue, completed);
+    var l := lifecycle(machine.nodes, entries[index..], context, event, false);
+    e.context == l.context && e.reused == l.reused && e.effects == l.effects
+{
+  var e := parallelEnter(machine, outputs, next, entries, index, context, event, queue, completed);
+  if index == |entries| {
+    assert entries[index..] == [];
+  } else {
+    var nodes := machine.nodes;
+    var tail := entries[index..];
+    assert tail[0] == entries[index] && tail[1..] == entries[index + 1..];
+    assert declaredPath(nodes, tail) && declaredPath(nodes, [entries[index]]);
+    var entered := runLifecycle(nodes, [entries[index]], context, event, false);
+    LifecycleCons(nodes, [entries[index]], context, event, false);
+    assert [entries[index]][1..] == [];
+    LifecycleCons(nodes, tail, context, event, false);
+    var queued := queue + entered.raises;
+    var final := finalEntered(machine, outputs, next, entries, index, entered.context, event, queued, completed);
+    ParallelEnterLifecycle(machine, outputs, next, entries, index + 1, entered.context, event, queued + final.raised, final.completed);
+  }
+}
+
+// The completion plan repeats the step's planning up to its entries: running
+// the planned entries from the planned context reproduces the step's context.
+lemma {:isolate_assertions} ParallelPartsAgree(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event)
+  ensures var step := parallelStep(machine, snapshot, event);
+    var parts := parallelParts(machine, snapshot, event);
+    !step.snapshotReused ==>
+      step.snapshot.context == runLifecycle(machine.nodes, parts.entries, parts.entryContext, event, false).context
+{
+}
+
+// A step that completes nothing keeps the step's snapshot and effects, and a
+// step that completes the machine keeps its configuration. In both cases the
+// entered context equals the step's context.
+lemma {:isolate_assertions} ParallelMicroKeepsStep(machine: ParallelMachine, outputs: ParallelOutputs,
+  state: ParallelState, event: Event, pending: seq<Event>)
+  requires ParallelWellFormed(machine) && !state.done
+  ensures var step := parallelStep(machine, state.snapshot, event);
+    var micro := parallelMicrostep(machine, outputs, state, event, pending);
+    !step.snapshotReused ==>
+      micro.state.snapshot.active == step.snapshot.active &&
+      (!micro.state.done ==> micro.state.snapshot == step.snapshot && micro.effects == step.effects) &&
+      (micro.state.done <==> micro.state.output.Some?) &&
+      (micro.state.done ==>
+        micro.state.snapshot.context ==
+          runLifecycle(machine.nodes, reverse(step.snapshot.active), step.snapshot.context, event, true).context)
+{
+  hide *;
+  var step := parallelStep(machine, state.snapshot, event);
+  if !step.snapshotReused {
+    reveal parallelMicrostep();
+    var parts := parallelParts(machine, state.snapshot, event);
+    var entered := parallelEnter(machine, outputs, step.snapshot.active, parts.entries, 0, parts.entryContext, event,
+      pending + parts.raised, []);
+    assert parallelMicrostep(machine, outputs, state, event, pending) == parallelFinish(machine, step, parts, entered, event);
+    reveal parallelFinish();
+    EnteredDoneHasOutput(machine, outputs, step.snapshot.active, parts.entries, 0, parts.entryContext, event,
+      pending + parts.raised, []);
+  }
+}
+
+// An entry pass that completes the machine reports its output.
+lemma {:induction false} EnteredDoneHasOutput(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  decreases |entries| - index
+  ensures var e := parallelEnter(machine, outputs, next, entries, index, context, event, queue, completed);
+    e.done ==> e.output.Some?
+{
+  if 0 <= index < |entries| {
+    var entered := runLifecycle(machine.nodes, [entries[index]], context, event, false);
+    var queued := queue + entered.raises;
+    var final := finalEntered(machine, outputs, next, entries, index, entered.context, event, queued, completed);
+    FinalEnteredDoneHasOutput(machine, outputs, next, entries, index, entered.context, event, queued, completed);
+    EnteredDoneHasOutput(machine, outputs, next, entries, index + 1, entered.context, event, queued + final.raised, final.completed);
+  }
+}
+
+lemma FinalEnteredDoneHasOutput(machine: ParallelMachine, outputs: ParallelOutputs,
+  next: seq<string>, entries: seq<string>, index: int, context: map<string, int>, event: Event,
+  queue: seq<Event>, completed: seq<string>)
+  ensures var f := finalEntered(machine, outputs, next, entries, index, context, event, queue, completed);
+    f.done <==> f.output.Some?
+{
+  if 0 <= index < |entries| && entries[index] in machine.nodes {
+    var node := machine.nodes[entries[index]];
+    var path := node.path;
+    if node.final && |path| >= 2 {
+      var parent := path[|path| - 2];
+      if parent in machine.parallels {
+        ClimbBookkeeping(machine, outputs, next, entries, index, context, event, queue, completed, parent, |machine.order|);
+      } else if |path| >= 3 {
+        var done := doneEvent(parent, node.output(context, event));
+        ClimbBookkeeping(machine, outputs, next, entries, index, context, event, queue + [done], completed, path[|path| - 3], |machine.order|);
+      }
+    }
+  }
+}
+
+// A microstep from a valid configuration leaves a valid configuration.
+lemma ParallelMicroValid(machine: ParallelMachine, outputs: ParallelOutputs,
+  state: ParallelState, event: Event, pending: seq<Event>)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, state.snapshot.active)
+  requires parallelStepReady(machine, state.snapshot, event)
+  ensures ParallelValid(machine, parallelMicrostep(machine, outputs, state, event, pending).state.snapshot.active)
+{
+  if !state.done && !parallelStep(machine, state.snapshot, event).snapshotReused {
+    MultiStepValid(machine, state.snapshot, event);
+  }
+}
+
+// Settling a done machine stops at once and discards the queue.
+lemma ParallelSettleDone(machine: ParallelMachine, outputs: ParallelOutputs, step: ParallelMicro,
+  queue: seq<Event>, remaining: int)
+  requires step.state.done
+  ensures parallelSettle(machine, outputs, step, queue, remaining) == ParallelMacrostep(true, false, step, [], [])
+{
+}
+
+// An active machine with an exhausted budget reports an unsettled macrostep,
+// keeping its queue.
+lemma ParallelSettleBudget(machine: ParallelMachine, outputs: ParallelOutputs, step: ParallelMicro,
+  queue: seq<Event>, remaining: int)
+  requires !step.state.done && remaining <= 0
+  ensures parallelSettle(machine, outputs, step, queue, remaining) == ParallelMacrostep(false, false, step, queue, [])
+{
+}
+
+// A queued event the step model cannot represent refuses the macrostep before
+// any of its effects.
+lemma ParallelSettleRefuses(machine: ParallelMachine, outputs: ParallelOutputs, step: ParallelMicro,
+  queue: seq<Event>, remaining: int)
+  requires !step.state.done && remaining > 0 && |queue| > 0
+  requires !parallelStepReady(machine, step.state.snapshot, queue[0])
+  ensures parallelSettle(machine, outputs, step, queue, remaining) == ParallelMacrostep(false, true, step, queue, [])
+{
+}
+
+// Raised and done events are processed first-in, first-out; a microstep's
+// raises reach the back of the queue, and the rest of the queue is visible to
+// the microstep's region outputs.
+lemma ParallelSettleDequeue(machine: ParallelMachine, outputs: ParallelOutputs, step: ParallelMicro,
+  queue: seq<Event>, remaining: int)
+  requires !step.state.done && remaining > 0 && |queue| > 0
+  requires parallelStepReady(machine, step.state.snapshot, queue[0])
+  ensures var next := parallelMicrostep(machine, outputs, step.state, queue[0], queue[1..]);
+    var advanced := ParallelMicro(next.state, step.snapshotReused && next.snapshotReused,
+      step.contextReused && next.contextReused, step.effects + next.effects, step.raised + next.raised);
+    var rest := parallelSettle(machine, outputs, advanced, queue[1..] + next.raised, remaining - 1);
+    parallelSettle(machine, outputs, step, queue, remaining) ==
+      ParallelMacrostep(rest.settled, rest.refused, rest.step, rest.queue, [next] + rest.trace)
+{
+}
+
+// Every microstep of a settled macrostep, and its final state, keeps a valid
+// configuration.
+lemma {:induction false} ParallelSettleValid(machine: ParallelMachine, outputs: ParallelOutputs, step: ParallelMicro,
+  queue: seq<Event>, remaining: int)
+  requires ParallelWellFormed(machine) && ParallelValid(machine, step.state.snapshot.active)
+  decreases remaining
+  ensures var m := parallelSettle(machine, outputs, step, queue, remaining);
+    ParallelValid(machine, m.step.state.snapshot.active) &&
+    forall i :: 0 <= i < |m.trace| ==> ParallelValid(machine, m.trace[i].state.snapshot.active)
+{
+  if !step.state.done && remaining > 0 && |queue| > 0 && parallelStepReady(machine, step.state.snapshot, queue[0]) {
+    var next := parallelMicrostep(machine, outputs, step.state, queue[0], queue[1..]);
+    ParallelMicroValid(machine, outputs, step.state, queue[0], queue[1..]);
+    var advanced := ParallelMicro(next.state, step.snapshotReused && next.snapshotReused,
+      step.contextReused && next.contextReused, step.effects + next.effects, step.raised + next.raised);
+    ParallelSettleValid(machine, outputs, advanced, queue[1..] + next.raised, remaining - 1);
+    ParallelSettleDequeue(machine, outputs, step, queue, remaining);
+    var rest := parallelSettle(machine, outputs, advanced, queue[1..] + next.raised, remaining - 1);
+    forall i | 0 <= i < |[next] + rest.trace|
+      ensures ParallelValid(machine, ([next] + rest.trace)[i].state.snapshot.active)
+    {
+      if i > 0 { assert ([next] + rest.trace)[i] == rest.trace[i - 1]; }
+    }
+  }
+}
+
+// Initialization keeps the initial configuration whether or not it completes
+// the machine.
+lemma ParallelInitialMicroValid(machine: ParallelMachine, outputs: ParallelOutputs, event: Event)
+  requires ParallelWellFormed(machine)
+  ensures ParallelValid(machine, parallelInitialMicro(machine, outputs, event).state.snapshot.active)
+{
+  ParallelInitialValid(machine, event);
+}
+
+// While entering `entries[index]`, a node counts as active when the step's
+// next configuration holds it and no later entry enters it.
+lemma ActiveAtMeaning(next: seq<string>, entries: seq<string>, index: int, id: string)
+  requires 0 <= index
+  ensures activeAt(next, entries, index, id) <==>
+    id in next && forall j :: index < j < |entries| ==> entries[j] != id
+{
+  if id in next && index + 1 < |entries| {
+    var later := entries[index + 1..];
+    assert forall k :: 0 <= k < |later| ==> later[k] == entries[k + index + 1];
+    assert forall j :: index < j < |entries| ==> entries[j] == later[j - index - 1];
+  }
+}
+
+lemma SeqAllMeaning<T>(xs: seq<T>, p: T -> bool)
+  ensures SeqAll(xs, p) <==> forall x :: x in xs ==> p(x)
+{
+  if |xs| > 0 {
+    SeqAllMeaning(xs[1..], p);
+    assert forall x :: x in xs <==> x == xs[0] || x in xs[1..];
+  }
+}
+
+// The runtime's final test: a parallel is final when all its regions are, a
+// compound node when one of its final children is active, and an atomic node
+// when it is a final node, whether or not it has been entered yet.
+lemma FinalAtMeaning(machine: ParallelMachine, next: seq<string>, entries: seq<string>, index: int, id: string, fuel: int)
+  requires fuel > 0 && id in machine.nodes
+  ensures var node := machine.nodes[id];
+    finalAt(machine, next, entries, index, id, fuel) <==>
+      if id in machine.parallels then
+        forall child :: child in node.children ==> finalAt(machine, next, entries, index, child, fuel - 1)
+      else if |node.children| == 0 then node.final
+      else (exists child ::
+              child in node.children && child in machine.nodes &&
+              machine.nodes[child].final && activeAt(next, entries, index, child))
+{
+  var node := machine.nodes[id];
+  SeqAllMeaning(node.children, (child: string) => finalAt(machine, next, entries, index, child, fuel - 1));
+}
+
+// A done machine processes no events.
+lemma ParallelDoneInert(machine: ParallelMachine, outputs: ParallelOutputs,
+  state: ParallelState, event: Event, pending: seq<Event>)
+  requires state.done
+  ensures parallelMicrostep(machine, outputs, state, event, pending) == ParallelMicro(state, true, true, [], [])
+{
 }

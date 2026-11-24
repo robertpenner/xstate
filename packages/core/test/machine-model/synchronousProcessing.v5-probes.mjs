@@ -278,4 +278,23 @@ run('V9', () =>
     [{ type: 'GO' }, { type: 'R' }]
   )
 );
+// V10 root output computed before exit actions at completion
+run('V10', () =>
+  settle(
+    createMachine({
+      context: { n: 0 },
+      initial: 'a',
+      output: ({ context }) => context.n,
+      exit: assign({ n: ({ context }) => context.n + 100 }),
+      states: {
+        a: { on: { GO: 'f' } },
+        f: {
+          type: 'final',
+          exit: assign({ n: ({ context }) => context.n + 10 })
+        }
+      }
+    }),
+    [{ type: 'GO' }]
+  )
+);
 console.log(JSON.stringify(out, null, 1));

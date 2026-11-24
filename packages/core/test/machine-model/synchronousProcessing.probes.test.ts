@@ -508,7 +508,7 @@ describe('synchronous processing probes (#24)', () => {
       expect(labels(steps[0][1])).toEqual([]);
     });
 
-    it('[runtime] computes root output before exit functions change context at completion', () => {
+    it('[runtime][v5] computes root output before exit functions change context at completion', () => {
       const machine = createMachine({
         options: { maxIterations },
         context: { n: 0 },

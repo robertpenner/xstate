@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 492,
+  "verifiedCount": 887,
   "functions": [
     "mergePatch",
     "apply",
@@ -53,7 +53,37 @@
     "domainsApart",
     "multiReady",
     "parallelStepReady",
-    "parallelStep"
+    "parallelStep",
+    "alwaysSelected",
+    "eventlessStep",
+    "initialMacrostep",
+    "settle",
+    "takeTransition",
+    "transitionMacrostep",
+    "completed",
+    "doneEvent",
+    "completion",
+    "compoundDone",
+    "compoundCompletion",
+    "compoundSettle",
+    "compoundInitialMacrostep",
+    "compoundMacrostep",
+    "parallelParts",
+    "activeAt",
+    "finalAt",
+    "queuedOutput",
+    "finalChildOutput",
+    "regionOutput",
+    "regionOutputs",
+    "climb",
+    "finalEntered",
+    "parallelEnter",
+    "parallelFinish",
+    "parallelInitialMicro",
+    "parallelMicrostep",
+    "parallelSettle",
+    "parallelInitialMacrostep",
+    "parallelMacrostep"
   ],
   "contracts": [
     "mergePatch_ensures",
@@ -77,7 +107,12 @@
     "parallelTransition_ensures",
     "selectionPlans_ensures",
     "applyAll_ensures",
-    "parallelStep_ensures"
+    "parallelStep_ensures",
+    "eventlessStep_ensures",
+    "takeTransition_ensures",
+    "completion_ensures",
+    "regionOutputs_ensures",
+    "parallelMicrostep_ensures"
   ],
   "specFunctions": [
     "Selected",
@@ -116,7 +151,26 @@
     "PlansContext",
     "MovingPlans",
     "Distinct",
-    "DistinctIds"
+    "DistinctIds",
+    "Advanced",
+    "AllContextsReused",
+    "AllSnapshotsReused",
+    "AlwaysDeclared",
+    "AlwaysEnabled",
+    "NextEventless",
+    "NodeAt",
+    "TraceEffects",
+    "Continues",
+    "FinalEvent",
+    "NextEvent",
+    "NextQueue",
+    "NextSelect",
+    "NextStep",
+    "OnDeclared",
+    "Proceeds",
+    "TraceRaised",
+    "Done",
+    "ParentOf"
   ],
   "laws": [
     "LastPatchCons",
@@ -284,7 +338,64 @@
     "SourceApartMeaning",
     "SourcesApartMeaning",
     "SubseqDistinct",
-    "SubseqMembers"
+    "SubseqMembers",
+    "EmptyPatchLoops",
+    "EventStepShared",
+    "EventlessDeclared",
+    "EventlessIdentity",
+    "IdentityStepRunsOnce",
+    "SettleAccumulates",
+    "SettleBudget",
+    "SettleRest",
+    "SettleStable",
+    "SettleSteps",
+    "SettleStops",
+    "SettleUnfold",
+    "SettleValid",
+    "DequeueDeclared",
+    "DequeueUnhandled",
+    "MacrostepQueues",
+    "SettleDequeue",
+    "SettleEventless",
+    "CompletionInert",
+    "CompletionOrder",
+    "TerminalInert",
+    "SettleDone",
+    "TerminalMacrostep",
+    "ActiveOutputUndefined",
+    "EnteredFinalDefinesOutput",
+    "InitialCompletion",
+    "CompoundDoneInert",
+    "CompoundSettleDone",
+    "NestedFinalRaisesDone",
+    "RootCompletionOutput",
+    "CompoundOutputOnlyWhenDone",
+    "CompoundSettleDequeue",
+    "CompoundSettleBudget",
+    "CompoundInitialCompletion",
+    "NestedDoneNamesParent",
+    "ClimbBookkeeping",
+    "FinalEnteredBookkeeping",
+    "ParallelEnterCompletesOnce",
+    "NonFinalEntryInert",
+    "FinalRegionClimbs",
+    "FinalChildQueuesParentDone",
+    "ParallelEnterLifecycle",
+    "ParallelPartsAgree",
+    "ParallelMicroKeepsStep",
+    "EnteredDoneHasOutput",
+    "FinalEnteredDoneHasOutput",
+    "ParallelMicroValid",
+    "ParallelSettleDone",
+    "ParallelSettleBudget",
+    "ParallelSettleRefuses",
+    "ParallelSettleDequeue",
+    "ParallelSettleValid",
+    "ParallelInitialMicroValid",
+    "ActiveAtMeaning",
+    "SeqAllMeaning",
+    "FinalAtMeaning",
+    "ParallelDoneInert"
   ],
   "defects": [
     {
@@ -319,13 +430,13 @@
     },
     {
       "name": "unhandled event copies snapshot",
-      "before": "if (selected.result === undefined && selected.effects.length === 0) {\n    return { snapshot, snapshotReused: true, contextReused: true, effects: [] };",
-      "after": "if (selected.result === undefined && selected.effects.length === 0) {\n    return { snapshot, snapshotReused: false, contextReused: true, effects: [] };"
+      "before": "    selected.raises.length === 0\n  ) {\n    return {\n      snapshot,\n      snapshotReused: true,",
+      "after": "    selected.raises.length === 0\n  ) {\n    return {\n      snapshot,\n      snapshotReused: false,"
     },
     {
       "name": "reversed lifecycle effects",
-      "before": "snapshot: { value: next, context: entered.context },\n    snapshotReused: false,\n    contextReused: exited.reused && updated.reused && entered.reused,\n    effects: [...exited.effects, ...updated.effects, ...entered.effects]",
-      "after": "snapshot: { value: next, context: entered.context },\n    snapshotReused: false,\n    contextReused: exited.reused && updated.reused && entered.reused,\n    effects: [...entered.effects, ...updated.effects, ...exited.effects]"
+      "before": "      ...exited.effects,\n      ...updated.effects,\n      ...entered.effects,\n      ...done.effects\n    ],\n    raised: [...exiting.raises",
+      "after": "      ...entered.effects,\n      ...updated.effects,\n      ...exited.effects,\n      ...done.effects\n    ],\n    raised: [...exiting.raises"
     },
     {
       "name": "empty patch incorrectly reuses context",
@@ -339,8 +450,8 @@
     },
     {
       "name": "effect-only transition declines",
-      "before": "selected.result === undefined && selected.effects.length === 0",
-      "after": "selected.result === undefined && selected.effects.length >= 0"
+      "before": "selected.effects.length === 0 &&\n    selected.raises.length === 0",
+      "after": "selected.effects.length >= 0 &&\n    selected.raises.length === 0"
     },
     {
       "name": "ignored self reentry",
@@ -409,8 +520,8 @@
     },
     {
       "name": "kept results applied in reverse order",
-      "before": "  const first = apply(context, selections[0].evaluation);\n  const rest = applyAll(first.context, selections.slice(1));\n  return {\n    context: rest.context,\n    reused: first.reused && rest.reused,\n    effects: [...first.effects, ...rest.effects]\n  };",
-      "after": "  const rest = applyAll(context, selections.slice(1));\n  const first = apply(rest.context, selections[0].evaluation);\n  return {\n    context: first.context,\n    reused: first.reused && rest.reused,\n    effects: [...rest.effects, ...first.effects]\n  };"
+      "before": "  const first = apply(context, selections[0].evaluation);\n  const rest = applyAll(first.context, selections.slice(1));\n  return {\n    context: rest.context,\n    reused: first.reused && rest.reused,\n    effects: [...first.effects, ...rest.effects],\n    raises: [...first.raises, ...rest.raises]\n  };",
+      "after": "  const rest = applyAll(context, selections.slice(1));\n  const first = apply(rest.context, selections[0].evaluation);\n  return {\n    context: first.context,\n    reused: first.reused && rest.reused,\n    effects: [...rest.effects, ...first.effects],\n    raises: [...rest.raises, ...first.raises]\n  };"
     },
     {
       "name": "parallel step keeps exited nodes",
@@ -466,6 +577,266 @@
       "name": "a later conflicting selection replaces an earlier one",
       "before": "  if (anyPreempts(machine, active, first, kept)) {",
       "after": "  if (anyPreempts(machine, active, first, [])) {"
+    },
+    {
+      "name": "eventless identity step is reselected",
+      "before": "    !enabled || !next.snapshotReused,",
+      "after": "    true,"
+    },
+    {
+      "name": "macrostep budget allows one extra iteration",
+      "before": "if (remaining <= 0) return { settled: false, step, queue, trace: [] };",
+      "after": "if (remaining < 0) return { settled: false, step, queue, trace: [] };"
+    },
+    {
+      "name": "settled check precedes the budget check",
+      "before": "  if (remaining <= 0) return { settled: false, step, queue, trace: [] };\n  const selected",
+      "after": "  if (remaining <= 0 && !select && queue.length === 0)\n    return { settled: true, step, queue, trace: [] };\n  if (remaining <= 0) return { settled: false, step, queue, trace: [] };\n  const selected"
+    },
+    {
+      "name": "macrostep snapshot reuse reads only the last step",
+      "before": "      snapshotReused: step.snapshotReused && next.snapshotReused,\n      contextReused: step.contextReused && next.contextReused,\n      effects: [...step.effects, ...next.effects],\n      raised: [...step.raised, ...next.raised]\n    },\n    processed,",
+      "after": "      snapshotReused: next.snapshotReused,\n      contextReused: step.contextReused && next.contextReused,\n      effects: [...step.effects, ...next.effects],\n      raised: [...step.raised, ...next.raised]\n    },\n    processed,"
+    },
+    {
+      "name": "macrostep context reuse reads only the last step",
+      "before": "      snapshotReused: step.snapshotReused && next.snapshotReused,\n      contextReused: step.contextReused && next.contextReused,\n      effects: [...step.effects, ...next.effects],\n      raised: [...step.raised, ...next.raised]\n    },\n    processed,",
+      "after": "      snapshotReused: step.snapshotReused && next.snapshotReused,\n      contextReused: next.contextReused,\n      effects: [...step.effects, ...next.effects],\n      raised: [...step.raised, ...next.raised]\n    },\n    processed,"
+    },
+    {
+      "name": "eventless effects are dropped",
+      "before": "      snapshotReused: step.snapshotReused && next.snapshotReused,\n      contextReused: step.contextReused && next.contextReused,\n      effects: [...step.effects, ...next.effects],\n      raised: [...step.raised, ...next.raised]\n    },\n    processed,",
+      "after": "      snapshotReused: step.snapshotReused && next.snapshotReused,\n      contextReused: step.contextReused && next.contextReused,\n      effects: step.effects,\n      raised: [...step.raised, ...next.raised]\n    },\n    processed,"
+    },
+    {
+      "name": "eventless steps are omitted from the trace",
+      "before": "    settled: rest.settled,\n    step: rest.step,\n    queue: rest.queue,\n    trace: [next, ...rest.trace]",
+      "after": "    settled: rest.settled,\n    step: rest.step,\n    queue: rest.queue,\n    trace: rest.trace"
+    },
+    {
+      "name": "eventless identity ignores context reuse",
+      "before": "const kept = taken.snapshot.value === snapshot.value && taken.contextReused;",
+      "after": "const kept = taken.snapshot.value === snapshot.value;"
+    },
+    {
+      "name": "effect-only eventless transitions are not enabled",
+      "before": "    selected.result !== undefined ||\n    selected.effects.length > 0 ||\n    selected.raises.length > 0;",
+      "after": "    selected.result !== undefined ||\n    selected.raises.length > 0;"
+    },
+    {
+      "name": "raised events join the front of the queue",
+      "before": "[...waiting, ...next.raised]",
+      "after": "[...next.raised, ...waiting]"
+    },
+    {
+      "name": "transition raises are dropped",
+      "before": "raised: [...exiting.raises, ...selected.raises, ...entering.raises]",
+      "after": "raised: [...exiting.raises, ...entering.raises]"
+    },
+    {
+      "name": "entry raises precede exit raises",
+      "before": "raised: [...exiting.raises, ...selected.raises, ...entering.raises]",
+      "after": "raised: [...entering.raises, ...selected.raises, ...exiting.raises]"
+    },
+    {
+      "name": "a dequeue skips eventless reselection",
+      "before": "    !enabled || !next.snapshotReused,",
+      "after": "    !next.snapshotReused,"
+    },
+    {
+      "name": "a macrostep settles with raised events still queued",
+      "before": "if (!enabled && queue.length === 0)",
+      "after": "if (!enabled)"
+    },
+    {
+      "name": "raise-only eventless transitions are not enabled",
+      "before": "    selected.effects.length > 0 ||\n    selected.raises.length > 0;",
+      "after": "    selected.effects.length > 0;"
+    },
+    {
+      "name": "raise-only transitions decline",
+      "before": "selected.effects.length === 0 &&\n    selected.raises.length === 0\n  ) {",
+      "after": "selected.effects.length === 0\n  ) {"
+    },
+    {
+      "name": "a dequeued event is processed as the macrostep event",
+      "before": ": transition(machine, step.snapshot, processed);",
+      "after": ": transition(machine, step.snapshot, event);"
+    },
+    {
+      "name": "initial raises are not queued",
+      "before": "const first = initialTransition(machine, event);\n  return settle(machine, first, event, true, first.raised, maxIterations);",
+      "after": "const first = initialTransition(machine, event);\n  return settle(machine, first, event, true, [], maxIterations);"
+    },
+    {
+      "name": "initial entry raises are dropped",
+      "before": "raised: entering.raises",
+      "after": "raised: []"
+    },
+    {
+      "name": "root output reads exit context",
+      "before": "  const rootOutputOf = machine.output;\n  const output = machine.hasOutput\n    ? rootOutputOf(context, doneEvent(value, finalOutput))\n    : finalOutput;\n  const exit = node.exit;\n  const exited = apply(context, exit(context, event));",
+      "after": "  const rootOutputOf = machine.output;\n  const exit = node.exit;\n  const exited = apply(context, exit(context, event));\n  const output = machine.hasOutput\n    ? rootOutputOf(exited.context, doneEvent(value, finalOutput))\n    : finalOutput;"
+    },
+    {
+      "name": "budget checked before completion",
+      "before": "  if (completed(machine, step.snapshot.value))\n    return { settled: true, step, queue: [], trace: [] };",
+      "after": "  if (remaining > 0 && completed(machine, step.snapshot.value))\n    return { settled: true, step, queue: [], trace: [] };"
+    },
+    {
+      "name": "completion keeps the queue",
+      "before": "    return { settled: true, step, queue: [], trace: [] };",
+      "after": "    return { settled: true, step, queue, trace: [] };"
+    },
+    {
+      "name": "final state takes handlers",
+      "before": "      : node.final\n        ? undefined\n        : node.on.get(event.type);",
+      "after": "      : node.on.get(event.type);"
+    },
+    {
+      "name": "root output receives the outer event",
+      "before": "    ? rootOutputOf(context, doneEvent(value, finalOutput))",
+      "after": "    ? rootOutputOf(context, event)"
+    },
+    {
+      "name": "completion skips the final exit",
+      "before": "  const exited = apply(context, exit(context, event));\n  return {",
+      "after": "  const exited = apply(context, emptyEvaluation());\n  return {"
+    },
+    {
+      "name": "compound done event precedes entry raises",
+      "before": "      ...entered.raises,\n      ...done.raised\n    ]",
+      "after": "      ...done.raised,\n      ...entered.raises\n    ]"
+    },
+    {
+      "name": "nested done event names the leaf",
+      "before": "raised: [doneEvent(parentId, finalOutput)]",
+      "after": "raised: [doneEvent(leafId, finalOutput)]"
+    },
+    {
+      "name": "compound root output reads exit context",
+      "before": "    ? rootOutput(context, doneEvent(leafId, finalOutput))",
+      "after": "    ? rootOutput(\n        lifecycle(machine.nodes, reverse(path), context, event, true).context,\n        doneEvent(leafId, finalOutput)\n      )"
+    },
+    {
+      "name": "compound completion keeps the queue",
+      "before": "  if (compoundDone(machine, step.snapshot.path))\n    return { settled: true, refused: false, step, queue: [], trace: [] };",
+      "after": "  if (compoundDone(machine, step.snapshot.path))\n    return { settled: true, refused: false, step, queue, trace: [] };"
+    },
+    {
+      "name": "compound budget checked before completion",
+      "before": "  if (compoundDone(machine, step.snapshot.path))\n    return { settled: true, refused: false, step, queue: [], trace: [] };\n  if (remaining <= 0)\n    return { settled: false, refused: false, step, queue, trace: [] };",
+      "after": "  if (remaining <= 0)\n    return { settled: false, refused: false, step, queue, trace: [] };\n  if (compoundDone(machine, step.snapshot.path))\n    return { settled: true, refused: false, step, queue: [], trace: [] };"
+    },
+    {
+      "name": "compound raised events processed last-in first-out",
+      "before": "      snapshot: next.snapshot,\n      snapshotReused: step.snapshotReused && next.snapshotReused,\n      contextReused: step.contextReused && next.contextReused,\n      effects: [...step.effects, ...next.effects],\n      raised: [...step.raised, ...next.raised]\n    },\n    [...queue.slice(1), ...next.raised],",
+      "after": "      snapshot: next.snapshot,\n      snapshotReused: step.snapshotReused && next.snapshotReused,\n      contextReused: step.contextReused && next.contextReused,\n      effects: [...step.effects, ...next.effects],\n      raised: [...step.raised, ...next.raised]\n    },\n    [...next.raised, ...queue.slice(1)],"
+    },
+    {
+      "name": "done compound machine still transitions",
+      "before": "  // A done machine processes no events.\n  if (compoundDone(machine, snapshot.path))\n",
+      "after": "  // A done machine processes no events.\n  if (snapshot.path.length < 0)\n"
+    },
+    {
+      "name": "compound initialization skips completion",
+      "before": "  const done = compoundCompletion(machine, path, true, entered.context, event);",
+      "after": "  const done = compoundCompletion(machine, path, false, entered.context, event);"
+    },
+    {
+      "name": "parallel completes twice in one microstep",
+      "before": "    !machine.parallels.includes(marker) ||\n    completed.includes(marker) ||\n",
+      "after": "    !machine.parallels.includes(marker) ||\n"
+    },
+    {
+      "name": "parallel completes before its regions are final",
+      "before": "    !finalAt(machine, next, entries, index, marker, machine.order.length)\n  )",
+      "after": "    false\n  )"
+    },
+    {
+      "name": "climb forgets the completed parallel",
+      "before": "    [...completed, marker],\n    path[path.length - 2],",
+      "after": "    completed,\n    path[path.length - 2],"
+    },
+    {
+      "name": "climb skips a parallel ancestor",
+      "before": "    path[path.length - 2],\n    fuel - 1\n  );",
+      "after": "    path[0],\n    fuel - 1\n  );"
+    },
+    {
+      "name": "parallel root completion leaves the machine active",
+      "before": "      completed: [...completed, marker],\n      done: true,",
+      "after": "      completed: [...completed, marker],\n      done: false,"
+    },
+    {
+      "name": "compound root completion ignores the root output",
+      "before": "      output: outputs.hasOutput\n        ? rootOutput(context, doneEvent(id, finalOutput))\n        : finalOutput",
+      "after": "      output: finalOutput"
+    },
+    {
+      "name": "compound done event follows the parallel done events",
+      "before": "  return {\n    raised: [done, ...rest.raised],\n    completed: rest.completed,\n    done: rest.done,\n    output: rest.output\n  };\n}\n\n// Entries run",
+      "after": "  return {\n    raised: [...rest.raised, done],\n    completed: rest.completed,\n    done: rest.done,\n    output: rest.output\n  };\n}\n\n// Entries run"
+    },
+    {
+      "name": "final region climbs from the root",
+      "before": "      queue,\n      completed,\n      parent,\n      fuel\n    );",
+      "after": "      queue,\n      completed,\n      path[0],\n      fuel\n    );"
+    },
+    {
+      "name": "later entries start from the planned context",
+      "before": "    index + 1,\n    entered.context,",
+      "after": "    index + 1,\n    context,"
+    },
+    {
+      "name": "completed machine skips its exits",
+      "before": "    reverse(active),\n    step.snapshot.context,",
+      "after": "    [],\n    step.snapshot.context,"
+    },
+    {
+      "name": "completed machine clears its configuration",
+      "before": "      snapshot: { active, context: exited.context },",
+      "after": "      snapshot: { active: [], context: exited.context },"
+    },
+    {
+      "name": "completion enters from the snapshot context",
+      "before": "    entries,\n    entryContext: updated.context\n  };",
+      "after": "    entries,\n    entryContext: snapshot.context\n  };"
+    },
+    {
+      "name": "current entry counts as a later entry",
+      "before": "entries.slice(index + 1).includes(id)",
+      "after": "entries.slice(index).includes(id)"
+    },
+    {
+      "name": "compound node is final without an active final child",
+      "before": "      lookupNode(nodes, child).final &&\n      activeAt(next, entries, index, child)\n",
+      "after": "      lookupNode(nodes, child).final\n"
+    },
+    {
+      "name": "done parallel machine keeps settling",
+      "before": "  if (step.state.done)\n    return { settled: true, refused: false, step, queue: [], trace: [] };\n  if (remaining <= 0)\n    return { settled: false, refused: false, step, queue, trace: [] };\n  if (queue.length === 0)\n    return { settled: true, refused: false, step, queue, trace: [] };\n  if (!parallelStepReady",
+      "after": "  if (remaining <= 0)\n    return { settled: false, refused: false, step, queue, trace: [] };\n  if (queue.length === 0)\n    return { settled: true, refused: false, step, queue, trace: [] };\n  if (!parallelStepReady"
+    },
+    {
+      "name": "parallel settle skips the readiness check",
+      "before": "  if (!parallelStepReady(machine, step.state.snapshot, queue[0]))\n    return { settled: false, refused: true, step, queue, trace: [] };\n  const next = parallelMicrostep(",
+      "after": "  const next = parallelMicrostep("
+    },
+    {
+      "name": "parallel settle drops microstep raises",
+      "before": "  const rest = parallelSettle(\n    machine,\n    outputs,\n    {\n      state: next.state,\n      snapshotReused: step.snapshotReused && next.snapshotReused,\n      contextReused: step.contextReused && next.contextReused,\n      effects: [...step.effects, ...next.effects],\n      raised: [...step.raised, ...next.raised]\n    },\n    [...queue.slice(1), ...next.raised],\n    remaining - 1",
+      "after": "  const rest = parallelSettle(\n    machine,\n    outputs,\n    {\n      state: next.state,\n      snapshotReused: step.snapshotReused && next.snapshotReused,\n      contextReused: step.contextReused && next.contextReused,\n      effects: [...step.effects, ...next.effects],\n      raised: [...step.raised, ...next.raised]\n    },\n    queue.slice(1),\n    remaining - 1"
+    },
+    {
+      "name": "done parallel machine takes transitions",
+      "before": "  // A done machine processes no events.\n  if (state.done) return unchanged;\n  const step = parallelStep(",
+      "after": "  const step = parallelStep("
+    },
+    {
+      "name": "entry pass forgets earlier completions",
+      "before": "    [...queued, ...final.raised],\n    final.completed\n  );",
+      "after": "    [...queued, ...final.raised],\n    completed\n  );"
     }
   ],
   "proofDefects": [

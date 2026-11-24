@@ -14,7 +14,7 @@ describe.each([
   ['flat', compareTrace],
   ['compound', compareCompoundTrace]
 ] as const)('%s adapter contract', (_, compare) => {
-  it('refuses a raised event even when the callback catches the refusal', () => {
+  it('refuses a delayed raise even when the callback catches the refusal', () => {
     expect(() =>
       compare(
         {
@@ -26,7 +26,11 @@ describe.each([
                 go: (_, enqueue) => {
                   try {
                     const raise = Reflect.get(enqueue, 'raise');
-                    if (typeof raise === 'function') raise({ type: 'ignored' });
+                    if (typeof raise === 'function')
+                      Reflect.apply(raise, undefined, [
+                        { type: 'ignored' },
+                        { delay: 1 }
+                      ]);
                   } catch (error) {
                     if (
                       !(error instanceof Error) ||
@@ -42,7 +46,7 @@ describe.each([
         },
         [{ type: 'go' }]
       )
-    ).toThrow(/Unsupported enqueue operation/);
+    ).toThrow(/Unsupported (enqueue operation|raise options)/);
   });
 
   describe.each(['enqueue', 'arguments'])('%s reflection', (target) => {

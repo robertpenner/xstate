@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import {
   createMachine,
+  getInitialMicrosteps,
+  getMicrosteps,
+  InfiniteTransitionError,
   initialTransition,
   transition,
   type AnyMachineSnapshot,
@@ -11,25 +14,40 @@ import * as model from './machineModel';
 export type Context = Record<string, unknown>;
 export type Event = { type: string; [key: string]: unknown };
 type Result = { target?: string; context?: Context; reenter?: boolean };
-type Enqueue = (
+type Enqueue = ((
   action: (...args: unknown[]) => void,
   ...args: unknown[]
-) => void;
+) => void) & {
+  // Accepted by the flat adapter only.
+  raise: (event: Event) => void;
+};
 export type Callback = (
   args: { context: Context; event: Event },
   enq: Enqueue
 ) => Result | void;
 export type Transition = Result | Callback | undefined;
+export type Output = (args: { context: Context; event: Event }) => unknown;
 type State = {
+  type?: 'final';
   on?: Record<string, Transition>;
+  always?: Transition;
   entry?: Callback;
   exit?: Callback;
+  output?: Output;
 };
 export type Config = {
   initial: string;
   context: Context;
   states: Record<string, State>;
+  output?: Output;
+  options?: { maxIterations?: number };
 };
+
+const donePrefix = 'xstate.done.state.';
+
+// The runtime's default bound is unlimited. Without an explicit bound the
+// adapter runs the model to this cap and refuses a macrostep that reaches it.
+export const unboundedCap = 1000;
 
 export function plainRecord(
   value: unknown,
@@ -90,7 +108,19 @@ export function validateResult(
 }
 
 function validateConfig(config: Config) {
-  fields(config, ['initial', 'context', 'states'], 'config');
+  fields(
+    config,
+    ['initial', 'context', 'states', 'output', 'options'],
+    'config'
+  );
+  if (config.output !== undefined && typeof config.output !== 'function')
+    throw new Error('Unsupported output');
+  if (config.options !== undefined) {
+    fields(config.options, ['maxIterations'], 'options');
+    const bound = config.options.maxIterations;
+    if (bound !== undefined && !(Number.isSafeInteger(bound) && bound >= 1))
+      throw new Error(`Unsupported options.maxIterations: ${String(bound)}`);
+  }
   plainRecord(config.states, 'states');
   plainRecord(config.context, 'context');
   if (
@@ -102,7 +132,29 @@ function validateConfig(config: Config) {
   for (const [name, node] of Object.entries(config.states)) {
     if (!name || /[.#]/.test(name))
       throw new Error(`Unsupported flat state name: ${name}`);
-    fields(node, ['on', 'entry', 'exit'], `states.${name}`);
+    fields(
+      node,
+      ['type', 'on', 'always', 'entry', 'exit', 'output'],
+      `states.${name}`
+    );
+    if (node.type !== undefined && node.type !== 'final')
+      throw new Error(`Unsupported states.${name}.type`);
+    // Final states are inert, except that the runtime still takes `always`.
+    if (node.type === 'final' && (node.on ?? node.always) !== undefined)
+      throw new Error(`Unsupported transitions on final state ${name}`);
+    if (
+      node.output !== undefined &&
+      (node.type !== 'final' || typeof node.output !== 'function')
+    )
+      throw new Error(`Unsupported states.${name}.output`);
+    if (Array.isArray(node.always))
+      throw new Error(`Unsupported states.${name}.always array`);
+    if (node.always !== undefined && typeof node.always !== 'function')
+      validateResult(
+        node.always,
+        (target) => flatTarget(config, target),
+        false
+      );
     for (const kind of ['entry', 'exit'] as const) {
       if (node[kind] !== undefined && typeof node[kind] !== 'function') {
         throw new Error(`Unsupported states.${name}.${kind}`);
@@ -111,7 +163,7 @@ function validateConfig(config: Config) {
     if (node.on === undefined) continue;
     plainRecord(node.on, `states.${name}.on`);
     for (const [type, handler] of Object.entries(node.on)) {
-      if (!type || type.includes('*'))
+      if (!type || type.includes('*') || type.startsWith('xstate.'))
         throw new Error(`Unsupported event name: ${type}`);
       if (typeof handler !== 'function')
         validateResult(handler, (target) => flatTarget(config, target), false);
@@ -125,7 +177,8 @@ function flatTarget(config: Config, target: string) {
   return target;
 }
 
-export function createEncoding() {
+// `stateId` maps a model state id back to the runtime id that done events carry.
+export function createEncoding(stateId = (id: string) => id) {
   const values: unknown[] = [];
   const encodeValue = (value: unknown) => {
     const found = values.findIndex((entry) => Object.is(value, entry));
@@ -159,26 +212,90 @@ export function createEncoding() {
     Object.setPrototypeOf(decoded, prototype);
     return decoded;
   };
-  const evaluate =
-    (
-      definition: Transition,
-      lifecycle: boolean,
-      resolveTarget: (target: string) => string
-    ) =>
-    (context: Record<string, number>, event: model.Event): model.Evaluation => {
-      const effects: model.Effect[] = [];
+  // The model creates done events, so callbacks receive an object equal to
+  // the runtime's done event rather than the same object.
+  const decodeEvent = (event: model.Event): Event =>
+    event.type.startsWith(donePrefix)
+      ? {
+          type: 'xstate.done.state',
+          stateId: stateId(event.type.slice(donePrefix.length)),
+          output: values[event.value]
+        }
+      : (values[event.value] as Event);
+  const callbackArguments = (
+    context: Record<string, number>,
+    event: model.Event,
+    refuse: (message: string) => never
+  ) => {
+    const argumentKey = (key: string | symbol) => {
+      if (key !== 'context' && key !== 'event')
+        refuse(`Unsupported callback argument: ${String(key)}`);
+    };
+    return new Proxy(
+      { context: decode(context), event: decodeEvent(event) },
+      {
+        get: (target, key, receiver) => {
+          argumentKey(key);
+          return Reflect.get(target, key, receiver);
+        },
+        has: (target, key) => {
+          argumentKey(key);
+          return Reflect.has(target, key);
+        },
+        getOwnPropertyDescriptor: (target, key) => {
+          argumentKey(key);
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+        ownKeys: () => refuse('Unsupported callback argument enumeration'),
+        getPrototypeOf: () =>
+          refuse('Unsupported callback argument prototype inspection')
+      }
+    );
+  };
+  const evaluateOutput =
+    (definition: Output | undefined) =>
+    (context: Record<string, number>, event: model.Event): number => {
+      if (definition === undefined) return encodeValue(undefined);
       let unsupported: Error | undefined;
       const refuse = (message: string): never => {
         unsupported ??= new Error(message);
         throw unsupported;
       };
-      const enqueueAccess = (_target: Enqueue, key: string | symbol): never =>
-        refuse(`Unsupported enqueue operation: ${String(key)}`);
-      const argumentKey = (key: string | symbol) => {
-        if (key !== 'context' && key !== 'event')
-          refuse(`Unsupported callback argument: ${String(key)}`);
+      const output = definition(callbackArguments(context, event, refuse));
+      if (unsupported) throw unsupported;
+      return encodeValue(output);
+    };
+  const evaluate =
+    (
+      definition: Transition,
+      lifecycle: boolean,
+      resolveTarget: (target: string) => string,
+      // Only models that queue raised events may accept `enq.raise`.
+      raising = false
+    ) =>
+    (context: Record<string, number>, event: model.Event): model.Evaluation => {
+      const effects: model.Effect[] = [];
+      const raises: model.Event[] = [];
+      let unsupported: Error | undefined;
+      const refuse = (message: string): never => {
+        unsupported ??= new Error(message);
+        throw unsupported;
       };
-      const enqueue: Enqueue = new Proxy(
+      const raise = (raised: unknown, ...options: unknown[]) => {
+        if (options.length > 0) refuse('Unsupported raise options');
+        try {
+          plainRecord(raised, 'raised event');
+        } catch (error) {
+          refuse((error as Error).message);
+        }
+        const type = (raised as { type?: unknown }).type;
+        if (typeof type !== 'string' || !type || type.startsWith('xstate.'))
+          refuse(`Unsupported raised event type: ${String(type)}`);
+        raises.push({ type: type as string, value: encodeValue(raised) });
+      };
+      const enqueueAccess = (_target: unknown, key: string | symbol): never =>
+        refuse(`Unsupported enqueue operation: ${String(key)}`);
+      const enqueue = new Proxy(
         (action: (...args: unknown[]) => void, ...args: unknown[]) => {
           if (typeof action !== 'function') refuse('Unsupported effect');
           effects.push({
@@ -187,7 +304,8 @@ export function createEncoding() {
           });
         },
         {
-          get: enqueueAccess,
+          get: (target, key) =>
+            raising && key === 'raise' ? raise : enqueueAccess(target, key),
           has: enqueueAccess,
           getOwnPropertyDescriptor: enqueueAccess,
           ownKeys: () => refuse('Unsupported enqueue enumeration'),
@@ -198,31 +316,8 @@ export function createEncoding() {
       const result =
         typeof definition === 'function'
           ? definition(
-              new Proxy(
-                {
-                  context: decode(context),
-                  event: values[event.value] as Event
-                },
-                {
-                  get: (target, key, receiver) => {
-                    argumentKey(key);
-                    return Reflect.get(target, key, receiver);
-                  },
-                  has: (target, key) => {
-                    argumentKey(key);
-                    return Reflect.has(target, key);
-                  },
-                  getOwnPropertyDescriptor: (target, key) => {
-                    argumentKey(key);
-                    return Reflect.getOwnPropertyDescriptor(target, key);
-                  },
-                  ownKeys: () =>
-                    refuse('Unsupported callback argument enumeration'),
-                  getPrototypeOf: () =>
-                    refuse('Unsupported callback argument prototype inspection')
-                }
-              ),
-              enqueue
+              callbackArguments(context, event, refuse),
+              enqueue as Enqueue
             )
           : definition;
       if (unsupported) throw unsupported;
@@ -247,7 +342,8 @@ export function createEncoding() {
                         ([key, value]) => ({ key, value })
                       )
               },
-        effects
+        effects,
+        raises
       };
     };
   const encodeEffects = (effects: readonly ExecutableEffect[]) =>
@@ -271,19 +367,32 @@ export function createEncoding() {
     }));
   return {
     encodeValue,
+    decodeValue: (value: number) => values[value],
     encode,
     decode,
     evaluate,
+    evaluateOutput,
     encodeEffects,
     decodeEffects
   };
 }
 
+export type Unfinished = { maxIterations: number; afterEvents: number };
+
 export function compareTrace(config: Config, events: readonly Event[]) {
+  const run = compareRun(config, events);
+  if (run.unfinished)
+    throw new Error(
+      `Macrostep reached maxIterations ${run.unfinished.maxIterations}`
+    );
+  return run.trace;
+}
+
+export function compareRun(config: Config, events: readonly Event[]) {
   validateConfig(config);
   for (const event of events) {
     plainRecord(event, 'event');
-    if (typeof event.type !== 'string')
+    if (typeof event.type !== 'string' || event.type.startsWith('xstate.'))
       throw new Error('Unsupported event.type');
   }
   const {
@@ -291,6 +400,7 @@ export function compareTrace(config: Config, events: readonly Event[]) {
     encode,
     decode,
     evaluate,
+    evaluateOutput,
     encodeEffects,
     decodeEffects
   } = createEncoding();
@@ -305,23 +415,103 @@ export function compareTrace(config: Config, events: readonly Event[]) {
           on: new Map(
             Object.entries(node.on ?? {}).map(([event, result]) => [
               event,
-              evaluate(result, false, resolveTarget)
+              evaluate(result, false, resolveTarget, true)
             ])
           ),
-          entry: evaluate(node.entry, true, resolveTarget),
-          exit: evaluate(node.exit, true, resolveTarget)
+          always:
+            node.always === undefined
+              ? declining
+              : evaluate(node.always, false, resolveTarget, true),
+          entry: evaluate(node.entry, true, resolveTarget, true),
+          exit: evaluate(node.exit, true, resolveTarget, true),
+          final: node.type === 'final',
+          output: evaluateOutput(node.output)
         }
       ])
-    )
+    ),
+    hasOutput: config.output !== undefined,
+    output: evaluateOutput(config.output)
+  };
+  const done = (step: model.Step) =>
+    model.completed(machine, step.snapshot.value);
+  // The runtime ends a macrostep that completes the machine with a builtin
+  // termination effect, which the model represents by its done status.
+  const withoutTermination = (
+    effects: readonly ExecutableEffect[],
+    terminates: boolean
+  ) => {
+    if (!terminates) return effects;
+    assert.equal(effects.at(-1)?.type, '@xstate.terminate');
+    return effects.slice(0, -1);
   };
   const runtime = createMachine(config);
-  let expected = model.initialTransition(machine, {
+  const bound = config.options?.maxIterations;
+  const budget = bound ?? unboundedCap;
+  const settled = (macrostep: model.Macrostep) => {
+    if (!macrostep.settled && bound === undefined)
+      throw new Error(
+        `Unsupported unbounded macrostep: no rest within ${unboundedCap} iterations`
+      );
+    return macrostep;
+  };
+  const initialEvent = {
     type: 'xstate.init',
     value: encodeValue({ type: 'xstate.init', input: undefined })
-  });
+  };
+  let macrostep = settled(
+    model.initialMacrostep(machine, initialEvent, budget)
+  );
+  if (!macrostep.settled) {
+    expectUnfinished(() => initialTransition(runtime), bound!);
+    expectUnfinished(() => getInitialMicrosteps(runtime), bound!);
+    return {
+      trace: [] as ReturnType<typeof compare>[],
+      unfinished: { maxIterations: bound!, afterEvents: 0 } as Unfinished
+    };
+  }
+  compareMicrosteps(
+    settledRuntime(() => getInitialMicrosteps(runtime)),
+    model.initialTransition(machine, initialEvent),
+    macrostep.trace,
+    done(macrostep.step)
+  );
+  let expected = macrostep.step;
   let [actual, actualEffects] = initialTransition(runtime);
+  function compareMicrosteps(
+    microsteps: ReadonlyArray<
+      readonly [AnyMachineSnapshot, readonly ExecutableEffect[], unknown]
+    >,
+    first: model.Step,
+    eventless: readonly model.Step[],
+    terminates: boolean
+  ) {
+    assert.equal(microsteps.length, 1 + eventless.length);
+    [first, ...eventless].forEach((step, index) => {
+      const [snapshot, effects] = microsteps[index];
+      assert.equal(snapshot.value, step.snapshot.value);
+      assert.deepEqual(encode(snapshot.context), step.snapshot.context);
+      assert.deepEqual(
+        encodeEffects(
+          withoutTermination(effects, terminates && index === eventless.length)
+        ),
+        step.effects
+      );
+      // Snapshot identity is compared per macrostep only: the runtime replaces
+      // the last microstep's snapshot with a clone when a handled macrostep
+      // would otherwise return the previous snapshot.
+      if (index > 0) {
+        const [before] = microsteps[index - 1];
+        assert.equal(snapshot.context === before.context, step.contextReused);
+      }
+    });
+  }
   function compare(previous: AnyMachineSnapshot | undefined) {
-    assert.equal(actual.status, 'active');
+    const status = done(expected) ? 'done' : 'active';
+    assert.equal(actual.status, status);
+    assert.equal(
+      encodeValue(actual.output),
+      expected.snapshot.output ?? encodeValue(undefined)
+    );
     assert.equal(actual.value, expected.snapshot.value);
     assert.deepEqual(encode(actual.context), expected.snapshot.context);
     assert.deepEqual(
@@ -333,9 +523,15 @@ export function compareTrace(config: Config, events: readonly Event[]) {
       actual.context === (previous?.context ?? config.context),
       expected.contextReused
     );
-    assert.deepEqual(encodeEffects(actualEffects), expected.effects);
+    const terminates = status === 'done' && previous?.status !== 'done';
+    assert.deepEqual(
+      encodeEffects(withoutTermination(actualEffects, terminates)),
+      expected.effects
+    );
     return {
       value: expected.snapshot.value,
+      status,
+      output: actual.output,
       context: actual.context,
       effects: decodeEffects(expected.effects),
       snapshotReused: expected.snapshotReused,
@@ -343,14 +539,56 @@ export function compareTrace(config: Config, events: readonly Event[]) {
     };
   }
   const trace = [compare(undefined)];
-  for (const event of events) {
+  for (const [index, event] of events.entries()) {
     const previous = actual;
-    expected = model.transition(machine, expected.snapshot, {
-      type: event.type,
-      value: encodeValue(event)
-    });
+    const modelEvent = { type: event.type, value: encodeValue(event) };
+    macrostep = settled(
+      model.transitionMacrostep(machine, expected.snapshot, modelEvent, budget)
+    );
+    if (!macrostep.settled) {
+      expectUnfinished(() => transition(runtime, previous, event), bound!);
+      expectUnfinished(() => getMicrosteps(runtime, previous, event), bound!);
+      return {
+        trace,
+        unfinished: {
+          maxIterations: bound!,
+          afterEvents: index
+        } as Unfinished | undefined
+      };
+    }
+    compareMicrosteps(
+      settledRuntime(() => getMicrosteps(runtime, previous, event)),
+      model.transition(machine, expected.snapshot, modelEvent),
+      macrostep.trace,
+      done(macrostep.step) && !done(expected)
+    );
+    expected = macrostep.step;
     [actual, actualEffects] = transition(runtime, actual, event);
     trace.push(compare(previous));
   }
-  return trace;
+  return { trace, unfinished: undefined as Unfinished | undefined };
+}
+
+const declining = (): model.Evaluation => ({
+  result: undefined,
+  effects: [],
+  raises: []
+});
+
+// The model settled, so a runtime InfiniteTransitionError is a disagreement.
+export function settledRuntime<T>(run: () => T): T {
+  let result: T | undefined;
+  assert.doesNotThrow(() => {
+    result = run();
+  });
+  return result as T;
+}
+
+export function expectUnfinished(run: () => unknown, maxIterations: number) {
+  assert.throws(
+    run,
+    (error: unknown) =>
+      error instanceof InfiniteTransitionError &&
+      error.maxIterations === maxIterations
+  );
 }

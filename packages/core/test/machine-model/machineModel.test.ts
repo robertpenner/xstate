@@ -185,13 +185,13 @@ describe('flat machine model', () => {
           context: {},
           states: {
             // @ts-expect-error Deliberately unsupported configuration.
-            a: { entry, always: { target: 'b' } },
+            a: { entry, after: { 10: 'b' } },
             b: {}
           }
         },
         []
       )
-    ).toThrow(/Unsupported.*always/);
+    ).toThrow(/Unsupported.*after/);
     expect(entry).not.toHaveBeenCalled();
   });
 
@@ -257,7 +257,7 @@ describe('flat machine model', () => {
     ).toThrow(/Unsupported/);
   });
 
-  it.each(['always', 'after', 'invoke', 'states', 'type', 'history', 'input'])(
+  it.each(['after', 'invoke', 'states', 'type', 'history', 'input'])(
     'refuses state feature %s',
     (key) => {
       expect(() =>
@@ -302,8 +302,8 @@ describe('flat machine model', () => {
             a: {
               on: {
                 event: (_, enq) => {
-                  // @ts-expect-error Deliberately unsupported enqueue operation.
-                  enq.raise({ type: 'event' });
+                  // @ts-expect-error Delayed raises are unsupported.
+                  enq.raise({ type: 'event' }, { delay: 1 });
                 }
               }
             }
@@ -311,6 +311,6 @@ describe('flat machine model', () => {
         },
         [{ type: 'event' }]
       )
-    ).toThrow(/Unsupported.*raise/);
+    ).toThrow(/Unsupported raise options/);
   });
 });

@@ -27,9 +27,9 @@ multiple-and-nested-parallel initialization
 unmodified LemmaScript 0.6.6. Dafny 4.11.0 proves its contracts and the laws in
 [`formal/machineModel.dfy`](./formal/machineModel.dfy).
 [`formal/machineModel.manifest.json`](./formal/machineModel.manifest.json) lists
-166 laws (including proof helpers and a concrete lifecycle witness), 22 generated
-contract lemmas, and 36 deliberately incorrect model edits. The complete proof
-currently checks 492 verification tasks. Function postconditions support
+223 laws (including proof helpers and concrete lifecycle and done-event
+witnesses), 27 generated contract lemmas, and 88 deliberately incorrect model
+edits. The complete proof currently checks 887 verification tasks. Function postconditions support
 composition; they are also checked against the generated bodies.
 Eleven additional proof-weakening probes check that generated contracts cannot
 gain restrictive preconditions or lose their original postconditions.
@@ -55,6 +55,99 @@ The laws establish:
   effects still apply. A targetless selection has no lifecycle plan or
   conflict exits and passes the multi-selection readiness check
   (`TargetlessSelectionLifecycle`).
+- A flat macrostep runs the initial or event microstep, then eventless
+  microsteps, through the same `takeTransition` used for events
+  (`EventStepShared`). The macrostep event is passed to every eventless
+  callback. An eventless step that keeps the value and the context object
+  reuses the snapshot (`EventlessIdentity`), and the macrostep then stops
+  reselecting, so effect-only and non-reentering self-targeting eventless
+  transitions run once (`IdentityStepRunsOnce`). A macrostep settles exactly
+  when it takes fewer microsteps than its iteration bound or the machine is
+  done (`SettleBudget`). Eventless steps, dequeues, and the final selection
+  that finds nothing enabled all count against the bound, as in the
+  runtime. It stops only at an identity step or when no
+  eventless transition is enabled (`SettleRest`, `SettleSteps`). Its
+  effects concatenate in step order and its snapshot and context reuse
+  flags hold only when every step reused them (`SettleAccumulates`). A larger
+  bound extends the trace and leaves a settled result unchanged
+  (`SettleStable`). Declared eventless targets keep the value declared
+  (`EventlessDeclared`, `SettleValid`). An eventless transition that always
+  returns an empty patch never settles (`EmptyPatchLoops`), because every
+  supplied patch copies context.
+- Immediate raised events are kept apart from effects. A flat step raises the
+  exit callback's events, then the transition's, then the entry callback's
+  (`LifecycleOrderAndContext`, `TargetlessLifecycle`, `InitialLifecycle`); a
+  callback that only raises handles the event (`EffectOnlyHandled`,
+  `HandledIdentity`). Initial and event macrosteps start with that step's
+  raises as the queue (`MacrostepQueues`). An enabled eventless transition
+  runs before the next dequeue and appends its raises to the back of the queue
+  (`SettleEventless`). Otherwise the head of the queue is processed as an
+  event, the step's raises are appended, and eventless transitions are
+  reselected against the dequeued event (`SettleDequeue`). A dequeued event
+  that no transition handles still takes a microstep that reuses the snapshot
+  (`DequeueUnhandled`). A macrostep settles only with an empty queue and no
+  enabled eventless transition (`SettleStops`, `SettleRest`), and eventless and
+  dequeue microsteps count against the same bound (`SettleBudget`). Raised
+  events accumulate in step order (`SettleAccumulates`). Declared `on` and
+  eventless targets keep every microstep's value declared (`DequeueDeclared`,
+  `SettleValid`).
+- Entering a flat final state completes the machine. The final state's output
+  is resolved from the entered context. The root output, when declared, is
+  resolved from the same context and a done event carrying the final output;
+  otherwise the final output is the machine output. Only then does the final
+  state's exit run, and its patch reaches the snapshot context but not the
+  output (`CompletionOrder`, the order reported in
+  [statelyai/xstate#5949](https://github.com/statelyai/xstate/issues/5949)).
+  Any other destination completes nothing (`CompletionInert`), and output is
+  undefined while the machine is active (`ActiveOutputUndefined`,
+  `EnteredFinalDefinesOutput`). Completion ends the macrostep before the
+  iteration bound is checked and discards queued raises (`SettleDone`). A
+  done snapshot takes no transitions: a later event returns the same snapshot
+  with no effects or raises (`TerminalInert`, `TerminalMacrostep`). An initial
+  final state completes during initialization (`InitialCompletion`).
+- Compound completion follows the same rules one level at a time. Entering a
+  final child of a non-root compound node raises that parent's done event,
+  `xstate.done.state.<parent>` carrying the final child's output, after the
+  exit, transition and entry raises (`CompoundLifecycleMeaning`,
+  `CompoundInitialCompletion`); that completion queues exactly the one done
+  event (`NestedFinalRaisesDone`, `NestedDoneNamesParent`); an `onDone` handler on the parent consumes it
+  through the ordinary queue (`CompoundSettleDequeue`). Entering a final child
+  of the root completes the machine with the same output order as the flat
+  model and exits every active node from the leaf up
+  (`RootCompletionOutput`). Output is defined only on a step that completes
+  the machine (`CompoundOutputOnlyWhenDone`). Settling a done machine stops at
+  once and discards the queue whatever the remaining bound
+  (`CompoundSettleDone`); otherwise an exhausted bound leaves the macrostep
+  unsettled with its queue (`CompoundSettleBudget`). A done machine takes no
+  transitions (`CompoundDoneInert`). Initialization applies completion to the
+  entered configuration (`CompoundInitialCompletion`).
+- Parallel machines process raised events, done events and completion in the
+  same macrostep loop
+  ([#38](https://github.com/robertpenner/xstate/issues/38)). Entries run one
+  at a time, and each entry's raises are queued before the done events it
+  causes. A final child of a compound node queues that node's done event
+  first (`FinalChildQueuesParentDone`); a final region climbs from its
+  parallel node (`FinalRegionClimbs`). Climbing records each parallel ancestor
+  whose regions are all final, queues one done event for each in order from
+  the innermost, never records a node twice, and completes the machine only
+  when it records the root (`ClimbBookkeeping`). Across the entries of one
+  microstep, each climb starts from every parallel completed by earlier
+  entries, so a parallel node's done event is queued at most once per
+  microstep (`FinalEnteredBookkeeping`, `ParallelEnterCompletesOnce`). A non-final
+  entry completes nothing (`NonFinalEntryInert`). The final test mirrors the
+  runtime's `isInFinalState`: an atomic final node counts as final whether or
+  not it has been entered yet (`FinalAtMeaning`, `ActiveAtMeaning`).
+  Completion changes neither the entered context nor the entry effects
+  (`ParallelEnterLifecycle`, `ParallelPartsAgree`, `ParallelMicroKeepsStep`);
+  a completing step exits every active node from the last in document order.
+  Microsteps, settled macrosteps and initialization keep a valid
+  configuration (`ParallelMicroValid`, `ParallelSettleValid`,
+  `ParallelInitialMicroValid`). Settling processes events first in, first
+  out (`ParallelSettleDequeue`), stops when the machine is done
+  (`ParallelSettleDone`) or the bound is exhausted (`ParallelSettleBudget`),
+  and refuses a queued event the step model cannot represent before running
+  it (`ParallelSettleRefuses`). A done machine processes no events
+  (`ParallelDoneInert`).
 - Compound initialization and event steps preserve declared active nodes,
   required ancestors, and exactly one active direct child for each active
   compound node, assuming a well-formed normalized machine and valid targets.
@@ -182,8 +275,22 @@ values before deciding whether to copy. No FSM reuse law is imported here.
 ## Supported domain and explicit refusals
 
 The flat adapter accepts a root with a declared `initial`, a plain `context`
-record, and flat atomic `states`. State definitions accept `on`, `entry` and
-`exit`. Local target names are nonempty strings without dots or hashes.
+record, an optional `output` function, and flat `states`. State definitions
+accept `on`, a single `always` transition, `entry` and `exit`. A state may be
+`type: 'final'` with an `output` function; final states may not declare `on`
+or `always` (the runtime still takes `always` on a final state), and `output`
+is refused on other states. The root accepts `options.maxIterations` as an
+integer of at least one. An eventless macrostep that does not settle within
+that bound is compared as an `InfiniteTransitionError` carrying the bound.
+Without a bound, the runtime iterates without limit. The adapter then runs the
+model to 1000 iterations and refuses a macrostep that is still unfinished.
+Arrays of eventless transitions are refused, and the compound and parallel
+adapters refuse `always`. Flat callbacks may call `enq.raise(event)` from
+transitions, eventless transitions, entry and exit. The raised event must be a
+plain record with a nonempty string `type` that does not start with `xstate.`;
+it reaches the handler as the same object. Delayed raises and raise options
+are refused, and the parallel step trace (`compareParallelTrace`) refuses
+`enq.raise`. Local target names are nonempty strings without dots or hashes.
 Exact event names may not contain `*`; the empty event name is refused.
 Transition definitions are objects, callbacks, or an explicit `undefined`
 event block. Objects and callback results accept `target`, `context`, `reenter`.
@@ -196,7 +303,8 @@ non-enumerable properties, symbol keys and custom prototypes are refused before
 comparison. Context values and ordinary effect arguments may be opaque values,
 including references, `undefined`, `NaN` and signed zero. Configuration and
 callback-result fields not listed above cause explicit refusal. Unknown
-callback arguments and enqueue operations also cause explicit refusal.
+callback arguments and enqueue operations other than flat `raise` also cause
+explicit refusal.
 Refusals remain fatal to comparison even if an authored callback catches the
 exception. Probes for unsupported capabilities, enumeration, and prototype
 inspection of callback argument/enqueue objects are refused. Direct membership
@@ -210,7 +318,14 @@ relative `.child` targets, ordinary sibling paths, and exact `#id` lookup.
 IDs containing dots remain exact IDs. Implicit IDs use the root machine ID and
 the authored key path, even below an explicitly named parent. Duplicate IDs,
 missing initial children, unknown targets, and inconsistent state types are
-refused.
+refused. Compound callbacks may call `enq.raise(event)` under the flat rules,
+and the root accepts `options.maxIterations` with the flat bound semantics.
+A non-root state may be `type: 'final'` with an `output` function and no
+children, `initial`, `on` or `onDone`. A non-root compound node may declare
+`onDone`, which the adapter compares as a handler for its done event. `output`
+is accepted on final states and on the root, where it defines the machine
+output. `onDone` on an atomic node or the root, a final root, and authored
+handlers for `xstate.*` events are refused.
 
 Callbacks receive `context` and `event`; `enq(fn, ...args)` records an ordinary
 effect. The model never invokes the effect body. Callback purity, termination
@@ -226,6 +341,18 @@ and accepts any number of `type: 'parallel'` nodes, at any depth, including
 the root and regions of other parallel nodes. Each parallel node needs at least
 one region and may not declare `initial`. Initialization, single-selection
 steps, and simultaneous steps of such machines are compared with the runtime.
+`compareParallelTrace` compares one microstep per event and refuses the
+completion fields. `compareParallelRun` compares whole macrosteps: it accepts
+`enq.raise`, `options.maxIterations`, final states, `onDone` on non-root
+compound and parallel nodes, and `output` on final states and the root, under
+the compound rules. It compares each runtime microstep, the done status and
+the machine output. A parallel done event's output is an object with one key
+per region, built from the region outputs the model computes; machine output
+is compared structurally because the runtime allocates that object. Context
+and effect arguments are compared by identity, so a step that stores a region
+output object in context or passes it to an effect is refused; callbacks may
+read its fields. A raised or done event the step model cannot represent
+refuses the macrostep.
 A target must be a string, so array (multi-target)
 transitions are refused. Each step is checked against the model's
 `parallelStepReady` before it runs. With fewer than two selections, this is
@@ -266,8 +393,8 @@ target refusal still covers the statelyai/xstate#5895 reproduction. All
 remaining comparable-domain cases are subject to the same listed readiness
 checks as other steps.
 
-Choices, history, completion, eventless transitions,
-raised events, timers, actors, routes, state input and persistence remain
+Choices, history, eventless transitions outside flat machines, delayed
+raises, timers, actors, routes, state input and persistence remain
 refused.
 Refusal is not a statement that
 the runtime lacks these features.
@@ -347,6 +474,59 @@ missing/declined/blocked/handled events, effect-only callbacks, self-transition
 and reentry, lifecycle context observations, absent keys, present `undefined`,
 `NaN`, signed zero, unchanged patches, opaque references, prototype-looking
 string keys, unsupported fields and object shapes.
+
+[`eventless.test.ts`](./eventless.test.ts) compares eventless chains during
+initialization and after an event, the event seen by eventless callbacks,
+effect-only and self-targeting eventless transitions, snapshot reuse after an
+unhandled event, a settling counter, an empty patch and a two-state cycle that
+reach the bound, the bound boundary (K steps finish with bound K + 1 and stop
+at bound K), and refusals. Each compared macrostep also checks every runtime
+microstep from `getInitialMicrosteps` or `getMicrosteps` against the model
+trace.
+
+[`raised.test.ts`](./raised.test.ts) compares the exit, transition and entry
+order of raised events, a raise cascade within one macrostep, raises from
+separate external events, an entry raise during initialization, the dequeue
+counted against the bound, an unhandled raised event and the event then seen
+by eventless callbacks, eventless transitions taken before a dequeue, a
+handler that only raises, the identity of the raised event object, a
+raise-only eventless cycle and a cycle of eventless and raised transitions
+that reach the bound, and refusals.
+
+[`completion.test.ts`](./completion.test.ts) compares flat completion: the
+final output and root output, root output resolved before exit patches apply
+(statelyai/xstate#5949), an undefined output, raises from the final entry and
+exit discarded, the inert done snapshot, completion during initialization and
+through an eventless transition, and refusals.
+[`compoundCompletion.test.ts`](./compoundCompletion.test.ts) compares a nested
+done event consumed by `onDone` with the final output, the done event queued
+after the final entry's raises, nested completion during initialization, a
+machine done at initialization, root output with and without a root `output`
+function, queued raises discarded on completion, completion through two
+nesting levels, the done-event dequeue counted against `maxIterations` (a
+bound of 1 is unfinished and 2 settles), and refusals.
+
+[`parallelCompletion.test.ts`](./parallelCompletion.test.ts) compares
+parallel completion: a done event only when every region is final, the
+refusal of a region output object stored in context or passed to an effect
+(reading one of its fields is compared), a parallel
+root completed by final regions with and without a root `output` (region keys
+without output are present with `undefined`), the done event of atomic final
+regions queued between their entry raises, a nested parallel and its parent
+completing in one microstep, the output lost by a nested parallel region that
+completed in an earlier macrostep, a completed parallel completing again with
+reevaluated region outputs, a raise handled by another region, a raise
+dropped with its conflicting selection, and a raise cycle between regions
+stopped by `maxIterations`.
+[`parallelCompletion.property.test.ts`](./parallelCompletion.property.test.ts)
+generates 400 trees using seed 3838 with up to three levels, parallel and
+compound nodes, final states (including atomic final regions), `onDone`
+handlers that may raise or target, raising transitions, an optional root
+`output`, and `maxIterations: 8`, then compares each macrostep and its
+microsteps. It reports refusals by reason and fails on any reason other than
+a target into an active region or a raised event the step model cannot
+represent; with this seed, 70 and 11 runs of 400 are refused for those
+reasons.
 
 [`machineModel.property.test.ts`](./machineModel.property.test.ts) generates
 500 flat two-state machines using seed 8911. Each machine has up to two handlers
@@ -577,14 +757,33 @@ rejects it. Three simultaneous-step edits restore the refusal of several
 selections on a machine with more than one parallel node
 (`SimultaneousReadyMeaning` rejects it), select from every active node twice
 (`SelectedIdsDistinct`), and let a later conflicting selection replace an
-earlier one (`GreedyWhenApart` and the `removeConflicts` lemmas). It also checks that a
+earlier one (`GreedyWhenApart` and the `removeConflicts` lemmas). The
+completion edits resolve root output from the exit context, check the bound
+before completion, keep the queue after completion, let a final state take
+handlers, pass the outer event to root output, and skip the final exit in the
+flat model. In the compound model they queue the done event before the entry
+raises, name the done event for the final child, resolve root output from the
+exit context, keep the queue after completion, check the bound before
+completion, dequeue raised events last in first out, let a done machine
+transition, and skip completion during initialization. The parallel
+completion edits let a parallel node complete twice in one microstep or
+before its regions are final, forget or skip a parallel during the climb,
+leave a completed parallel root active, ignore the root output after a
+compound root completes, queue a compound done event after the parallel done
+events, climb a final region from the root, start later entries from the
+planned context, skip or clear the configuration of a completed machine,
+enter from the snapshot context, count the current entry as a later entry,
+treat a compound node as final without an active final child, keep settling
+a done machine, skip the readiness check while settling, drop microstep
+raises, let a done machine take transitions, and let the entry pass forget
+the parallels completed by earlier entries. It also checks that a
 behavior-preserving rewrite changes the generated
 artifact and still proves after regeneration.
 
 The runtime-defect command temporarily changes a clean production file, runs
 the corresponding differential test, requires an assertion failure, and restores
 the original bytes in `finally`. Run it only in a dedicated checkout with no
-other test/build process. Its thirteen mutations test targetless source reentry,
+other test/build process. Its nineteen mutations test targetless source reentry,
 an ignored fast-path target, a dropped
 context patch, compound exits ordered ancestor-before-descendant, a parallel
 domain that is never narrowed to a region, regions entered in reverse
@@ -593,7 +792,12 @@ child at initialization, a later conflicting transition preempting an earlier
 one, kept transition patches merged in reverse order, a parallel domain
 narrowed only one level, a parallel node whose own handler overrides a
 single region's selection, regions of a nested parallel node selected in
-reverse order, and a deeper conflicting source preempting a shallower one.
+reverse order, a deeper conflicting source preempting a shallower one, an iteration bound
+that stops one eventless step early, and eventless transitions that are not
+reselected after a microstep, raised events dequeued last in, first out, and
+a nested done event named for the final child instead of its parent, a
+parallel node completing more than once in one microstep, and a nested
+parallel region contributing no output.
 Mutations that drop
 a nested region at initialization are not listed: the runtime adds missing
 regions in `getInitialStateNodes`, `addAncestorStatesToEnter`, and
