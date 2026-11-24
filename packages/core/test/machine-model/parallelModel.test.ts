@@ -1488,11 +1488,23 @@ describe('multi-transition parallel steps', () => {
   );
 
   it('selects the parallel node once when every region declines', () => {
-    const trace = compareParallelTrace(regions({}, {}, {}, { go: patch(1) }), [
-      { type: 'go' }
-    ]);
+    const trace = compareParallelTrace(
+      regions(
+        {},
+        {},
+        {},
+        {
+          go: (_args, enq) => {
+            enq(record, 'p');
+            return { context: { count: 1 } };
+          }
+        }
+      ),
+      [{ type: 'go' }]
+    );
     expect(trace[1].selections).toBe(1);
     expect(trace[1].context).toEqual({ count: 1 });
+    expect(trace[1].effects).toEqual([{ action: record, args: ['p'] }]);
   });
 
   it.each(['local', 'parallel reentry', 'leave'] as const)(
