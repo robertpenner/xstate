@@ -274,7 +274,7 @@ weighting of `0`, `-0`, and `NaN` makes seed 3 fail on `NaN` over own `NaN`.
 | patch entry for an absent key        |     100 |                    328 | the own-key check before comparing                        |
 | `NaN` over own `NaN`                 |       5 |                     15 | `Object.is` treating `NaN` as unchanged                   |
 | `-0` over `0`, or `0` over `-0`      |       2 |                      6 | `Object.is` treating signed zeros as changed              |
-| opaque patch value                   |      20 |                     66 | strings and references compared by identity               |
+| opaque patch value                   |      20 |                     66 | strings by content and references by identity             |
 
 `FSM_MODEL_REPORT=1` prints the counts, and `FSM_MODEL_SEED` fixes the seed.
 
@@ -460,6 +460,10 @@ non-enumerable own key, which is outside the model.
   `lemmascript@0.6.6` from npm.
 - Agreement between the model and `fsm.ts` is tested, not proved, and so are
   the adapter's key encoding and value interning.
+- `AtmMachine()` in `formal/fsmModel.dfy` is written by hand rather than
+  generated from `atm-prefix-replay.json`. `fsmModel.test.ts` checks that
+  `toModel(fixture.variants.intended).machine` has the same structure up to the
+  opaque-value id assignment.
 - Symbol keys are modeled by encoding each one as a string key that no string
   key can produce. `createFSM` compares and copies symbol keys the same way
   as string keys, so the encoding lets the tests cover them without a second

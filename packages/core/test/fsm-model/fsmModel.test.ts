@@ -24,6 +24,68 @@ describe('the fsm model and createFSM', () => {
     assertAtmReplay(fixture.minimizedFailure);
   });
 
+  // Matches AtmMachine() in formal/fsmModel.dfy up to opaque-value id
+  // assignment, so the Dafny proof and JSON replay stay on the same machine.
+  it('encodes the intended ATM fixture to match AtmMachine() in formal/fsmModel.dfy', () => {
+    const { machine, decodeContext } = toModel(fixture.variants.intended);
+    const falseValue = machine.context?.[':authorized'];
+    const login = machine.states.get('idle')?.on.get('LOGIN');
+    const trueValue =
+      login?.kind === 'config' ? login.config.context?.[0]?.value : undefined;
+    expect(falseValue).toEqual({ kind: 'opaque', id: expect.any(Number) });
+    expect(trueValue).toEqual({ kind: 'opaque', id: expect.any(Number) });
+    expect(falseValue).not.toEqual(trueValue);
+    expect(decodeContext({ ':authorized': falseValue! })).toEqual({
+      authorized: false
+    });
+    expect(decodeContext({ ':authorized': trueValue! })).toEqual({
+      authorized: true
+    });
+    expect(machine).toEqual({
+      initial: 'idle',
+      context: { ':authorized': falseValue },
+      states: new Map([
+        [
+          'idle',
+          {
+            on: new Map([
+              [
+                'LOGIN',
+                {
+                  kind: 'config',
+                  config: {
+                    target: 'banking',
+                    context: [{ key: ':authorized', value: trueValue }]
+                  }
+                }
+              ]
+            ]),
+            inheritedOn: new Map()
+          }
+        ],
+        [
+          'banking',
+          {
+            on: new Map([
+              [
+                'EXPIRE',
+                {
+                  kind: 'config',
+                  config: {
+                    target: 'idle',
+                    context: [{ key: ':authorized', value: falseValue }]
+                  }
+                }
+              ]
+            ]),
+            inheritedOn: new Map()
+          }
+        ]
+      ]),
+      inheritedStates: new Map()
+    });
+  });
+
   it('treats inherited object keys as non-transitions', () => {
     const config = {
       initial: 'idle',
@@ -372,6 +434,22 @@ describe('the fsm model and createFSM', () => {
 
   it.each([
     [
+      'a context with an accessor',
+      Object.defineProperty({}, 'x', {
+        get: () => 1,
+        enumerable: true
+      }),
+      { go: 'idle' }
+    ],
+    [
+      'a context with a non-enumerable property',
+      Object.defineProperty({}, 'x', {
+        value: 1,
+        enumerable: false
+      }),
+      { go: 'idle' }
+    ],
+    [
       'a patch with an accessor',
       {},
       {
@@ -379,6 +457,18 @@ describe('the fsm model and createFSM', () => {
           context: Object.defineProperty({}, 'x', {
             get: () => 1,
             enumerable: true
+          })
+        }
+      }
+    ],
+    [
+      'a patch with a non-enumerable property',
+      {},
+      {
+        go: {
+          context: Object.defineProperty({}, 'x', {
+            value: 1,
+            enumerable: false
           })
         }
       }
