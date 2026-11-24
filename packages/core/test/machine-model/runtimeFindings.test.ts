@@ -46,7 +46,7 @@ describe('recorded runtime findings and fixed regressions', () => {
     expect(record).not.toHaveBeenCalled();
   });
 
-  it('cross-region transition and an exit from the parallel node are both taken (suspected bug, statelyai/xstate#5895)', () => {
+  it('cross-region transition exits the parallel node and preempts a sibling exit (fixed by statelyai/xstate#5952)', () => {
     const record = vi.fn();
     const log = (name: string) => ({
       entry: (_: unknown, enq: (fn: typeof record, arg: string) => void) => {
@@ -82,9 +82,24 @@ describe('recorded runtime findings and fixed regressions', () => {
     const [next, effects] = transition(machine, initial, { type: 'E' });
     expect(
       effects.map((effect) => ('args' in effect ? effect.args[0] : undefined))
-    ).toEqual(['exit B', 'exit a1', 'exit A', 'exit P', 'enter B', 'enter X']);
-    expect(next.value).toBe('X');
-    expect(next.nodes.map((node) => node.id)).toEqual(['m', 'm.P.B', 'm.X']);
+    ).toEqual([
+      'exit B',
+      'exit a1',
+      'exit A',
+      'exit P',
+      'enter P',
+      'enter A',
+      'enter a1',
+      'enter B'
+    ]);
+    expect(next.value).toEqual({ P: { A: 'a1', B: {} } });
+    expect(next.nodes.map((node) => node.id)).toEqual([
+      'm',
+      'm.P',
+      'm.P.A',
+      'm.P.A.a1',
+      'm.P.B'
+    ]);
   });
 
   it('targetless reentry beside parallel-node reentry preserves region membership (fixed by statelyai/xstate#5898)', () => {

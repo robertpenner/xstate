@@ -635,6 +635,19 @@ function narrow(parallels: seq<string>, target: seq<string>, domain: seq<string>
       narrow(parallels, target, target[0..(|domain| + 1)])
 }
 
+function compoundAncestor(parallels: seq<string>, path: seq<string>): seq<string>
+  decreases |path|
+{
+  if (|path| <= 1) then
+    []
+  else
+    var parent := path[0..(|path| - 1)];
+    if !((parent[(|parent| - 1)] in parallels)) then
+      parent
+    else
+      compoundAncestor(parallels, parent)
+}
+
 function transitionDomain(parallels: seq<string>, source: seq<string>, target: seq<string>, reenter: bool): seq<string>
 {
   if (commonPrefix(source, target) == |source|) then
@@ -648,10 +661,13 @@ function transitionDomain(parallels: seq<string>, source: seq<string>, target: s
     else
       var ancestors := target[0..(|target| - 1)];
       var lca := commonPrefix(source, ancestors);
-      if reenter then
-        source[0..lca]
+      if ((lca > 0) && (source[(lca - 1)] in parallels)) then
+        compoundAncestor(parallels, source[0..lca])
       else
-        narrow(parallels, target, (if (lca == 0) then target[0..1] else source[0..lca]))
+        if reenter then
+          source[0..lca]
+        else
+          narrow(parallels, target, (if (lca == 0) then target[0..1] else source[0..lca]))
 }
 
 function runLifecycle(nodes: map<string, CompoundNode>, path: seq<string>, context: map<string, int>, event: Event, exiting: bool): Applied
@@ -662,50 +678,54 @@ function runLifecycle(nodes: map<string, CompoundNode>, path: seq<string>, conte
     lifecycle(nodes, path, context, event, exiting)
 }
 
-function ownSelection(nodes: map<string, CompoundNode>, id: string, context: map<string, int>, event: Event): Option<Selection>
+function isActiveLeaf(nodes: map<string, CompoundNode>, active: seq<string>, id: string): bool
 {
   if !((id in nodes)) then
-    None
+    false
   else
-    select(nodes, [id], context, event)
+    var path := lookupNode(nodes, id).path;
+    !((exists other :: other in active && ((other in nodes) && below(lookupNode(nodes, other).path, path))))
 }
 
-function handledBelow(nodes: map<string, CompoundNode>, active: seq<string>, path: seq<string>, context: map<string, int>, event: Event): bool
+function hasSelectionId(selections: seq<Selection>, id: string): bool
+  decreases |selections|
 {
-  (exists id :: id in active && (((id in nodes) && below(lookupNode(nodes, id).path, path)) && (match ownSelection(nodes, id, context, event) { case Some(i_) => true case None => false })))
+  if (|selections| == 0) then
+    false
+  else
+    ((selections[0].id == id) || hasSelectionId(selections[1..], id))
 }
 
-function enabledSelections(nodes: map<string, CompoundNode>, active: seq<string>, candidates: seq<string>, context: map<string, int>, event: Event): seq<Selection>
+function leafSelections(nodes: map<string, CompoundNode>, active: seq<string>, candidates: seq<string>, context: map<string, int>, event: Event, seen: seq<Selection>): seq<Selection>
   decreases |candidates|
 {
   if (|candidates| == 0) then
-    []
+    seen
   else
-    var rest := enabledSelections(nodes, active, candidates[1..], context, event);
     var id := candidates[0];
-    if !((id in nodes)) then
-      rest
+    var rest := candidates[1..];
+    if !(isActiveLeaf(nodes, active, id)) then
+      leafSelections(nodes, active, rest, context, event, seen)
     else
-      var own := ownSelection(nodes, id, context, event);
-      match own {
-        case Some(i_own_val) =>
-          if handledBelow(nodes, active, lookupNode(nodes, id).path, context, event) then
-            rest
-          else
-            ([i_own_val] + rest)
-        case None =>
-          rest
-      }
-}
-
-lemma enabledSelections_ensures(nodes: map<string, CompoundNode>, active: seq<string>, candidates: seq<string>, context: map<string, int>, event: Event)
-  ensures ((|candidates| == 0) ==> (|enabledSelections(nodes, active, candidates, context, event)| == 0))
-{
+      var path := lookupNode(nodes, id).path;
+      if !(declaredPath(nodes, path)) then
+        leafSelections(nodes, active, rest, context, event, seen)
+      else
+        var picked := select(nodes, path, context, event);
+        match picked {
+          case Some(i_picked_val) =>
+            if hasSelectionId(seen, i_picked_val.id) then
+              leafSelections(nodes, active, rest, context, event, seen)
+            else
+              leafSelections(nodes, active, rest, context, event, (seen + [i_picked_val]))
+          case None =>
+            leafSelections(nodes, active, rest, context, event, seen)
+        }
 }
 
 function parallelSelections(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): seq<Selection>
 {
-  enabledSelections(machine.nodes, snapshot.active, snapshot.active, snapshot.context, event)
+  leafSelections(machine.nodes, snapshot.active, snapshot.active, snapshot.context, event, [])
 }
 
 function parallelReady(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): bool
@@ -937,7 +957,7 @@ function domainsApart(plans: seq<ParallelPlan>): bool
 
 function multiReady(machine: ParallelMachine, active: seq<string>, selections: seq<Selection>): bool
 {
-  (SeqAll(selections, (selection: Selection) => selectionReady(machine, active, selection)) && sourcesApart(selections))
+  SeqAll(selections, (selection: Selection) => selectionReady(machine, active, selection))
 }
 
 function parallelStepReady(machine: ParallelMachine, snapshot: ParallelSnapshot, event: Event): bool

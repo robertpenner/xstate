@@ -38,7 +38,7 @@ const defects = [
     before: "while (narrowed.type === 'parallel') {",
     after: "while (narrowed.type === 'parallel' && targetStates.length < 0) {",
     testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
-    test: 'narrows a cross-region transition to the target region'
+    test: 'narrows to a region when the parallel node is the source'
   },
   {
     name: 'parallel regions are entered in reverse document order',
@@ -89,19 +89,20 @@ const defects = [
     test: 'narrows through a parallel region that is itself parallel'
   },
   {
-    name: 'a parallel node overrides a single selected region',
+    name: 'cross-region transition keeps the parallel ancestor active',
     file: 'packages/core/src/stateUtils.ts',
-    before: 'if (!allInnerTransitions.length) {',
-    after: 'if (allInnerTransitions.length < 2) {',
+    before: "ancestor.type === 'parallel' &&",
+    after: "ancestor.type === 'parallel' && false &&",
     testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
-    test: 'lets an inner region block control fallback to nested ancestors'
+    test: 'exits and reenters the parallel node on a cross-region transition'
   },
   {
     name: 'inner parallel regions select in reverse order',
     file: 'packages/core/src/stateUtils.ts',
-    before: 'for (const subStateKey of subStateKeys) {',
+    before:
+      '(a, b) => getStateNode(node, a).order - getStateNode(node, b).order',
     after:
-      'for (const subStateKey of stateNode.parent?.parent ? [...subStateKeys].reverse() : subStateKeys) {',
+      '(a, b) => getStateNode(node, b).order - getStateNode(node, a).order',
     testFile: 'packages/core/test/machine-model/parallelModel.test.ts',
     test: 'keeps the earlier region when results leave the inner and the outer parallel node'
   },

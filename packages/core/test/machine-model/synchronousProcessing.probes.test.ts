@@ -318,7 +318,7 @@ describe('synchronous processing probes (#24)', () => {
       ]);
     });
 
-    it('[runtime][v5] selects eventless transitions per atomic state but events region-first', () => {
+    it('[runtime] selects both eventless and event transitions per atomic leaf (fixed by statelyai/xstate#5950)', () => {
       const machine = createMachine({
         options: { maxIterations },
         context: { log: '' },
@@ -348,9 +348,9 @@ describe('synchronous processing probes (#24)', () => {
         }
       });
       const steps = getInitialMicrosteps(machine);
-      // p's eventless transition is selected for r1 even though r2 selects
-      // its own. Both patches are computed from pre-step context and the later
-      // one in document order wins.
+      // p's transition is selected for r1 even though r2 selects its own.
+      // Both patches are computed from pre-step context and the later one in
+      // selection order wins.
       expect(steps.map(([s]) => s.context.log)).toEqual(['', 'B']);
       const [, , ts] = steps[1];
       expect(ts.map((t) => t.source.key)).toEqual(['p', 'b']);
@@ -362,7 +362,7 @@ describe('synchronous processing probes (#24)', () => {
       const [, , eventTransitions] = getMicrosteps(machine, reset, {
         type: 'EV'
       })[0];
-      expect(eventTransitions.map((t) => t.source.key)).toEqual(['b']);
+      expect(eventTransitions.map((t) => t.source.key)).toEqual(['p', 'b']);
     });
   });
 

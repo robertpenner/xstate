@@ -2,11 +2,17 @@
 
 This directory models XState v6 `createMachine` initialization and external-event
 steps. The runtime baseline is upstream `next` at
-[`3893cf0`](https://github.com/statelyai/xstate/commit/3893cf0), which includes the
-targetless-reentry fix merged in
-[statelyai/xstate#5898](https://github.com/statelyai/xstate/pull/5898). The flat,
-compound, and parallel work was recorded against `bcd3840` and then `da64b0a` plus
-that fix; moving to `3893cf0` changed no model, proof, or test.
+[`04b26b8`](https://github.com/statelyai/xstate/commit/04b26b8) (`6.0.0-beta.5`),
+which includes the targetless-reentry fix merged in
+[statelyai/xstate#5898](https://github.com/statelyai/xstate/pull/5898), SCXML
+leaf-first parallel event transition selection merged in
+[statelyai/xstate#5950](https://github.com/statelyai/xstate/pull/5950) (closing
+[statelyai/xstate#5948](https://github.com/statelyai/xstate/issues/5948)), and
+SCXML cross-region transition exits merged in
+[statelyai/xstate#5952](https://github.com/statelyai/xstate/pull/5952) (closing
+[statelyai/xstate#5895](https://github.com/statelyai/xstate/issues/5895)). The flat,
+compound, and parallel work was recorded against `bcd3840`, `da64b0a` plus
+`#5898`, and `3893cf0`, then updated for `#5950` and `#5952` at `04b26b8`.
 Work belongs to
 [#9](https://github.com/robertpenner/xstate/issues/9), the compound extension
 [#10](https://github.com/robertpenner/xstate/issues/10), and the single-parallel
@@ -27,9 +33,9 @@ multiple-and-nested-parallel initialization
 unmodified LemmaScript 0.6.6. Dafny 4.11.0 proves its contracts and the laws in
 [`formal/machineModel.dfy`](./formal/machineModel.dfy).
 [`formal/machineModel.manifest.json`](./formal/machineModel.manifest.json) lists
-223 laws (including proof helpers and concrete lifecycle and done-event
-witnesses), 27 generated contract lemmas, and 88 deliberately incorrect model
-edits. The complete proof currently checks 887 verification tasks. Function postconditions support
+220 laws (including proof helpers and concrete lifecycle and done-event
+witnesses), 26 generated contract lemmas, and 88 deliberately incorrect model
+edits. The complete proof currently checks 911 verification tasks. Function postconditions support
 composition; they are also checked against the generated bodies.
 Eleven additional proof-weakening probes check that generated contracts cannot
 gain restrictive preconditions or lose their original postconditions.
@@ -185,31 +191,30 @@ The laws establish:
   accepted exactly when every selection passes the single-selection target
   check (`SimultaneousReadyMeaning`); the number of parallel nodes plays no
   part.
-- Selection follows the runtime's recursive rule: a compound node defers to
-  its active child, and a parallel node to all of its regions, falling back to
-  its own handler only when nothing below it handles the event. The selections
-  are exactly the active nodes whose own handler selects and below which no
-  active node's handler selects (`RegionFirstSelection`,
-  `EnabledSelectionMeaning`, `HandledBelowMeaning`). They come in document
-  order because `enabledSelections` filters the active list, which follows
-  `order`; no separate law states the order. A blocking or
-  effect-only handler counts as handling and stops fallback; a declining
-  handler does not. If nothing handles the event, the snapshot is unchanged.
+- Selection follows SCXML leaf-first order (`selectEventTransitions` in the
+  runtime): from each active leaf in document order, walk up through its
+  ancestors and take the first enabled transition, keeping each selected node
+  at most once (`LeafFirstSelection`, `LeafSelectionsMeaning`,
+  `SelectedIdsDistinct`). A blocking or effect-only handler counts as handling
+  and stops fallback along that leaf's branch; a declining handler does not.
+  When one region handles locally and another region declines, the declining
+  leaf can still fall back to a shared parallel or compound ancestor. If
+  nothing handles the event, the snapshot is unchanged.
 - A handled step equals the composition of its exit plan, the selected
   transition result, and the entry plan, with the same context threading and
   effect order as compound steps. Exits run in reverse document order;
   entries in document order. Targetless transitions keep the active set.
-- A transition between two regions narrows its domain to the target's
-  region: the source region stays active and none of its nodes exit. When
-  that region is itself parallel, narrowing repeats until the domain reaches
-  a non-parallel node or the target (`NarrowMeaning`). A compound domain
-  stops narrowing, so a compound ancestor's transition into a nested parallel
-  node resets that compound node's whole subtree. With
-  `reenter: true` the domain widens to the parallel node, which itself neither
-  exits nor enters, and every active node below the parallel node exits
-  (`ReenterWidens`). A transition from the parallel node to one of its
-  descendants narrows the same way. A reentering self-transition on the
-  parallel node exits and reenters it.
+- A transition between two regions of a parallel node has its domain at the
+  nearest compound ancestor of that parallel node (or the empty root path when
+  none exists), for both `reenter: false` and `reenter: true`: the parallel
+  node and every active node below it exit (`CrossDomain`,
+  `CrossRegionExitsParallel`). A transition from the parallel node itself to
+  one of its descendants narrows its domain to the target's region, repeating
+  while the narrowed node is parallel (`ParallelSourceNarrows`,
+  `NarrowMeaning`). A compound domain stops narrowing, so a compound
+  ancestor's transition into a nested parallel node resets that compound
+  node's whole subtree. A reentering self-transition on the parallel node
+  exits and reenters it.
 - A transition from a compound (non-parallel) ancestor of a parallel node into
   one of its regions exits every active node below that parallel node
   (`AncestorResetsSubtree`). A parallel ancestor narrows instead, as above. All
@@ -222,26 +227,19 @@ The laws establish:
 - Every active node outside the transition domain, other than a reentered
   source, remains active and does not exit.
 
-- When two or more regions select transitions for one event, conflict removal
-  walks the selections in region order. A later selection whose exit set
+- When two or more selections are returned for one event, conflict removal
+  walks the selections in selection order. A later selection whose exit set
   overlaps an earlier kept selection's exit set replaces it only when its
   source is a descendant of that selection's source; otherwise the later
   selection is dropped. The kept list never grows longer than the selections,
   every kept selection was drawn from them, and kept selections have pairwise
   disjoint exit sets. With pairwise incomparable sources, the result equals
-  greedy filtering in selection order. For two overlapping selections, the
-  descendant source wins in either order. Selection never returns two sources
-  on one path: a handler strictly below an active node suppresses that node's
-  own handler, and active ids are distinct, so the selected sources are
-  pairwise incomparable at every depth (`SelectedSourcesApart`). Conflict
-  removal on the selections is therefore exactly greedy filtering in region
-  order (`SelectedConflictsGreedy`): the earlier kept selection wins whether
-  the conflicting sources are in sibling regions, in regions of different
-  parallel nodes, or at different depths. The descendant rule, and conflicts
-  between two selections from one handler, are proved for `removeConflicts`
-  as a function but cannot arise from the model's selection. They are
-  unreachable at the runtime only insofar as the runtime selects as the model
-  does, which the differential tests check.
+  greedy filtering in selection order (`GreedyWhenApart`). For two overlapping
+  selections, the descendant source wins in either order (`DescendantWins`).
+  Under leaf-first selection, an ancestor fallback and a descendant handler in
+  a sibling region can both be selected; when their exit sets overlap,
+  conflict removal keeps the descendant selection, and when they do not
+  overlap (for example, a targetless ancestor fallback), both are kept.
 - Fewer than two selections delegate to the single-transition step.
 - A multi-transition step exits the union of the kept plans' exit sets in
   reverse document order, applies every kept result in selection order, then
@@ -357,19 +355,19 @@ A target must be a string, so array (multi-target)
 transitions are refused. Each step is checked against the model's
 `parallelStepReady` before it runs. With fewer than two selections, this is
 the single-selection `parallelReady` check. With several, every selection must
-pass that check and sources must lie on pairwise incomparable paths. The second
-clause always holds for selections from a valid configuration
-(`SelectedSourcesApart`), so the adapter's `comparable sources` refusal reason
-cannot occur. A step is refused when a transition, with or without `reenter`,
+pass that check. A step is refused when a transition, with or without `reenter`,
 targets an already active direct region of a parallel node, including in
 single-selection steps.
 Without `reenter`, the runtime runs the targeted region's entry actions again
 without exiting it; the open
 [statelyai/xstate#5899](https://github.com/statelyai/xstate/pull/5899) keeps
 the region active and skips that entry. Until it lands, the model makes no
-claim about these steps. That
-refusal also covers the reproduction machine of
-[statelyai/xstate#5895](https://github.com/statelyai/xstate/issues/5895).
+claim about these steps. (Cross-region transitions that previously triggered
+[statelyai/xstate#5895](https://github.com/statelyai/xstate/issues/5895) now
+exit the parallel ancestor after
+[statelyai/xstate#5952](https://github.com/statelyai/xstate/pull/5952), while
+transitions from a parallel parent directly to an already active region still
+hit this refusal.)
 Targetless `reenter: true` transitions are accepted when several regions
 select. Their results contribute patches and transition effects, while the
 other kept plans determine any exits and entries. This includes a sibling
@@ -438,27 +436,16 @@ preorder of the tree, so the lifecycle-order laws hold relative to that list.
 The compound laws assume the normalized tree's path and initial-child
 relationships. Authored target resolution and construction of that normalized
 tree remain executable adapter code covered by comparisons and refusal tests.
-The parallel model selects recursively: an active node is selected when its own
-handler selects and no active node below it handles the event, so a parallel
-node or ancestor is consulted only when nothing in its active subtree handles
-the event. With one parallel node, this is one selection per active atomic
-node below it, then the parallel node and its ancestors only when no region
-selects. SCXML instead selects, for every active atomic
-state, the first enabled transition among it and its ancestors, removes
-duplicates, then removes conflicting transitions; in that last pass a
-transition whose source is a descendant of a conflicting transition's source
-replaces it (SCXML 1.0 Appendix D, `selectTransitions` and
-`removeConflictingTransitions`; the appendix is informative). The runtime's `transitionNode` matches the model: it consults the
-parallel node only when every region returns no transition. The two orders
-differ when one region declines and the parallel node or an ancestor handles
-the event while another region selects. SCXML would also select that ancestor
-transition for the declining region; the runtime and the model do not. When
-the ancestor transition's exit set overlaps the region selection's, SCXML's
-conflict removal keeps the region selection, which matches the region-first
-result. The difference is visible only when the exit sets do not overlap, for
-example with a targetless transition on the parallel node.
-Region-first selection is a model assumption checked only by the differential
-tests.
+The parallel model selects leaf-first, matching SCXML 1.0 Appendix D
+(`selectTransitions` and `removeConflictingTransitions`) and the runtime's
+`selectEventTransitions`: for each active leaf in document order, it takes the
+first enabled transition among that leaf and its ancestors, removes duplicate
+selected nodes, and then removes conflicting transitions with descendant
+sources preempting ancestor sources. When one region declines and another
+handles locally, a targetless transition on the shared parallel node or an
+ancestor is selected alongside the region transition; if the ancestor
+transition's exit set overlaps the region selection's, conflict removal keeps
+the region selection.
 
 The model functions share one translation unit because LemmaScript emits
 cross-module function calls as axioms, which this proof inventory forbids.

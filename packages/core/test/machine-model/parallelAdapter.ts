@@ -339,10 +339,7 @@ export function compareParallelTrace(
   return trace;
 }
 
-export type RefusalReason =
-  | 'unknown target'
-  | 'active region target'
-  | 'comparable sources';
+export type RefusalReason = 'unknown target' | 'active region target';
 
 // Names the first `parallelStepReady` clause that fails, in the order the
 // model checks them.
@@ -362,7 +359,6 @@ export function refusalReason(
       return 'active region target';
     }
   }
-  if (!model.sourcesApart(selections)) return 'comparable sources';
   throw new Error('No refusal reason for an accepted step');
 }
 

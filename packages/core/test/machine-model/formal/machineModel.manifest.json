@@ -1,6 +1,6 @@
 {
   "source": "machineModel.ts",
-  "verifiedCount": 887,
+  "verifiedCount": 911,
   "functions": [
     "mergePatch",
     "apply",
@@ -25,11 +25,12 @@
     "entering",
     "exiting",
     "narrow",
+    "compoundAncestor",
     "transitionDomain",
     "runLifecycle",
-    "ownSelection",
-    "handledBelow",
-    "enabledSelections",
+    "isActiveLeaf",
+    "hasSelectionId",
+    "leafSelections",
     "parallelSelections",
     "parallelReady",
     "parallelInitialTransition",
@@ -102,7 +103,6 @@
     "below_ensures",
     "samePath_ensures",
     "completes_ensures",
-    "enabledSelections_ensures",
     "parallelInitialTransition_ensures",
     "parallelTransition_ensures",
     "selectionPlans_ensures",
@@ -224,8 +224,12 @@
     "PathPrefixes",
     "AncestorsActive",
     "SelectSource",
+    "IsActiveLeafMeaning",
+    "HasSelectionIdMeaning",
+    "LeafSelectionsMeaning",
     "SelectionSourcesActive",
     "NarrowActive",
+    "CompoundAncestorPrefix",
     "DomainActive",
     "KnownSource",
     "PlanDomain",
@@ -256,11 +260,11 @@
     "CrossRegionDomain",
     "CrossDomain",
     "KnownNodes",
-    "CrossRegionNarrows",
+    "CrossRegionExitsParallel",
     "ParallelSourceNarrows",
     "AncestorDomain",
     "AncestorResetsSubtree",
-    "ReenterWidens",
+    "PlanReenterSelf",
     "ReenterResetsSubtree",
     "ParallelSelfReenter",
     "NarrowWithin",
@@ -275,7 +279,7 @@
     "InitialOrder",
     "InitialEntries",
     "ParallelInitialMeaning",
-    "RegionFirstSelection",
+    "LeafFirstSelection",
     "ParallelStepDelegates",
     "ApplyAllSequential",
     "ApplyAllEffects",
@@ -323,16 +327,9 @@
     "ReadyMovingDomainsApart",
     "InitialChildren",
     "NarrowMeaning",
-    "OwnSelectionMeaning",
-    "EnabledSelectionMeaning",
-    "HandledBelowMeaning",
     "DistinctTail",
-    "EnabledSelectionsDistinct",
-    "SelectedConflictsGreedy",
+    "LeafSelectionsDistinct",
     "SelectedIdsDistinct",
-    "SelectedNotBelow",
-    "SelectedPairApart",
-    "SelectedSourcesApart",
     "SelectionsReadyConverse",
     "SimultaneousReadyMeaning",
     "SourceApartMeaning",
@@ -494,9 +491,9 @@
       "after": "  return below(lookupNode(nodes, id).path, domain) && lookupNode(nodes, id).children.length > 0;"
     },
     {
-      "name": "cross-region transition exits the source region",
-      "before": "  return narrow(\n    parallels,\n    target,\n    lca === 0",
-      "after": "  return narrow(\n    [],\n    target,\n    lca === 0"
+      "name": "cross-region transition keeps the parallel ancestor",
+      "before": "    return compoundAncestor(parallels, source.slice(0, lca));",
+      "after": "    return source.slice(0, lca);"
     },
     {
       "name": "parallel exits run in document order",
@@ -554,14 +551,14 @@
       "after": "  return target.slice(0, domain.length + 1);"
     },
     {
-      "name": "selection ignores handlers below the candidate",
-      "before": "    own === undefined ||\n    handledBelow(nodes, active, lookupNode(nodes, id).path, context, event)\n  )",
-      "after": "    own === undefined\n  )"
+      "name": "selection skips leaf filter",
+      "before": "  if (!isActiveLeaf(nodes, active, id)) {",
+      "after": "  if (false) {"
     },
     {
-      "name": "selection defers to handlers above the candidate",
-      "before": "      below(lookupNode(nodes, id).path, path) &&\n      ownSelection(nodes, id, context, event) !== undefined",
-      "after": "      below(path, lookupNode(nodes, id).path) &&\n      ownSelection(nodes, id, context, event) !== undefined"
+      "name": "active leaf check looks at ancestors",
+      "before": "    (other) => other in nodes && below(lookupNode(nodes, other).path, path)",
+      "after": "    (other) => other in nodes && below(path, lookupNode(nodes, other).path)"
     },
     {
       "name": "simultaneous steps on several parallel nodes are refused",
@@ -569,9 +566,9 @@
       "after": "  if (selections.length < 2) return parallelReady(machine, snapshot, event);\n  if (machine.parallels.length > 1) return false;\n  return multiReady("
     },
     {
-      "name": "selection visits each active node twice",
-      "before": "  return enabledSelections(\n    machine.nodes,\n    snapshot.active,\n    snapshot.active,\n",
-      "after": "  return enabledSelections(\n    machine.nodes,\n    snapshot.active,\n    [...snapshot.active, ...snapshot.active],\n"
+      "name": "selection duplicates shared ancestor",
+      "before": "  if (picked === undefined || hasSelectionId(seen, picked.id)) {",
+      "after": "  if (picked === undefined) {"
     },
     {
       "name": "a later conflicting selection replaces an earlier one",

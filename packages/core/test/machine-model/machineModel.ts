@@ -949,6 +949,18 @@ export function narrow(
   return narrow(parallels, target, target.slice(0, domain.length + 1));
 }
 
+export function compoundAncestor(
+  parallels: readonly string[],
+  path: readonly string[]
+): readonly string[] {
+  //@ verify
+  //@ decreases path.length
+  if (path.length <= 1) return [];
+  const parent = path.slice(0, path.length - 1);
+  if (!parallels.includes(parent[parent.length - 1])) return parent;
+  return compoundAncestor(parallels, parent);
+}
+
 export function transitionDomain(
   parallels: readonly string[],
   source: readonly string[],
@@ -962,6 +974,9 @@ export function transitionDomain(
   if (target.length === 0) return [];
   const ancestors = target.slice(0, target.length - 1);
   const lca = commonPrefix(source, ancestors);
+  if (lca > 0 && parallels.includes(source[lca - 1])) {
+    return compoundAncestor(parallels, source.slice(0, lca));
+  }
   if (reenter) return source.slice(0, lca);
   return narrow(
     parallels,
@@ -983,64 +998,59 @@ export function runLifecycle(
   return lifecycle(nodes, path, context, event, exiting);
 }
 
-export function ownSelection(
-  nodes: Record<string, CompoundNode>,
-  id: string,
-  context: Record<string, number>,
-  event: Event
-): Selection | undefined {
-  //@ verify
-  if (!(id in nodes)) return undefined;
-  return select(nodes, [id], context, event);
-}
-
-export function handledBelow(
+export function isActiveLeaf(
   nodes: Record<string, CompoundNode>,
   active: readonly string[],
-  path: readonly string[],
-  context: Record<string, number>,
-  event: Event
+  id: string
 ): boolean {
   //@ verify
-  return active.some(
-    (id) =>
-      id in nodes &&
-      below(lookupNode(nodes, id).path, path) &&
-      ownSelection(nodes, id, context, event) !== undefined
+  if (!(id in nodes)) return false;
+  const path = lookupNode(nodes, id).path;
+  return !active.some(
+    (other) => other in nodes && below(lookupNode(nodes, other).path, path)
   );
 }
 
-// The runtime selects recursively: a compound node defers to its active
-// child and a parallel node to all of its regions, falling back to its own
-// handler only when nothing below it handles the event. The result is every
-// active handler with no handling active descendant, in document order.
-export function enabledSelections(
+export function hasSelectionId(
+  selections: readonly Selection[],
+  id: string
+): boolean {
+  //@ verify
+  //@ decreases selections.length
+  if (selections.length === 0) {
+    return false;
+  }
+  return selections[0].id === id || hasSelectionId(selections.slice(1), id);
+}
+
+// The runtime searches from each active leaf in document order up through its
+// ancestors, taking the first enabled handler along each branch and selecting a
+// shared ancestor at most once.
+export function leafSelections(
   nodes: Record<string, CompoundNode>,
   active: readonly string[],
   candidates: readonly string[],
   context: Record<string, number>,
-  event: Event
+  event: Event,
+  seen: readonly Selection[]
 ): readonly Selection[] {
   //@ verify
-  //@ ensures candidates.length === 0 ==> \result.length === 0
   //@ decreases candidates.length
-  if (candidates.length === 0) return [];
-  const rest = enabledSelections(
-    nodes,
-    active,
-    candidates.slice(1),
-    context,
-    event
-  );
+  if (candidates.length === 0) return seen;
   const id = candidates[0];
-  if (!(id in nodes)) return rest;
-  const own = ownSelection(nodes, id, context, event);
-  if (
-    own === undefined ||
-    handledBelow(nodes, active, lookupNode(nodes, id).path, context, event)
-  )
-    return rest;
-  return [own, ...rest];
+  const rest = candidates.slice(1);
+  if (!isActiveLeaf(nodes, active, id)) {
+    return leafSelections(nodes, active, rest, context, event, seen);
+  }
+  const path = lookupNode(nodes, id).path;
+  if (!declaredPath(nodes, path)) {
+    return leafSelections(nodes, active, rest, context, event, seen);
+  }
+  const picked = select(nodes, path, context, event);
+  if (picked === undefined || hasSelectionId(seen, picked.id)) {
+    return leafSelections(nodes, active, rest, context, event, seen);
+  }
+  return leafSelections(nodes, active, rest, context, event, [...seen, picked]);
 }
 
 export function parallelSelections(
@@ -1049,12 +1059,13 @@ export function parallelSelections(
   event: Event
 ): readonly Selection[] {
   //@ verify
-  return enabledSelections(
+  return leafSelections(
     machine.nodes,
     snapshot.active,
     snapshot.active,
     snapshot.context,
-    event
+    event,
+    []
   );
 }
 
@@ -1388,10 +1399,8 @@ export function multiReady(
   selections: readonly Selection[]
 ): boolean {
   //@ verify
-  return (
-    selections.every((selection) =>
-      selectionReady(machine, active, selection)
-    ) && sourcesApart(selections)
+  return selections.every((selection) =>
+    selectionReady(machine, active, selection)
   );
 }
 
