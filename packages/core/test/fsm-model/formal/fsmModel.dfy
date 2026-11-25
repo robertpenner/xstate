@@ -437,6 +437,11 @@ lemma StringTargetIsConfigTarget(target: string, context: map<string, Value>, ev
 {
 }
 
+lemma FunctionTransitionComputes(compute: (map<string, Value>, FSMEvent) -> Option<TransitionConfig>, context: map<string, Value>, event: FSMEvent)
+  ensures resolveTransition(Some(function_(compute)), context, event) == compute(context, event)
+{
+}
+
 lemma EmptyConfigKeepsSnapshot(machine: Machine, snapshot: Snapshot, event: FSMEvent)
   requires Resolve(machine, snapshot, event) == Some(TransitionConfig(None, None))
   ensures transition(machine, snapshot, event) == Step(snapshot, true)

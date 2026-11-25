@@ -1,6 +1,6 @@
 {
   "source": "fsmModel.ts",
-  "verifiedCount": 89,
+  "verifiedCount": 90,
   "functions": {
     "sameValue": {
       "parameters": [],
@@ -101,6 +101,7 @@
     "ReuseIsExact",
     "UnchangedPatchKeepsSnapshot",
     "StringTargetIsConfigTarget",
+    "FunctionTransitionComputes",
     "EmptyConfigKeepsSnapshot",
     "ContextKeysKept",
     "AbsentKeyAlwaysChanges",
@@ -212,6 +213,11 @@
       "name": "event lookup reads inherited events",
       "before": "return node.on.get(type);",
       "after": "return node.on.get(type) ?? node.inheritedOn.get(type);"
+    },
+    {
+      "name": "a function transition drops the current context",
+      "before": "return compute(context, event);",
+      "after": "return compute({}, event);"
     }
   ],
   "refactor": {

@@ -82,7 +82,9 @@ hints, such as "a reused step returns the given snapshot". The laws in
   (`TransitionMeaning`). A changed patch never reuses the snapshot
   (`ChangedPatchCopies`). A missing transition, a `{}` result, or a patch that
   changes nothing under a target equal to the value reuses it. A string
-  transition `T` resolves the same as `{ target: T }`.
+  transition `T` resolves the same as `{ target: T }`, and a function
+  transition evaluates its `compute` function with the current context and
+  event (`FunctionTransitionComputes`).
 - Whether or not it copies, a step's next context is the full merge of the
   resolved patch (`ContextIsFullMerge`). With distinct patch keys, which every
   JavaScript patch object has, the next context owns every patched key with
@@ -110,7 +112,7 @@ hints, such as "a reused step returns the given snapshot". The laws in
   `a + b`.
 
 [`formal/fsmModel.manifest.json`](./formal/fsmModel.manifest.json) lists all
-34 law names and the contract of each function.
+35 law names and the contract of each function.
 
 Twenty-two laws have preconditions, and a law whose preconditions no case meets
 would be proved without saying anything. Each of the twenty-two has a witness in
@@ -153,7 +155,7 @@ or no longer apply. They were removed:
 
 ## Deliberate defects
 
-The manifest also lists fourteen edits to `fsmModel.ts`. Dafny must reject
+The manifest also lists fifteen edits to `fsmModel.ts`. Dafny must reject
 each one with a proof failure:
 
 - a self-transition with no change copies the snapshot;
@@ -170,7 +172,8 @@ each one with a proof failure:
 - `run` skips each event's transition;
 - every value uses the initial state's transitions;
 - state lookup reads inherited states;
-- event lookup reads inherited events.
+- event lookup reads inherited events;
+- a function transition drops the current context.
 
 The manifest also lists a rewrite of `entryUnchanged` that swaps the
 arguments of `sameValue`, which keeps its behavior. The verifier checks that
@@ -334,6 +337,63 @@ Four mutants pass every test:
   refuses it.
 
 Both test files run in `pnpm test`.
+
+### Proof mutation testing
+
+[`scripts/fsm-proof-mutants.mjs`](../../../../scripts/fsm-proof-mutants.mjs)
+parses `fsmModel.ts` with the TypeScript compiler API, generates a
+deterministic set of AST mutants across all ten model functions (`sameValue`,
+`initialState`, `lookupState`, `lookupTransition`, `resolveTransition`,
+`entryUnchanged`, `patchChanges`, `mergePatch`, `transition`, and `run`), and
+runs each mutant through `lsc regen` (the same regenerate-and-verify path used
+by `scripts/verify-fsm-model.mjs`). It stays out of CI.
+
+Operator set (13 deterministic AST operators):
+
+1. `boolean-literal`: flip `true` and `false`
+2. `equality-flip`: flip `===` and `!==`
+3. `logical-swap`: swap `&&` and `||`
+4. `negation-removal`: remove unary `!`
+5. `conditional-collapse`: collapse `c ? a : b` to `a` and to `b`
+6. `nullish-fallback`: replace `a ?? b` with `b`
+7. `branch-force`: force `if (c)` to `if (true)` and `if (false)`
+8. `optional-return`: in functions returning `T | undefined`, replace non-`undefined` return expressions with `undefined`
+9. `object-property-drop` / `property-undefined`: drop each entry (including `...spread`) from spread object literals, and set `target` property initializers to `undefined`
+10. `array-method-swap` / `slice-tail`: swap `.some` to `.every`, and replace `.slice(1)` with `[]` and `.slice(2)`
+11. `numeric-literal`: perturb `0` to `1` and `1` to `0`
+12. `sibling-field` / `param-swap` / `string-empty`: swap `.states` to `.inheritedStates` and `.on` to `.inheritedOn`, swap same-type string parameters at call sites, and replace `machine.initial` with `''`
+13. `arg-blank`: replace `context` / `snapshot.context` call arguments with `{}` and `event` call arguments with `{ type: '', payload: 0 }`
+
+Results with Dafny 4.11.0 and `lemmascript@0.6.6` (`--jobs 5`):
+
+| Run | Total | Rejected by proof | Rejected by tools | Accepted | Wall time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Before `FunctionTransitionComputes` | 76 | 63 | 12 | 1 (`P32`) | — |
+| After `FunctionTransitionComputes` | 76 | 64 | 12 | 0 | 197.2s |
+
+- **Accepted mutant before the new law:** `P32` (`resolveTransition`,
+  `arg-blank`: `compute(context, event)` -> `compute({}, event)`).
+  Classification: **missing law**. No law stated what `resolveTransition`
+  returns for a `function_` transition (`P31`, replacing `compute(context,
+  event)` with `undefined`, had previously failed only in
+  `EmptyConfigKeepsSnapshotWitness`). Adding `FunctionTransitionComputes` (no
+  preconditions, so no witness is required) and recording `"a function
+  transition drops the current context"` in `formal/fsmModel.manifest.json`
+  closes the gap.
+- **Rejected by tools (12 mutants, counted separately and not evidence of law
+  coverage):** `P19–P21` (`lookupTransition` guard mutations), `P25–P27`
+  (`resolveTransition` guard mutations), `P33` (`resolveTransition` untyped
+  `event` literal in higher-order `compute` call), `P34–P35` (`entryUnchanged`
+  `in`-guard mutations), and `P52–P54` (`transition` `config === undefined`
+  guard mutations). Each fails LemmaScript narrowing/emission or Dafny type
+  checking before verification runs.
+- **Matches to manifest defects:** `P15` (initial snapshot drops configured
+  context), `P29` (string transition loses its target), `P32` (function
+  transition drops current context), `P36` (absent key counts as unchanged),
+  `P56` (configured target ignored), `P64` (self-transition with no change
+  copies snapshot), and `P46` (dropping `[entry.key]: entry.value` from
+  `{ ...context, [entry.key]: entry.value }`, equivalent to "the merge drops
+  patched values").
 
 ## Requirement map
 
@@ -500,17 +560,28 @@ locks LemmaScript and its dependencies.
 
 It checks that the committed `.dfy.gen` is what LemmaScript generates from
 `fsmModel.ts`, checks that every law with preconditions has a witness,
-verifies the model, laws, and witnesses (89 Dafny tasks), rejects the
-fourteen
+verifies the model, laws, and witnesses (90 Dafny tasks), rejects the
+fifteen
 defects, and checks the rewrite. The `fsm model verification` workflow runs it
 on pull requests that change `src/fsm.ts` or this directory.
 
-The mutant runner needs only the workspace's dependencies. It takes about two
-minutes from the repository root:
+The `fsm.ts` mutant runner needs only the workspace's dependencies. It takes
+about two minutes from the repository root:
 
 ```sh
 node scripts/fsm-model-mutants.mjs
 node scripts/fsm-model-mutants.mjs --seed 3 --only M01,M24
+```
+
+The proof mutant runner uses Dafny 4.11.0 and `lemmascript@0.6.6` and runs
+locally (about three minutes with `--jobs 5`):
+
+```sh
+node scripts/fsm-proof-mutants.mjs --list
+LEMMASCRIPT_LSC=/tmp/lemmascript/node_modules/lemmascript/tools/dist/lsc.js \
+  node scripts/fsm-proof-mutants.mjs --jobs 5
+LEMMASCRIPT_LSC=/tmp/lemmascript/node_modules/lemmascript/tools/dist/lsc.js \
+  node scripts/fsm-proof-mutants.mjs --only P31,P32 --fn resolveTransition
 ```
 
 After editing `fsmModel.ts`, run `node "$LEMMASCRIPT_LSC" regen
