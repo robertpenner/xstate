@@ -129,6 +129,8 @@ Start Effect-backed logic with `createEffectActor` inside an Effect scope.
 
 Declared Effect actions infer context and event types from `setupEffect({ schemas })`, including schemas inherited through `extend`. See [Action argument types](docs/schemas-and-actions.md#action-argument-types) for custom arguments and safe defaults.
 
+Registered action keys also identify their transition descriptors. See [Action descriptor names](docs/schemas-and-actions.md#action-descriptor-names) when inspecting enqueued actions or handling them in a durable adapter.
+
 ## Guides
 
 | Guide | Examples |
@@ -264,12 +266,13 @@ See [atoms and React](docs/atoms-and-react.md) for complete examples with import
 
 ## Testing and errors
 
-<!-- error types from src/errors.ts; timeout failure from src/actor.ts -->
+<!-- error types and causeFromError from src/errors.ts; timeout failure from src/actor.ts -->
 
 - Use `sendAndAwait` from `@xstate/effect` to acknowledge one event after its transition and immediate effects. It does not wait for child replies, invoked work, background actions or future timers.
 - Use `TestClock` to drive deadlines without waiting for real time.
 - `ActorStoppedError` reports a stop before an awaited result.
 - `EffectFailure<E>` carries the original `Cause<E>` in task and stream error snapshots, including defects and self-interruption.
+- Use `causeFromError(error)` to obtain the original Cause from `EffectFailure` or wrap an ordinary error. Use `Cause.findErrorOption` to inspect its typed failure.
 - Timed waits fail with Effect's `Cause.TimeoutError`.
 - `join` replays the original Cause and preserves a task's typed failure. Unexpected machine errors have type `unknown`.
 
