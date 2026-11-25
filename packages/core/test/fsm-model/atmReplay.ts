@@ -1,6 +1,6 @@
 import { createFSM } from '../../src/fsm';
 import fixture from './atm-prefix-replay.json';
-import { toModel, type JsSnapshot } from './fsmAdapter';
+import { DEFAULT_FUEL, toModel, type JsSnapshot } from './fsmAdapter';
 import { initialState, transition, type FSMEvent } from './fsmModel';
 
 const authorizedInBanking = ({ value, context }: JsSnapshot) =>
@@ -18,8 +18,10 @@ export function assertAtmReplay({
     const config = fixture.variants[variant];
     const fsm = createFSM<{ authorized: boolean }, FSMEvent>(config);
     const { machine, decodeContext } = toModel(config);
+    const init = initialState(machine, DEFAULT_FUEL);
+    expect(init.settled).toBe(true);
     let runtime = fsm.initialState;
-    let model = initialState(machine);
+    let model = init.snapshot;
 
     function checkPrefix(length: number) {
       const label = `${variant} at prefix ${length}: ${JSON.stringify(events.slice(0, length))}`;
@@ -44,7 +46,8 @@ export function assertAtmReplay({
     checkPrefix(0);
     for (const [index, event] of events.entries()) {
       const [next] = fsm.transition(runtime, event);
-      const step = transition(machine, model, event);
+      const step = transition(machine, model, event, DEFAULT_FUEL);
+      expect(step.settled).toBe(true);
       expect(next === runtime).toBe(step.reused);
       if (runtime.value === 'idle' && event.type === 'LOGIN') {
         expect(next).toMatchObject({

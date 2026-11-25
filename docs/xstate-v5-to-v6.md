@@ -34,7 +34,7 @@ This guide is organized by area. Skim the **Quick reference** below and read [§
 | `types: {} as { context: ..., events: ...}`             | `schemas: { context, events, ... }` (Zod / Standard Schema, or `types<T>()` for type-only)                                          |
 | `actor.send({ type: 'INC' })`                           | `actor.send(...)` keeps working; new typed `actor.trigger.INC()`                                                                    |
 | `@xstate/immer`                                         | removed - return updated `context` patches directly                                                                                 |
-| `@xstate/inspect`                                       | removed - use `inspect` option on `createActor`, `actor.subscribe`, or [`@statelyai/inspect`](https://github.com/statelyai/inspect) |
+| `@xstate/inspect`                                       | removed - use `inspect` option on `createActor`, `actor.subscribe`, or [`@statelyai/sdk/inspect`](migrate-inspector.md) |
 | `sendTo('child', ev)` with no running `child`           | dead letter with reason `'missingTarget'`; the sender stays `active` (§26)                                                          |
 | `tsTypes` (typegen)                                     | removed; declare types with `schemas` (§3)                                                                                          |
 | `machine.implementations`                               | `machine.sources`                                                                                                                   |
@@ -1146,7 +1146,7 @@ See [compact finite state machines](fsm.md) for its exact supported surface.
 - The executable action types are now executable effect types: `ExecutableActionObject` is `ExecutableEffect`, `ExecutableActionsFrom` is `ExecutableEffectFrom`, `SpecialExecutableAction` is `SpecialExecutableEffect`, `ExecutableSpawnAction` is `SpawnExecutableEffect`, and `ToExecutableAction` is `ToExecutableEffect`. The new v6 types and helpers use the same naming, for example `BuiltInExecutableEffect` and `isBuiltInExecutableEffect`.
 - `snapshot._nodes` is now `snapshot.nodes`. It lists the active state nodes.
 - Implicit state ids no longer use the `(machine)` placeholder. A state's implicit id is its path from the root joined by `.`, prefixed by the machine `id` when the machine has one: `shop.checkout` for `id: 'shop'`, and `checkout` without an id (v5: `(machine).checkout`). `machine.id` and the root's id are `''` for a machine without an `id`, so `#` cannot reference that root; give the machine an `id` to target it. An explicit state `id` that equals another state's id throws.
-- Bare string transition values (`on: { GO: 'next' }`, `after: { 1000: 'idle' }`, `always: 'ready'`, `onDone: 'done'`) throw when the machine is created: `Transition for "GO" in state "idle" is the string "next". Use { target: 'next' }.` Write `{ target: 'next' }`; the `string-targets` codemod transform rewrites them. `initial` keeps its string form, and `xstate/fsm` still accepts string targets.
+- Bare string transition values (`on: { GO: 'next' }`, `after: { 1000: 'idle' }`, `always: 'ready'`, `onDone: 'done'`) throw when the machine is created: `Transition for "GO" in state "idle" is the string "next". Use { target: 'next' }.` Write `{ target: 'next' }`; the `string-targets` codemod transform rewrites them. `initial` keeps its string form. `xstate/fsm` also requires object targets for `on` and `always`.
 - `#` targets and `matches('#…')` resolve by exact id. v5 split the text after `#` at the first `.` and resolved the rest as a path below that id, so `#flow.review` meant "child `review` of the state with id `flow`". In v6, the whole string after `#` is the id: use the target state's own explicit `id`, or its full implicit id. This also applies to `@xstate.stateIn` guards in JSON. Dots in an explicit id are matched literally (`#checkout.v2` for `id: 'checkout.v2'`); v5 required `#checkout\\.v2`. An unresolvable target throws when the machine is created, and suggests the target's id when the old form resolves:
 
   ```ts
@@ -1204,6 +1204,8 @@ If you want Immer-style drafts, call Immer's `produce` yourself inside the inlin
 
 ### `@xstate/inspect` - removed
 
+For a visual inspector, use `createInspector` from `@statelyai/sdk/inspect`. See [Migrate to SDK inspection](migrate-inspector.md) for installation and changes from `@statelyai/inspect`.
+
 The standalone inspector package and its `inspect()` entry point are gone. Inspection now flows through:
 
 - `actor.subscribe(observer)` - the snapshot stream
@@ -1251,6 +1253,8 @@ const [snapshot, send, actor] = useActor(machine, options);
 Creating the machine inside the component no longer resets state, so `useMemo` around `createMachine` is not needed. `useActor` creates a fresh actor when the previous one has stopped. `useMachine` is a deprecated alias of `useActor`.
 
 ### Vue / Svelte / Solid
+
+`@xstate/vue` requires Vue 3.2 or later. Actors created by `useActorRef`, `useActor` or `useMachine` stop when their owning effect scope is disposed. With VueUse's `createSharedComposable`, the actor stays active until the last consumer disposes. Startup still occurs when the first consumer mounts, so actors do not start during server rendering.
 
 Bindings updated to track the new `Snapshot` shape and `createActor` return type. No new hook signatures, but consuming components that referenced removed `xstate` exports (like `assign`) need to be migrated.
 
@@ -1359,7 +1363,9 @@ contains its `id` (or `seq` for a delayed send without one; built-in `after` and
 wall-clock timestamps or native timeout handles. Timer runtimes implement
 `scheduleTimer(source, timer, delay)` / `cancelTimer(source, timer)` with a
 `TimerKey` (`{ id }`, `{ seq }` or a built-in timer's `{ event }`) and deliver
-`{ type: 'xstate.timer', ...timer }` to the source when due. Consuming that input
+`{ type: 'xstate.timer', ...timer }` to the source when due. Preserve the
+scheduling key's `occurrence` in that input; exclude it from logical cancellation
+lookup keys. Consuming that input
 removes the declaration and emits the real delivery effect.
 
 Final and explicitly stopped snapshots contain no pending timers; their
@@ -1630,7 +1636,7 @@ It runs these transforms in order. `--transform name,name` selects a subset.
 | Transform             | Effect                                                                                                                                                                                                                                                                      |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `rename-imports`      | Renames `interpret` to `createActor`, `Interpreter` to `Actor`, and `fromCallback`, `fromObservable`, and `fromEventObservable` to their `create*Logic` names, and the executable action types to their executable effect names, including usages. Import aliases are kept.                                                                  |
-| `string-targets`      | Wraps bare string transition values under `on`, `after`, `onDone`, `onError`, and `always` in `{ target: '...' }` inside `createMachine` and `createStateConfig` configs.                                                                                                   |
+| `string-targets`      | Wraps bare string transition values under `on`, `after`, `onDone`, `onError`, and `always` in `{ target: '...' }` inside `createMachine`, `createStateConfig`, and `createFSM` configs.                                                                                                   |
 | `types-to-schemas`    | Converts `types: {} as { ... }` and the per-key form `types: { context: {} as C, events: {} as E }` to `schemas` with `types<T>()` entries. Events become a map when they are written as a union of object literals with a string-literal `type`, inline or through type aliases declared in the same file. Other event types become `events: types<E>()`, which loads but does not type-check as a v6 event map, so the entry is reported as a manual site to rewrite as a map by hand. A `types` value in any other shape, such as a variable, is reported as a manual site. |
 | `lower-actions`       | Rewrites transition objects that have `actions` or `guard`, and transition arrays, as one transition function `(args, enq) => { ... }`; non-function `entry` and `exit` values as one function; and the action creators and guard combinators inside them (`assign`, `enqueueActions`, `raise`, `sendTo`, `sendParent`, `forwardTo`, `emit`, `log`, `cancel`, `stopChild`, `spawnChild`, `and`, `or`, `not`, `stateIn`) as `enq` calls, context patches and boolean expressions, following named implementations and module-level constants defined in the same file. Named actions and guards keep their v5 signatures; the generated code calls them as `enq(args.actions.name, args, params)` and `args.guards.name(args, params)`. A named `assign` action becomes a function that returns a context patch. Moves an object-literal second `createMachine` argument into the config, and rewrites `fromPromise(fn)` as `createAsyncLogic({ run: fn })` when `fn` does not read `system` or `emit`. Removes the `'xstate'` imports it leaves unused. A transition, `entry`, or `exit` value that contains anything it cannot rewrite, such as an `enqueueActions` callback that passes `enqueue` as a value or returns early, a guard or action defined in another file, or a named `assign` that `provide()` overrides, is left unchanged and reported by the transforms below. |
 | `report-removed-apis` | Reports, without rewriting, uses of `assign`, `raise`, `sendTo`, `sendParent`, `forwardTo`, `emit`, `log`, `cancel`, `spawnChild`, `stop`, `stopChild`, `enqueueActions`, `and`, `or`, `not`, `stateIn`, `fromPromise`, `fromTransition`, `toObserver`, `pathToStateValue`, and `SpecialTargets`, with a suggested replacement. |
@@ -1816,7 +1822,7 @@ These keys throw an error:
 `createActor(...)` also throws on any option it does not read, and the message lists the supported options:
 
 ```
-Unknown actor option "inptu". Supported options: clock, logger, syncSnapshot, id, registryKey, input, src, inspect, onRejectedEvent, onUnhandledEvent.
+Unknown actor option "inptu". Supported options: clock, logger, syncSnapshot, id, registryKey, input, simulate, src, inspect, onRejectedEvent, onUnhandledEvent.
 ```
 
 These keys change nothing in v6. Development builds log a warning:
@@ -1891,11 +1897,11 @@ To handle the failure in the machine, add `onError` to the state, or run the cal
 
 ### Parallel regions
 
-Transitions inside parallel states exit fewer states than in v5. Entry and exit actions and the resulting state value can differ for the same events.
+Some transitions in parallel states exit fewer states than in v5. Entry and exit actions and the resulting state value can differ for the same events.
 
-- A transition whose targets are all inside one region exits and reenters only that region. In v5, sibling regions were also exited and reset to their initial states.
-- A transition from one region to a target in another region exits only the region that contains the target. The source region stays in its current state. Add `reenter: true` to exit the full transition domain as v5 did.
-- A `reenter: true` transition inside one region reenters only that region. Sibling regions do not run their entry actions again.
+- A non-reentering transition defined on the parallel state whose targets all belong to one region limits exits to that region. In v5, sibling regions were also exited and reset to their initial states.
+- A transition from one region to a target in another exits and reenters their common parallel state. Untargeted regions restart at their initial states. See the [before-and-after examples](parallel-states.md#transitions-between-regions) for coordinating regions while preserving their active states.
+- A `reenter: true` transition defined on one region that targets its descendant reenters that region. Sibling regions stay active.
 - A transition from a final state yields to a conflicting transition from a sibling region that is still active.
 
 ```ts
@@ -1994,7 +2000,7 @@ In v5, an undeclared delay name resolved to `undefined`, and the delayed transit
 - [ ] If you used `events` as a **union**, restructure to a **map keyed by type**
 - [ ] Move implementations passed as the second argument of `createMachine(config, implementations)` (deprecated in v5) into `setup({ ... })`, the `createMachine({ ... })` config, or `machine.provide({ ... })` (§4). v6's `createMachine` takes one argument and throws when it receives a second one
 - [ ] Audit `invoke.src` references - `src` may be a logic object, a registered name, or a resolver function
-- [ ] Drop dependencies on `@xstate/immer` and `@xstate/inspect`; update inspection to `actor.subscribe`, the `inspect` option, or `@statelyai/inspect`
+- [ ] Drop dependencies on `@xstate/immer` and `@xstate/inspect`; update inspection to `actor.subscribe`, the `inspect` option, or `@statelyai/sdk/inspect`
 - [ ] Remove imports of `GuardArgs`, `GuardPredicate`, `Inspected*Event`, `PromiseActorLogic`, and `fromPromise` (use `createAsyncLogic`), and update the type arguments of any `SetupReturn<...>` annotation (§16)
 - [ ] Drain/migrate any v5 persisted snapshots - the v6 snapshot shape is not binary-compatible
 - [ ] Check that persisted `context` holds only JSON values; development builds warn on functions, symbols, `BigInt`, `Map`, `Set`, cycles, `NaN`, and `Infinity`

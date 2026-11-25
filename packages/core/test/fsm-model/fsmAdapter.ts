@@ -26,20 +26,26 @@ import {
 // objects by identity.
 
 export type JsContext = Record<PropertyKey, unknown>;
+export type JsEvent = { type: string; payload?: number };
 export type JsTransitionConfig = { target?: string; context?: JsContext };
 export type JsTransition =
-  | string
   | JsTransitionConfig
   | ((args: {
       context: JsContext;
-      event: FSMEvent;
+      event: JsEvent;
     }) => JsTransitionConfig | undefined)
   | undefined;
+export type JsStateConfig = {
+  on?: Record<string, JsTransition>;
+  always?: JsTransition;
+};
 export type JsConfig = {
   initial: string;
   context?: JsContext;
-  states: Record<string, { on?: Record<string, JsTransition> }>;
+  states: Record<string, JsStateConfig>;
 };
+
+export const DEFAULT_FUEL = 100;
 
 const keyLabel = (key: PropertyKey) =>
   typeof key === 'symbol' ? key.toString() : JSON.stringify(key);
@@ -180,10 +186,18 @@ export function toModel(config: JsConfig) {
       value: values.toValue(patch[key])
     }));
   };
+  const decodeEvent = (event: FSMEvent): JsEvent =>
+    event.payload === undefined
+      ? { type: event.type }
+      : { type: event.type, payload: event.payload };
   const toConfig = (
     result: JsTransitionConfig | undefined
-  ): TransitionConfig | undefined =>
-    result
+  ): TransitionConfig | undefined => {
+    expect(
+      typeof result !== 'string',
+      'transition result must be a config object or undefined, not a string'
+    ).toBe(true);
+    return result
       ? {
           target: result.target,
           context:
@@ -192,33 +206,82 @@ export function toModel(config: JsConfig) {
               : patchEntries(result.context)
         }
       : undefined;
+  };
   const toTransition = (
-    definition: Exclude<JsTransition, undefined>
+    definition: Exclude<JsTransition, undefined>,
+    label: string
   ): Transition => {
-    if (typeof definition === 'string')
-      return { kind: 'target', target: definition };
+    expect(
+      typeof definition !== 'string',
+      `${label}: string transitions are rejected by createFSM`
+    ).toBe(true);
     if (typeof definition === 'function')
       return {
         kind: 'function',
         compute: (context, event) =>
-          toConfig(definition({ context: decodeContext(context), event }))
+          toConfig(
+            definition({
+              context: decodeContext(context),
+              event: decodeEvent(event)
+            })
+          )
       };
     return { kind: 'config', config: toConfig(definition)! };
   };
+  // `createFSM` reads `state?.always` through the state object's prototype
+  // chain (unlike `config.states` and `state.on`, which use `Object.hasOwn`).
+  // Walk the chain below Object.prototype so accessors are refused at every
+  // level and an inherited data property on a state node is faithfully modeled.
+  const readAlways = (node: unknown, label: string): Transition | undefined => {
+    if (node === null || node === undefined || typeof node !== 'object')
+      return undefined;
+    let found = false;
+    let raw: unknown = undefined;
+    for (
+      let level: object | null = node;
+      level !== null && level !== Object.prototype;
+      level = Object.getPrototypeOf(level)
+    ) {
+      const descriptor = Object.getOwnPropertyDescriptor(level, 'always');
+      if (descriptor === undefined) continue;
+      expect(
+        'value' in descriptor,
+        `${label}.always must be a data property`
+      ).toBe(true);
+      if (!found) {
+        found = true;
+        raw = descriptor.value;
+      }
+    }
+    return raw === undefined
+      ? undefined
+      : toTransition(
+          raw as Exclude<JsTransition, undefined>,
+          `${label}.always`
+        );
+  };
   // createFSM treats an undefined transition as no transition, so the
-  // model's transition tables leave it out. The empty string is a target.
-  // A state whose `on` is missing has no transitions, and it still shadows
-  // an inherited state of the same name.
+  // model's transition tables leave it out. An object config `{ target: '' }`
+  // targets the empty-string state; raw string transitions are rejected by
+  // createFSM and tested separately. A state whose `on` is missing has no
+  // transitions, and it still shadows an inherited state of the same name.
   const toStateNode = (node: unknown, label: string): StateNode => {
     const { own, inherited } = ownAndInherited(
       (node as { on?: object } | null | undefined)?.on ?? {},
       `${label}.on`,
-      (definition) =>
+      (definition, key) =>
         definition === undefined
           ? undefined
-          : toTransition(definition as Exclude<JsTransition, undefined>)
+          : toTransition(
+              definition as Exclude<JsTransition, undefined>,
+              `${label}.on[${JSON.stringify(key)}]`
+            )
     );
-    return { on: own, inheritedOn: inherited };
+    return {
+      on: own,
+      inheritedOn: inherited,
+      always: readAlways(node, label)
+    };
   };
   const states = ownAndInherited(config.states, 'config.states', (node, name) =>
     toStateNode(node, `config.states[${JSON.stringify(name)}]`)
@@ -273,15 +336,22 @@ function assertSameSnapshot(
 }
 
 // `onStep` sees each createFSM snapshot and the event it is about to receive.
+// The model runs first with a finite fuel bound so a non-terminating `always`
+// chain fails cleanly instead of hanging the runtime test.
 export function assertAgrees(
   config: JsConfig,
   events: readonly FSMEvent[],
-  onStep?: (snapshot: JsSnapshot, event: FSMEvent) => void
+  onStep?: (snapshot: JsSnapshot, event: FSMEvent) => void,
+  fuel = DEFAULT_FUEL
 ) {
-  const fsm = createFSM<JsContext, FSMEvent>(config);
   const { machine, decodeContext } = toModel(config);
+  const init = initialState(machine, fuel);
+  expect(init.settled, 'initial: always chain must settle within fuel').toBe(
+    true
+  );
+  const fsm = createFSM<JsContext, JsEvent>(config);
   let actual = fsm.initialState;
-  let expected = initialState(machine);
+  let expected = init.snapshot;
   assertSurface(actual, 'initial');
   assertSameSnapshot(actual, expected, decodeContext, 'initial');
   expect(actual.context === config.context, 'initial context identity').toBe(
@@ -292,10 +362,17 @@ export function assertAgrees(
   expect(initialEffects, 'initialTransition effects').toEqual([]);
   expect(fsm.getInitialSnapshot(), 'getInitialSnapshot').toBe(actual);
   for (const [index, event] of events.entries()) {
-    onStep?.(actual, event);
-    const [next, effects] = fsm.transition(actual, event);
-    const step = transition(machine, expected, event);
     const label = `event ${index} (${event.type})`;
+    const step = transition(machine, expected, event, fuel);
+    expect(step.settled, `${label}: always chain must settle within fuel`).toBe(
+      true
+    );
+    onStep?.(actual, event);
+    const jsEvent: JsEvent =
+      event.payload === undefined
+        ? { type: event.type }
+        : { type: event.type, payload: event.payload };
+    const [next, effects] = fsm.transition(actual, jsEvent);
     assertSurface(next, label);
     expect(effects, `${label}: effects`).toEqual([]);
     expect(fsm.getPersistedSnapshot(next), `${label}: persisted`).toBe(next);
@@ -307,10 +384,7 @@ export function assertAgrees(
     actual = next;
     expected = step.snapshot;
   }
-  assertSameSnapshot(
-    actual,
-    run(machine, initialState(machine), events),
-    decodeContext,
-    'run'
-  );
+  const ran = run(machine, init.snapshot, events, fuel);
+  expect(ran.settled, 'run: settled').toBe(true);
+  assertSameSnapshot(actual, ran.snapshot, decodeContext, 'run');
 }

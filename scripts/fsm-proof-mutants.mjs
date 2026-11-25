@@ -1,7 +1,7 @@
 // Mutation testing for the Dafny proofs in packages/core/test/fsm-model.
 // Parses packages/core/test/fsm-model/fsmModel.ts with the TypeScript
 // compiler API, applies a deterministic set of AST mutation operators across
-// all ten model functions, and runs each mutant through `lsc regen` (the same
+// all model functions, and runs each mutant through `lsc regen` (the same
 // regenerate-and-verify path used by scripts/verify-fsm-model.mjs).
 //
 // Usage:
@@ -372,7 +372,7 @@ export function generateMutants(source) {
         }
       }
 
-      // 12. Initial-state value drop: machine.initial -> ''
+      // 12. Initial-state value drop: machine.initial -> '', 'xstate.init' -> ''
       if (
         ts.isPropertyAccessExpression(node) &&
         node.getText(sf) === 'machine.initial'
@@ -384,10 +384,18 @@ export function generateMutants(source) {
           node,
           "''"
         );
+      } else if (ts.isStringLiteral(node) && node.text === 'xstate.init') {
+        add(
+          fnName,
+          'string-empty',
+          `replace \`'xstate.init'\` with \`''\``,
+          node,
+          "''"
+        );
       }
 
-      // 13. Call-argument blanking: replace context / event arguments with
-      // empty values ({} / { type: '', payload: 0 }) at call sites.
+      // 13. Call-argument blanking: replace context / event / fuel arguments
+      // with empty/zero values at call sites.
       if (ts.isCallExpression(node)) {
         const callText = node.getText(sf).replace(/\s+/g, ' ');
         for (const arg of node.arguments) {
@@ -407,6 +415,14 @@ export function generateMutants(source) {
               `blank \`event\` to \`{ type: '', payload: 0 }\` in \`${callText}\``,
               arg,
               "{ type: '', payload: 0 }"
+            );
+          } else if (text === 'fuel') {
+            add(
+              fnName,
+              'arg-blank',
+              `blank \`fuel\` to \`0\` in \`${callText}\``,
+              arg,
+              '0'
             );
           }
         }

@@ -49,15 +49,15 @@ const mutants = [
   },
   {
     id: 'M04',
-    description: 'look up the state without the own-key guard',
+    description: 'look up the state for always without the own-key guard',
     find: 'Object.hasOwn(config.states, value) ? config.states[value] : undefined',
     replace: 'config.states[value]'
   },
   {
     id: 'M05',
     description: 'look up the event with `in` instead of Object.hasOwn',
-    find: 'Object.hasOwn(transitions || {}, event.type) &&',
-    replace: 'event.type in (transitions || {}) &&'
+    find: 'Object.hasOwn(transitions || {}, event.type)',
+    replace: 'event.type in (transitions || {})'
   },
   {
     id: 'M06',
@@ -67,11 +67,9 @@ const mutants = [
   },
   {
     id: 'M07',
-    description: 'default a falsy transition result with ?? instead of ||',
-    find: ': transition) || {};',
-    replace: ': transition) ?? {};',
-    survives:
-      'Equivalent: || and ?? differ only for false, 0, NaN, 0n and the empty string, and destructuring those gives an undefined target and patch, as {} does.'
+    description: 'skip string check on transition function return value',
+    find: 'checkTransition(result);',
+    replace: '/* removed */'
   },
   {
     id: 'M08',
@@ -134,8 +132,8 @@ const mutants = [
   {
     id: 'M17',
     description: 'pass an empty context to transition functions',
-    find: 'transition({ context, event })',
-    replace: 'transition({ context: {} as TContext, event })'
+    find: 'selected({ context: snapshot.context, event })',
+    replace: 'selected({ context: {} as TContext, event })'
   },
   {
     id: 'M18',
@@ -157,7 +155,8 @@ const mutants = [
   },
   {
     id: 'M21',
-    description: 'look up the state with `in` instead of Object.hasOwn',
+    description:
+      'look up the state for always with `in` instead of Object.hasOwn',
     find: 'Object.hasOwn(config.states, value)',
     replace: 'value in config.states'
   },
@@ -184,8 +183,133 @@ const mutants = [
   {
     id: 'M25',
     description: 'compare with !== and no own-key check, as before c70dd85',
-    find: '!Object.hasOwn(context, key) ||\n          !Object.is(patch![key], context[key])',
+    find: '!Object.hasOwn(context, key) ||\n        !Object.is(patch![key], context[key])',
     replace: 'patch![key] !== context[key]'
+  },
+  {
+    id: 'M26',
+    description: 'look up the state for on without the own-key guard',
+    find: 'Object.hasOwn(config.states, snapshot.value)\n          ? config.states[snapshot.value]\n          : undefined',
+    replace: 'config.states[snapshot.value]'
+  },
+  {
+    id: 'M27',
+    description: 'look up the state for on with `in` instead of Object.hasOwn',
+    find: 'Object.hasOwn(config.states, snapshot.value)',
+    replace: 'snapshot.value in config.states'
+  },
+  {
+    id: 'M28',
+    description: 'disable string transition check in checkTransition',
+    find: "if (typeof transition === 'string')",
+    replace: 'if (false)'
+  },
+  {
+    id: 'M29',
+    description: 'skip string check on state.always at construction',
+    find: 'checkTransition(state?.always);',
+    replace: '/* removed */'
+  },
+  {
+    id: 'M30',
+    description: 'skip string check on state.on entries at construction',
+    find: 'checkTransition((state!.on as Record<string, unknown>)[type]);',
+    replace: '/* removed */'
+  },
+  {
+    id: 'M31',
+    description:
+      'enumerate states with Object.keys instead of Object.getOwnPropertyNames',
+    find: 'Object.getOwnPropertyNames(config.states)',
+    replace: 'Object.keys(config.states)'
+  },
+  {
+    id: 'M32',
+    description:
+      'enumerate on entries with Object.keys instead of Object.getOwnPropertyNames',
+    find: 'Object.getOwnPropertyNames(state?.on ?? {})',
+    replace: 'Object.keys(state?.on ?? {})'
+  },
+  {
+    id: 'M33',
+    description: 'never detect always transitions (force hasAlways = false)',
+    find: 'hasAlways ||= state?.always !== undefined;',
+    replace: 'hasAlways = false;'
+  },
+  {
+    id: 'M34',
+    description: 'skip initial always settling',
+    find: "hasAlways\n    ? settle(initialSnapshot, { type: 'xstate.init' })\n    : initialSnapshot",
+    replace: 'initialSnapshot'
+  },
+  {
+    id: 'M35',
+    description: 'skip post-event always settling',
+    find: 'next ? (hasAlways ? settle(next, event) : next) : snapshot',
+    replace: 'next ?? snapshot'
+  },
+  {
+    id: 'M36',
+    description: 'run always even when an event is unhandled',
+    find: 'next ? (hasAlways ? settle(next, event) : next) : snapshot',
+    replace: 'hasAlways ? settle(next ?? snapshot, event) : (next ?? snapshot)'
+  },
+  {
+    id: 'M37',
+    description: 'pass wrong event type during initial always settling',
+    find: "settle(initialSnapshot, { type: 'xstate.init' })",
+    replace: "settle(initialSnapshot, { type: '' } as any)"
+  },
+  {
+    id: 'M38',
+    description:
+      'pass init event instead of triggering event during post-event settling',
+    find: 'settle(next, event)',
+    replace: "settle(next, { type: 'xstate.init' } as any)"
+  },
+  {
+    id: 'M39',
+    description:
+      'stop settling on context-only always changes (check value equality only)',
+    find: 'if (!next || next === snapshot)',
+    replace: 'if (!next || next.value === snapshot.value)'
+  },
+  {
+    id: 'M40',
+    description: 'take at most one always step instead of chaining',
+    find: 'if (!next || next === snapshot) {\n        return snapshot;\n      }\n      snapshot = next;',
+    replace: 'return next ?? snapshot;'
+  },
+  {
+    id: 'M41',
+    description:
+      'return snapshot instead of undefined when a transition is missing or returns undefined',
+    find: 'if (!result) {\n      return undefined;\n    }',
+    replace: 'if (!result) {\n      return snapshot;\n    }'
+  },
+  {
+    id: 'M42',
+    description:
+      'drop the next === snapshot stop guard in settle (#5947 infinite-loop bug)',
+    find: 'if (!next || next === snapshot)',
+    replace: 'if (!next)'
+  },
+  {
+    id: 'M43',
+    description:
+      'always run settle on initialSnapshot without checking hasAlways',
+    find: "hasAlways\n    ? settle(initialSnapshot, { type: 'xstate.init' })\n    : initialSnapshot",
+    replace: "settle(initialSnapshot, { type: 'xstate.init' })",
+    survives:
+      'Equivalent: proved by NoAlwaysSettlesImmediately; when no own state defines always, settle returns its input immediately.'
+  },
+  {
+    id: 'M44',
+    description: 'always run settle after an event without checking hasAlways',
+    find: 'hasAlways ? settle(next, event) : next',
+    replace: 'settle(next, event)',
+    survives:
+      'Equivalent: proved by NoAlwaysSettlesImmediately; when no own state defines always, settle returns its input immediately.'
   }
 ];
 
@@ -262,28 +386,34 @@ if (readFileSync(sourcePath, 'utf8') !== original)
   throw new Error(`${sourceFile} was not restored`);
 process.exit(failed ? 1 : 0);
 
-// Returns whether each test file passed.
+// Returns whether each test file passed. Each test file runs in its own
+// process with a timeout so an infinite-loop mutant (such as M42) is caught
+// cleanly per suite rather than hanging the runner.
 function runTests(label) {
-  const report = path.join(scratch, `${label}.json`);
-  spawnSync(
-    path.join(root, 'node_modules/.bin/vitest'),
-    [
-      'run',
-      '--project',
-      'xstate',
-      testDirectory,
-      '--reporter=json',
-      `--outputFile=${report}`
-    ],
-    {
-      cwd: root,
-      env: { ...process.env, FSM_MODEL_SEED: String(options.seed) },
-      stdio: 'ignore'
-    }
-  );
-  const { testResults } = JSON.parse(readFileSync(report, 'utf8'));
   return Object.fromEntries(
     Object.entries(files).map(([name, file]) => {
+      const report = path.join(scratch, `${label}-${name}.json`);
+      const res = spawnSync(
+        path.join(root, 'node_modules/.bin/vitest'),
+        [
+          'run',
+          '--project',
+          'xstate',
+          path.join(testDirectory, file),
+          '--reporter=json',
+          `--outputFile=${report}`
+        ],
+        {
+          cwd: root,
+          env: { ...process.env, FSM_MODEL_SEED: String(options.seed) },
+          stdio: 'ignore',
+          timeout: 30_000
+        }
+      );
+      if (res.error?.code === 'ETIMEDOUT' || res.signal) {
+        return [name, false];
+      }
+      const { testResults } = JSON.parse(readFileSync(report, 'utf8'));
       const result = testResults.find((entry) => entry.name.endsWith(file));
       if (!result) throw new Error(`${label}: no result for ${file}`);
       return [name, result.status === 'passed'];

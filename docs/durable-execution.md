@@ -50,6 +50,8 @@ replaces local delivery completely; call `deliverEvent(source, target, event)`
 for co-located targets instead of `target.send(event)`, which re-enters the
 runtime.
 
+Pass co-located lifecycle notifications to `deliverEvent` without cloning them. To deliver a verified lifecycle notification from a remote runtime, pass the parent's current remote child handle as the source. If the handle has an incarnation token, the notification's session ID must match it.
+
 The primary durable unit for async work is the actor itself: a developer
 writes a normal promise (`fromPromise`, `createAsyncLogic`) and invokes it;
 the `runLogic` operation hands the host the whole body as one journal
@@ -247,8 +249,14 @@ of:
   `xstate.after`, `{ type, stateId }` for `xstate.timeout.state` and
   `{ type, actorId }` for `xstate.timeout.actor`
 
-Built-in timers have no id. Key host records by `source.address` plus
-`JSON.stringify(timer)`. Persist an absolute deadline derived from `delay` when
+Scheduling keys also carry `occurrence`, which identifies one scheduling.
+Preserve it in the firing input. A cancelled occurrence cannot consume a later
+timer with the same logical key. Inputs without `occurrence` retain legacy
+key-only matching.
+
+Built-in timers have no id. Exclude `occurrence` when constructing the logical
+key used to replace or cancel host records. Include it in the firing identity
+used to deduplicate journal entries. Persist an absolute deadline derived from `delay` when
 accepting the operation, then let the host's scheduler wake a new process. The
 serializable firing input is `{ type: 'xstate.timer', ...timer }`. Journal that
 input before applying it. For a root timer, pass it to
@@ -257,17 +265,19 @@ replaying earlier journal entries.
 
 ```ts
 scheduleTimer: (source, timer, delay) => {
-  const key = `${source.address}:${JSON.stringify(timer)}`;
+  const { occurrence, ...logicalKey } = timer;
+  const key = `${source.address}:${JSON.stringify(logicalKey)}`;
+  const firingKey = `${key}:${occurrence}`;
   const event = { type: 'xstate.timer', ...timer };
-  if (!journal.hasTimerFiring(key)) {
-    host.schedule({ key, dueAt: host.now() + delay, event });
+  if (!journal.hasTimerFiring(firingKey)) {
+    host.schedule({ key, firingKey, dueAt: host.now() + delay, event });
   }
 }
 ```
 
 `snapshot.timers` is the public, per-actor list of pending logical timers, in
 scheduling order. Each entry contains its `id` or `seq` (built-in timers have
-neither), declared `delay`, delivery type, event and logical target. Before effects execute, pure snapshots carry no scheduling
+neither), scheduling `occurrence`, declared `delay`, delivery type, event and logical target. Before effects execute, pure snapshots carry no scheduling
 time. After `executeEffects()` successfully schedules a timer, persisted
 checkpoints carry `scheduledAt`; `restore()` schedules the remaining time toward
 that deadline. Await effect execution before saving a checkpoint. Timer starts
@@ -435,6 +445,10 @@ entry: ({ context }, enq) => {
   enq(notifyApprover, context.orderId);
 }
 ```
+
+## Inspecting a running execution
+
+Pass the `inspect` option to observe initialization, or call `durable.inspect(observer)` to observe a running execution. A subscription receives future inspection events. It does not replay past actor announcements. Call `unsubscribe()` on the returned subscription to detach it.
 
 ## Checkpoints and placement
 

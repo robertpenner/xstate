@@ -1,14 +1,14 @@
 {
   "source": "fsmModel.ts",
-  "verifiedCount": 90,
+  "verifiedCount": 173,
   "functions": {
     "sameValue": {
       "parameters": [],
       "ensures": ["(sameValue(a, b) == (a == b))"]
     },
-    "initialState": {
+    "rawInitialState": {
       "parameters": [],
-      "ensures": ["(initialState(machine).value == machine.initial)"]
+      "ensures": ["(rawInitialState(machine).value == machine.initial)"]
     },
     "lookupState": {
       "parameters": [],
@@ -20,6 +20,12 @@
       "parameters": [],
       "ensures": [
         "(!((value in machine.states)) ==> (match lookupTransition(machine, value, type_) { case Some(i_) => false case None => true }))"
+      ]
+    },
+    "lookupAlways": {
+      "parameters": [],
+      "ensures": [
+        "(!((value in machine.states)) ==> (match lookupAlways(machine, value) { case Some(i_) => false case None => true }))"
       ]
     },
     "resolveTransition": {
@@ -44,16 +50,38 @@
         "((|patch| == 0) ==> (mergePatch(context, patch) == context))"
       ]
     },
-    "transition": {
+    "applyTransition": {
       "parameters": [],
       "ensures": [
-        "(transition(machine, snapshot, event).reused ==> (transition(machine, snapshot, event).snapshot == snapshot))"
+        "(match applyTransition(selected, snapshot, event) { case Some(i_result_val) => (i_result_val.reused ==> (i_result_val.snapshot == snapshot)) case None => true })"
+      ]
+    },
+    "settle": {
+      "parameters": [],
+      "requires": ["(fuel >= 0)"],
+      "ensures": [
+        "(settle(machine, snapshot, event, fuel).reused ==> (settle(machine, snapshot, event, fuel).snapshot == snapshot))"
+      ]
+    },
+    "initialState": {
+      "parameters": [],
+      "requires": ["(fuel >= 0)"],
+      "ensures": [
+        "(initialState(machine, fuel).reused ==> (initialState(machine, fuel).snapshot == rawInitialState(machine)))"
+      ]
+    },
+    "transition": {
+      "parameters": [],
+      "requires": ["(fuel >= 0)"],
+      "ensures": [
+        "(transition(machine, snapshot, event, fuel).reused ==> (transition(machine, snapshot, event, fuel).snapshot == snapshot))"
       ]
     },
     "run": {
       "parameters": [],
+      "requires": ["(fuel >= 0)"],
       "ensures": [
-        "((|events| == 0) ==> (run(machine, snapshot, events) == snapshot))"
+        "((|events| == 0) ==> ((run(machine, snapshot, events, fuel).snapshot == snapshot) && run(machine, snapshot, events, fuel).settled))"
       ]
     }
   },
@@ -64,23 +92,27 @@
     "ResolvedPatch",
     "ResolvedTarget",
     "Resolve",
+    "ApplyKeepsStateWithPatch",
     "Declared",
-    "KeepsStateWithPatch",
+    "CycleMachine",
     "TargetDeclared",
     "TransitionTargetsDeclared",
     "TargetsDeclared",
-    "WitnessMachine",
-    "PatchTransition",
     "AtmMachine",
-    "BankingIsAuthorized"
+    "BankingIsAuthorized",
+    "WitnessMachine",
+    "PatchTransition"
   ],
   "modelDeclarations": [
     "datatype Value = integer(value: int) | negativeZero | notANumber | undefinedValue | opaque_(id: int)",
-    "datatype Transition = target(target: string) | config(config: TransitionConfig) | function_(compute: (map<string, Value>, FSMEvent) -> Option<TransitionConfig>)",
-    "datatype StateNode = StateNode(on: map<string, Transition>, inheritedOn: map<string, Transition>)",
+    "datatype FSMEvent = FSMEvent(type_: string, payload: Option<int>)",
+    "datatype Transition = config(config: TransitionConfig) | function_(compute: (map<string, Value>, FSMEvent) -> Option<TransitionConfig>)",
+    "datatype StateNode = StateNode(on: map<string, Transition>, inheritedOn: map<string, Transition>, always: Option<Transition>)",
     "datatype Machine = Machine(initial: string, context: Option<map<string, Value>>, states: map<string, StateNode>, inheritedStates: map<string, StateNode>)",
     "datatype Snapshot = Snapshot(value: string, context: map<string, Value>)",
-    "datatype Step = Step(snapshot: Snapshot, reused: bool)"
+    "datatype Step = Step(snapshot: Snapshot, reused: bool)",
+    "datatype SettleResult = SettleResult(snapshot: Snapshot, reused: bool, settled: bool)",
+    "datatype RunResult = RunResult(snapshot: Snapshot, settled: bool)"
   ],
   "laws": [
     "MergeKeys",
@@ -89,32 +121,48 @@
     "PatchUnchangedIffOwned",
     "MergeSettles",
     "MergeIdempotent",
-    "TransitionMeaning",
-    "ChangedPatchCopies",
-    "ContextIsFullMerge",
-    "PatchKeysOwnedAfterStep",
-    "DeclaredStateLookup",
-    "InheritedStateHasNoTransitions",
-    "InheritedStatesIgnored",
-    "InheritedEventIsNotFound",
-    "MissingTransitionKeepsSnapshot",
-    "ReuseIsExact",
-    "UnchangedPatchKeepsSnapshot",
-    "StringTargetIsConfigTarget",
     "FunctionTransitionComputes",
+    "ApplyTransitionMeaning",
+    "ChangedPatchCopies",
+    "ApplyContextIsFullMerge",
+    "PatchKeysOwnedAfterApply",
+    "ApplyReuseIsExact",
+    "UnchangedPatchKeepsSnapshot",
     "EmptyConfigKeepsSnapshot",
-    "ContextKeysKept",
+    "ApplyKeepsContextKeys",
     "AbsentKeyAlwaysChanges",
     "OwnedEntryComparesWithObjectIs",
     "NegativeZeroOverZeroCopies",
     "NotANumberOverOwnNotANumberKeepsSnapshot",
+    "DeclaredStateLookup",
+    "DeclaredStateAlwaysLookup",
+    "InheritedStateHasNoTransitions",
+    "InheritedStateHasNoAlways",
+    "InheritedEventIsNotFound",
+    "InheritedStatesIgnored",
+    "NoAlwaysSettlesImmediately",
+    "NoOpAlwaysSettles",
+    "SettleZeroFuel",
+    "SettleStep",
+    "SettleRest",
+    "SettleIdempotent",
+    "SettleStable",
+    "SettleOutOfFuel",
+    "CycleNeverSettles",
+    "MissingTransitionKeepsSnapshot",
+    "UndefinedFunctionSkipsAlways",
+    "HandledNoOpRunsAlways",
+    "TransitionMeaning",
+    "InitialContextAndSettle",
+    "SettleKeepsContextKeys",
+    "ContextKeysKept",
+    "RunKeepsContextKeys",
+    "SettleStaysDeclared",
+    "InitialDeclared",
     "StepStaysDeclared",
     "RunStaysDeclared",
-    "InitialContext",
-    "InitialDeclared",
     "RunSingleEvent",
     "RunConcat",
-    "RunKeepsContextKeys",
     "InvariantAtEveryPrefix",
     "AtmPreservesAuthorization",
     "AtmAuthorizedAtEveryPrefix"
@@ -125,23 +173,47 @@
     "MergeSettles": "MergeSettlesWitness",
     "MergeIdempotent": "MergeIdempotentWitness",
     "ChangedPatchCopies": "ChangedPatchCopiesWitness",
-    "PatchKeysOwnedAfterStep": "PatchKeysOwnedAfterStepWitness",
-    "DeclaredStateLookup": "DeclaredStateLookupWitness",
-    "InheritedStateHasNoTransitions": "InheritedStateHasNoTransitionsWitness",
-    "InheritedEventIsNotFound": "InheritedEventIsNotFoundWitness",
-    "MissingTransitionKeepsSnapshot": "MissingTransitionKeepsSnapshotWitness",
-    "ReuseIsExact": "ReuseIsExactWitness",
+    "ApplyContextIsFullMerge": "ApplyContextIsFullMergeWitness",
+    "PatchKeysOwnedAfterApply": "PatchKeysOwnedAfterApplyWitness",
+    "ApplyReuseIsExact": "ApplyReuseIsExactWitness",
     "UnchangedPatchKeepsSnapshot": "UnchangedPatchKeepsSnapshotWitness",
     "EmptyConfigKeepsSnapshot": "EmptyConfigKeepsSnapshotWitness",
+    "ApplyKeepsContextKeys": "ApplyKeepsContextKeysWitness",
     "AbsentKeyAlwaysChanges": "AbsentKeyAlwaysChangesWitness",
     "OwnedEntryComparesWithObjectIs": "OwnedEntryComparesWithObjectIsWitness",
     "NegativeZeroOverZeroCopies": "NegativeZeroOverZeroCopiesWitness",
     "NotANumberOverOwnNotANumberKeepsSnapshot": "NotANumberOverOwnNotANumberKeepsSnapshotWitness",
+    "DeclaredStateLookup": "DeclaredStateLookupWitness",
+    "DeclaredStateAlwaysLookup": "DeclaredStateAlwaysLookupWitness",
+    "InheritedStateHasNoTransitions": "InheritedStateHasNoTransitionsWitness",
+    "InheritedStateHasNoAlways": "InheritedStateHasNoAlwaysWitness",
+    "InheritedEventIsNotFound": "InheritedEventIsNotFoundWitness",
+    "InheritedStatesIgnored": "InheritedStatesIgnoredWitness",
+    "NoAlwaysSettlesImmediately": "NoAlwaysSettlesImmediatelyWitness",
+    "NoOpAlwaysSettles": "NoOpAlwaysSettlesWitness",
+    "SettleStep": "SettleStepWitness",
+    "SettleRest": "SettleRestWitness",
+    "SettleIdempotent": "SettleIdempotentWitness",
+    "SettleStable": "SettleStableWitness",
+    "SettleOutOfFuel": "SettleOutOfFuelWitness",
+    "CycleNeverSettles": "CycleNeverSettlesWitness",
+    "MissingTransitionKeepsSnapshot": "MissingTransitionKeepsSnapshotWitness",
+    "UndefinedFunctionSkipsAlways": "UndefinedFunctionSkipsAlwaysWitness",
+    "HandledNoOpRunsAlways": "HandledNoOpRunsAlwaysWitness",
+    "TransitionMeaning": "TransitionMeaningWitness",
+    "InitialContextAndSettle": "InitialContextAndSettleWitness",
+    "SettleKeepsContextKeys": "SettleKeepsContextKeysWitness",
+    "ContextKeysKept": "ContextKeysKeptWitness",
+    "RunKeepsContextKeys": "RunKeepsContextKeysWitness",
+    "SettleStaysDeclared": "SettleStaysDeclaredWitness",
+    "InitialDeclared": "InitialDeclaredWitness",
     "StepStaysDeclared": "StepStaysDeclaredWitness",
     "RunStaysDeclared": "RunStaysDeclaredWitness",
-    "InitialDeclared": "InitialDeclaredWitness",
+    "RunSingleEvent": "RunSingleEventWitness",
+    "RunConcat": "RunConcatWitness",
     "InvariantAtEveryPrefix": "InvariantAtEveryPrefixWitness",
-    "AtmPreservesAuthorization": "AtmPreservesAuthorizationWitness"
+    "AtmPreservesAuthorization": "AtmPreservesAuthorizationWitness",
+    "AtmAuthorizedAtEveryPrefix": "AtmAuthorizedAtEveryPrefixWitness"
   },
   "defects": [
     {
@@ -185,24 +257,19 @@
       "after": "const target = snapshot.value;"
     },
     {
-      "name": "a string transition loses its target",
-      "before": "return { target: transition.target, context: undefined };",
-      "after": "return { target: undefined, context: undefined };"
-    },
-    {
       "name": "the initial snapshot drops the configured context",
       "before": "context: machine.context ?? {} }",
       "after": "context: {} }"
     },
     {
       "name": "run skips each event's transition",
-      "before": "transition(machine, snapshot, events[0]).snapshot,",
-      "after": "snapshot,"
+      "before": "return run(machine, step.snapshot, events.slice(1), fuel);",
+      "after": "return run(machine, snapshot, events.slice(1), fuel);"
     },
     {
       "name": "every value uses the initial state's transitions",
-      "before": "const node = lookupState(machine, value);",
-      "after": "const node = lookupState(machine, machine.initial);"
+      "before": "const node = lookupState(machine, value);\n  if (node === undefined) return undefined;\n  return node.on.get(type);",
+      "after": "const node = lookupState(machine, machine.initial);\n  if (node === undefined) return undefined;\n  return node.on.get(type);"
     },
     {
       "name": "state lookup reads inherited states",
@@ -218,6 +285,56 @@
       "name": "a function transition drops the current context",
       "before": "return compute(context, event);",
       "after": "return compute({}, event);"
+    },
+    {
+      "name": "a no-op always transition does not end settling",
+      "before": "if (next === undefined || next.reused) {",
+      "after": "if (next === undefined) {"
+    },
+    {
+      "name": "always lookup reads inherited states",
+      "before": "const node = lookupState(machine, value);\n  if (node === undefined) return undefined;\n  return node.always;",
+      "after": "const node = lookupState(machine, value) ?? machine.inheritedStates.get(value);\n  if (node === undefined) return undefined;\n  return node.always;"
+    },
+    {
+      "name": "settling reports fuel exhaustion as settled",
+      "before": "return { snapshot, reused: true, settled: false };",
+      "after": "return { snapshot, reused: true, settled: true };"
+    },
+    {
+      "name": "settling with zero fuel marks the snapshot as copied",
+      "before": "return { snapshot, reused: true, settled: false };",
+      "after": "return { snapshot, reused: false, settled: false };"
+    },
+    {
+      "name": "settling marks a multi-step always chain as reused",
+      "before": "return {\n    snapshot: rest.snapshot,\n    reused: false,\n    settled: rest.settled\n  };",
+      "after": "return {\n    snapshot: rest.snapshot,\n    reused: true,\n    settled: rest.settled\n  };"
+    },
+    {
+      "name": "initialState skips settling always transitions",
+      "before": "return settle(\n    machine,\n    rawInitialState(machine),\n    { type: 'xstate.init', payload: undefined },\n    fuel\n  );",
+      "after": "return { snapshot: rawInitialState(machine), reused: true, settled: true };"
+    },
+    {
+      "name": "initialState settles with the wrong init event type",
+      "before": "{ type: 'xstate.init', payload: undefined },",
+      "after": "{ type: '', payload: undefined },"
+    },
+    {
+      "name": "an unhandled event still runs always transitions",
+      "before": "if (next === undefined) {\n    return { snapshot, reused: true, settled: true };\n  }",
+      "after": "if (next === undefined) {\n    return settle(machine, snapshot, event, fuel);\n  }"
+    },
+    {
+      "name": "transition skips settling always transitions",
+      "before": "const settled = settle(machine, next.snapshot, event, fuel);",
+      "after": "const settled = { snapshot: next.snapshot, reused: true, settled: true };"
+    },
+    {
+      "name": "transition ignores first-step copy when reporting reuse",
+      "before": "reused: next.reused && settled.reused,",
+      "after": "reused: settled.reused,"
     }
   ],
   "refactor": {
