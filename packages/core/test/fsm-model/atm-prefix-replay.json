@@ -1,0 +1,170 @@
+{
+  "variants": {
+    "intended": {
+      "initial": "idle",
+      "context": { "authorized": false },
+      "states": {
+        "idle": {
+          "on": {
+            "LOGIN": { "target": "banking", "context": { "authorized": true } }
+          }
+        },
+        "banking": {
+          "on": {
+            "EXPIRE": { "target": "idle", "context": { "authorized": false } }
+          }
+        }
+      }
+    },
+    "faulty": {
+      "initial": "idle",
+      "context": { "authorized": false },
+      "states": {
+        "idle": {
+          "on": {
+            "LOGIN": { "target": "banking", "context": { "authorized": true } }
+          }
+        },
+        "banking": {
+          "on": {
+            "EXPIRE": {
+              "target": "banking",
+              "context": { "authorized": false }
+            }
+          }
+        }
+      }
+    }
+  },
+  "named": [
+    { "name": "empty input", "events": [], "faultyFirstBadPrefix": null },
+    {
+      "name": "ignored event in banking before expiry",
+      "events": [
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "IGNORED", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 }
+      ],
+      "faultyFirstBadPrefix": 3
+    },
+    {
+      "name": "repeated login and expiry, including ignored inputs after expiry",
+      "events": [
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "toString", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 }
+      ],
+      "faultyFirstBadPrefix": 4
+    }
+  ],
+  "minimizedFailure": {
+    "events": [
+      { "type": "LOGIN", "payload": 0 },
+      { "type": "EXPIRE", "payload": 0 }
+    ],
+    "faultyFirstBadPrefix": 2
+  },
+  "generated": [
+    {
+      "faultyFirstBadPrefix": 5,
+      "events": [
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "IGNORED", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "IGNORED", "payload": 0 }
+      ]
+    },
+    { "faultyFirstBadPrefix": null, "events": [] },
+    {
+      "faultyFirstBadPrefix": null,
+      "events": [
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "IGNORED", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "IGNORED", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 }
+      ]
+    },
+    { "faultyFirstBadPrefix": null, "events": [] },
+    {
+      "faultyFirstBadPrefix": null,
+      "events": [
+        { "type": "IGNORED", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "IGNORED", "payload": 0 }
+      ]
+    },
+    {
+      "faultyFirstBadPrefix": null,
+      "events": [
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "IGNORED", "payload": 0 }
+      ]
+    },
+    { "faultyFirstBadPrefix": null, "events": [] },
+    {
+      "faultyFirstBadPrefix": null,
+      "events": [
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 }
+      ]
+    },
+    {
+      "faultyFirstBadPrefix": null,
+      "events": [
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "IGNORED", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "IGNORED", "payload": 0 }
+      ]
+    },
+    {
+      "faultyFirstBadPrefix": 3,
+      "events": [
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "IGNORED", "payload": 0 },
+        { "type": "IGNORED", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 }
+      ]
+    },
+    {
+      "faultyFirstBadPrefix": 3,
+      "events": [
+        { "type": "IGNORED", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "IGNORED", "payload": 0 }
+      ]
+    },
+    {
+      "faultyFirstBadPrefix": 3,
+      "events": [
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "EXPIRE", "payload": 0 },
+        { "type": "LOGIN", "payload": 0 }
+      ]
+    }
+  ]
+}

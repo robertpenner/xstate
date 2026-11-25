@@ -1,0 +1,52 @@
+name: fsm model verification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'packages/core/src/fsm.ts'
+      - 'packages/core/test/fsm-model/**'
+      - 'scripts/verify-fsm-model.mjs'
+      - '.github/workflows/fsm-model.yml'
+      - '.github/fsm-model/**'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    timeout-minutes: 15
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.16.0
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 8.0.x
+      - name: Install Dafny 4.11.0
+        run: |
+          curl --fail --location --retry 3 \
+            https://github.com/dafny-lang/dafny/releases/download/v4.11.0/dafny-4.11.0-x64-ubuntu-22.04.zip \
+            --output "$RUNNER_TEMP/dafny.zip"
+          printf '%s  %s\n' \
+            a46a9ff7cdd720f7955854c78e95df13f4cfe6b80691b05f8654fe19e8267179 \
+            "$RUNNER_TEMP/dafny.zip" > "$RUNNER_TEMP/dafny.sha256"
+          sha256sum --check "$RUNNER_TEMP/dafny.sha256"
+          unzip -q "$RUNNER_TEMP/dafny.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/dafny" >> "$GITHUB_PATH"
+      # .github/fsm-model locks LemmaScript and its dependencies. The install
+      # runs in RUNNER_TEMP so nothing it adds reaches the workspace.
+      - name: Install LemmaScript 0.6.6 outside the workspace
+        run: |
+          mkdir -p "$RUNNER_TEMP/lemmascript"
+          cp .github/fsm-model/package.json .github/fsm-model/package-lock.json \
+            "$RUNNER_TEMP/lemmascript/"
+          cd "$RUNNER_TEMP/lemmascript"
+          npm ci --ignore-scripts --no-audit --no-fund
+          echo "LEMMASCRIPT_LSC=$RUNNER_TEMP/lemmascript/node_modules/lemmascript/tools/dist/lsc.js" >> "$GITHUB_ENV"
+      - name: Verify the model, reject its defects, and detect stale Dafny
+        run: node scripts/verify-fsm-model.mjs
