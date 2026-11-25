@@ -203,7 +203,9 @@ function assertProof(generated, proof) {
       lines.includes(declaration),
       `Missing generated declaration: ${declaration}`
     );
-  for (const [name, { ensures }] of Object.entries(manifest.functions)) {
+  for (const [name, { requires = [], ensures }] of Object.entries(
+    manifest.functions
+  )) {
     for (const declaration of [`function ${name}`, `lemma ${name}_ensures`]) {
       const header = generated.match(
         new RegExp(`^${declaration}\\([^\\n]*\\n((?:  [^\\n]*\\n)*)\\{`, 'm')
@@ -212,11 +214,15 @@ function assertProof(generated, proof) {
       const clauses = header[1]
         .split('\n')
         .filter((line) => /^\s*(requires|ensures) /.test(line));
+      const expectedRequires = requires.map((clause) => `  requires ${clause}`);
       assert.deepEqual(
         clauses,
         declaration.startsWith('lemma ')
-          ? ensures.map((clause) => `  ensures ${clause}`)
-          : [],
+          ? [
+              ...expectedRequires,
+              ...ensures.map((clause) => `  ensures ${clause}`)
+            ]
+          : expectedRequires,
         `${declaration} must have exactly the manifest's contract.`
       );
     }

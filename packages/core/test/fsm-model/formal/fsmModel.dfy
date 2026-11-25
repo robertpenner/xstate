@@ -7,19 +7,23 @@ datatype Value = integer(value: int) | negativeZero | notANumber | undefinedValu
 
 datatype PatchEntry = PatchEntry(key: string, value: Value)
 
-datatype FSMEvent = FSMEvent(type_: string, payload: int)
+datatype FSMEvent = FSMEvent(type_: string, payload: Option<int>)
 
 datatype TransitionConfig = TransitionConfig(target: Option<string>, context: Option<seq<PatchEntry>>)
 
-datatype Transition = target(target: string) | config(config: TransitionConfig) | function_(compute: (map<string, Value>, FSMEvent) -> Option<TransitionConfig>)
+datatype Transition = config(config: TransitionConfig) | function_(compute: (map<string, Value>, FSMEvent) -> Option<TransitionConfig>)
 
-datatype StateNode = StateNode(on: map<string, Transition>, inheritedOn: map<string, Transition>)
+datatype StateNode = StateNode(on: map<string, Transition>, inheritedOn: map<string, Transition>, always: Option<Transition>)
 
 datatype Machine = Machine(initial: string, context: Option<map<string, Value>>, states: map<string, StateNode>, inheritedStates: map<string, StateNode>)
 
 datatype Snapshot = Snapshot(value: string, context: map<string, Value>)
 
 datatype Step = Step(snapshot: Snapshot, reused: bool)
+
+datatype SettleResult = SettleResult(snapshot: Snapshot, reused: bool, settled: bool)
+
+datatype RunResult = RunResult(snapshot: Snapshot, settled: bool)
 
 function sameValue(a: Value, b: Value): bool
 {
@@ -42,13 +46,13 @@ lemma sameValue_ensures(a: Value, b: Value)
 {
 }
 
-function initialState(machine: Machine): Snapshot
+function rawInitialState(machine: Machine): Snapshot
 {
   Snapshot(machine.initial, (match machine.context { case Some(i_oc0_val) => i_oc0_val case None => map[] }))
 }
 
-lemma initialState_ensures(machine: Machine)
-  ensures (initialState(machine).value == machine.initial)
+lemma rawInitialState_ensures(machine: Machine)
+  ensures (rawInitialState(machine).value == machine.initial)
 {
 }
 
@@ -78,13 +82,27 @@ lemma lookupTransition_ensures(machine: Machine, value: string, type_: string)
 {
 }
 
+function lookupAlways(machine: Machine, value: string): Option<Transition>
+{
+  var node := lookupState(machine, value);
+  match node {
+    case Some(i_node_val) =>
+      i_node_val.always
+    case None =>
+      None
+  }
+}
+
+lemma lookupAlways_ensures(machine: Machine, value: string)
+  ensures (!((value in machine.states)) ==> (match lookupAlways(machine, value) { case Some(i_) => false case None => true }))
+{
+}
+
 function resolveTransition(transition: Option<Transition>, context: map<string, Value>, event: FSMEvent): Option<TransitionConfig>
 {
   match transition {
     case Some(i_transition_val) =>
       match i_transition_val {
-        case target(i__transition_val_target) =>
-          Some(TransitionConfig(Some(i__transition_val_target), None))
         case config(i__transition_val_config) =>
           Some(i__transition_val_config)
         case function_(i__transition_val_compute) =>
@@ -136,39 +154,102 @@ lemma mergePatch_ensures(context: map<string, Value>, patch: seq<PatchEntry>)
 {
 }
 
-function transition(machine: Machine, snapshot: Snapshot, event: FSMEvent): Step
+function applyTransition(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent): Option<Step>
 {
-  var config := resolveTransition(lookupTransition(machine, snapshot.value, event.type_), snapshot.context, event);
+  var config := resolveTransition(selected, snapshot.context, event);
   match config {
     case Some(i_config_val) =>
       var target := (match i_config_val.target { case Some(i_oc1_val) => i_oc1_val case None => snapshot.value });
       var patch := (match i_config_val.context { case Some(i_oc2_val) => i_oc2_val case None => [] });
       var changed := patchChanges(snapshot.context, patch);
       if ((target == snapshot.value) && !(changed)) then
-        Step(snapshot, true)
+        Some(Step(snapshot, true))
       else
-        Step(Snapshot(target, (if changed then mergePatch(snapshot.context, patch) else snapshot.context)), false)
+        Some(Step(Snapshot(target, (if changed then mergePatch(snapshot.context, patch) else snapshot.context)), false))
     case None =>
-      Step(snapshot, true)
+      None
   }
 }
 
-lemma transition_ensures(machine: Machine, snapshot: Snapshot, event: FSMEvent)
-  ensures (transition(machine, snapshot, event).reused ==> (transition(machine, snapshot, event).snapshot == snapshot))
+lemma applyTransition_ensures(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent)
+  ensures (match applyTransition(selected, snapshot, event) { case Some(i_result_val) => (i_result_val.reused ==> (i_result_val.snapshot == snapshot)) case None => true })
 {
 }
 
-function run(machine: Machine, snapshot: Snapshot, events: seq<FSMEvent>): Snapshot
+function settle(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int): SettleResult
+  requires (fuel >= 0)
+  decreases fuel
+{
+  var next := applyTransition(lookupAlways(machine, snapshot.value), snapshot, event);
+  match next {
+    case Some(i_next_val) =>
+      if i_next_val.reused then
+        SettleResult(snapshot, true, true)
+      else
+        if (fuel == 0) then
+          SettleResult(snapshot, true, false)
+        else
+          var rest := settle(machine, i_next_val.snapshot, event, (fuel - 1));
+          SettleResult(rest.snapshot, false, rest.settled)
+    case None =>
+      SettleResult(snapshot, true, true)
+  }
+}
+
+lemma settle_ensures(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires (fuel >= 0)
+  ensures (settle(machine, snapshot, event, fuel).reused ==> (settle(machine, snapshot, event, fuel).snapshot == snapshot))
+{
+}
+
+function initialState(machine: Machine, fuel: int): SettleResult
+  requires (fuel >= 0)
+{
+  settle(machine, rawInitialState(machine), FSMEvent("xstate.init", None), fuel)
+}
+
+lemma initialState_ensures(machine: Machine, fuel: int)
+  requires (fuel >= 0)
+  ensures (initialState(machine, fuel).reused ==> (initialState(machine, fuel).snapshot == rawInitialState(machine)))
+{
+}
+
+function transition(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int): SettleResult
+  requires (fuel >= 0)
+{
+  var next := applyTransition(lookupTransition(machine, snapshot.value, event.type_), snapshot, event);
+  match next {
+    case Some(i_next_val) =>
+      var settled := settle(machine, i_next_val.snapshot, event, fuel);
+      SettleResult(settled.snapshot, (i_next_val.reused && settled.reused), settled.settled)
+    case None =>
+      SettleResult(snapshot, true, true)
+  }
+}
+
+lemma transition_ensures(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires (fuel >= 0)
+  ensures (transition(machine, snapshot, event, fuel).reused ==> (transition(machine, snapshot, event, fuel).snapshot == snapshot))
+{
+}
+
+function run(machine: Machine, snapshot: Snapshot, events: seq<FSMEvent>, fuel: int): RunResult
+  requires (fuel >= 0)
   decreases |events|
 {
   if (|events| == 0) then
-    snapshot
+    RunResult(snapshot, true)
   else
-    run(machine, transition(machine, snapshot, events[0]).snapshot, events[1..])
+    var step := transition(machine, snapshot, events[0], fuel);
+    if !(step.settled) then
+      RunResult(step.snapshot, false)
+    else
+      run(machine, step.snapshot, events[1..], fuel)
 }
 
-lemma run_ensures(machine: Machine, snapshot: Snapshot, events: seq<FSMEvent>)
-  ensures ((|events| == 0) ==> (run(machine, snapshot, events) == snapshot))
+lemma run_ensures(machine: Machine, snapshot: Snapshot, events: seq<FSMEvent>, fuel: int)
+  requires (fuel >= 0)
+  ensures ((|events| == 0) ==> ((run(machine, snapshot, events, fuel).snapshot == snapshot) && run(machine, snapshot, events, fuel).settled))
 {
 }
 
@@ -311,49 +392,188 @@ ghost function Resolve(machine: Machine, snapshot: Snapshot, event: FSMEvent): O
   resolveTransition(lookupTransition(machine, snapshot.value, event.type_), snapshot.context, event)
 }
 
-// The next snapshot is the resolved target, with the patch merged into the
-// context exactly when some patch entry is not unchanged.
-lemma TransitionMeaning(machine: Machine, snapshot: Snapshot, event: FSMEvent)
-  ensures transition(machine, snapshot, event).snapshot ==
-    Snapshot(ResolvedTarget(Resolve(machine, snapshot, event), snapshot.value),
-             if patchChanges(snapshot.context, ResolvedPatch(Resolve(machine, snapshot, event)))
-             then mergePatch(snapshot.context, ResolvedPatch(Resolve(machine, snapshot, event)))
-             else snapshot.context)
+lemma FunctionTransitionComputes(compute: (map<string, Value>, FSMEvent) -> Option<TransitionConfig>, context: map<string, Value>, event: FSMEvent)
+  ensures resolveTransition(Some(function_(compute)), context, event) == compute(context, event)
 {
 }
 
-// A patch that changes something always produces a new snapshot with the full merge.
-lemma ChangedPatchCopies(machine: Machine, snapshot: Snapshot, event: FSMEvent)
-  requires patchChanges(snapshot.context, ResolvedPatch(Resolve(machine, snapshot, event)))
-  ensures !transition(machine, snapshot, event).reused
-  ensures transition(machine, snapshot, event).snapshot.context ==
-          mergePatch(snapshot.context, ResolvedPatch(Resolve(machine, snapshot, event)))
+// Single-step (`applyTransition`) semantics: returns `None` when no transition
+// resolves, and otherwise computes the resolved target and conditionally
+// merged context, reusing the snapshot iff nothing changed.
+lemma ApplyTransitionMeaning(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent)
+  ensures var cfg := resolveTransition(selected, snapshot.context, event);
+          var res := applyTransition(selected, snapshot, event);
+          (cfg.None? ==> res.None?) &&
+          (cfg.Some? ==>
+            res.Some? &&
+            res.value.snapshot ==
+              Snapshot(ResolvedTarget(cfg, snapshot.value),
+                       if patchChanges(snapshot.context, ResolvedPatch(cfg))
+                       then mergePatch(snapshot.context, ResolvedPatch(cfg))
+                       else snapshot.context) &&
+            res.value.reused == (ResolvedTarget(cfg, snapshot.value) == snapshot.value && !patchChanges(snapshot.context, ResolvedPatch(cfg))))
 {
 }
 
-// Whether or not `transition` copies, the next context is the full merge of
-// the resolved patch: skipping the copy loses no entry.
-lemma ContextIsFullMerge(machine: Machine, snapshot: Snapshot, event: FSMEvent)
-  ensures transition(machine, snapshot, event).snapshot.context ==
-          mergePatch(snapshot.context, ResolvedPatch(Resolve(machine, snapshot, event)))
+// A resolved patch that changes something always produces a new snapshot with the full merge.
+lemma ChangedPatchCopies(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent)
+  requires resolveTransition(selected, snapshot.context, event).Some?
+  requires patchChanges(snapshot.context, ResolvedPatch(resolveTransition(selected, snapshot.context, event)))
+  ensures applyTransition(selected, snapshot, event).Some?
+  ensures !applyTransition(selected, snapshot, event).value.reused
+  ensures applyTransition(selected, snapshot, event).value.snapshot.context ==
+          mergePatch(snapshot.context, ResolvedPatch(resolveTransition(selected, snapshot.context, event)))
 {
-  var patch := ResolvedPatch(Resolve(machine, snapshot, event));
-  TransitionMeaning(machine, snapshot, event);
+}
+
+// Whether or not `applyTransition` copies, the next context is the full merge
+// of the resolved patch: skipping the copy loses no entry.
+lemma ApplyContextIsFullMerge(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent)
+  requires resolveTransition(selected, snapshot.context, event).Some?
+  ensures applyTransition(selected, snapshot, event).Some?
+  ensures applyTransition(selected, snapshot, event).value.snapshot.context ==
+          mergePatch(snapshot.context, ResolvedPatch(resolveTransition(selected, snapshot.context, event)))
+{
+  var cfg := resolveTransition(selected, snapshot.context, event);
+  var patch := ResolvedPatch(cfg);
+  ApplyTransitionMeaning(selected, snapshot, event);
   if !patchChanges(snapshot.context, patch) {
     PatchUnchangedIffOwned(snapshot.context, patch);
     MergeOfOwnedValuesIsIdentity(snapshot.context, patch);
   }
 }
 
-// After a step, the context owns every key of the resolved patch, holding the
-// patch's value. A step that finds no transition has the empty patch.
-lemma PatchKeysOwnedAfterStep(machine: Machine, snapshot: Snapshot, event: FSMEvent)
-  requires DistinctKeys(ResolvedPatch(Resolve(machine, snapshot, event)))
-  ensures OwnsPatch(transition(machine, snapshot, event).snapshot.context,
-                    ResolvedPatch(Resolve(machine, snapshot, event)))
+// After a resolved step, the context owns every key of the resolved patch,
+// holding the patch's value.
+lemma PatchKeysOwnedAfterApply(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent)
+  requires resolveTransition(selected, snapshot.context, event).Some?
+  requires DistinctKeys(ResolvedPatch(resolveTransition(selected, snapshot.context, event)))
+  ensures applyTransition(selected, snapshot, event).Some?
+  ensures OwnsPatch(applyTransition(selected, snapshot, event).value.snapshot.context,
+                    ResolvedPatch(resolveTransition(selected, snapshot.context, event)))
 {
-  ContextIsFullMerge(machine, snapshot, event);
-  MergeValues(snapshot.context, ResolvedPatch(Resolve(machine, snapshot, event)));
+  ApplyContextIsFullMerge(selected, snapshot, event);
+  MergeValues(snapshot.context, ResolvedPatch(resolveTransition(selected, snapshot.context, event)));
+}
+
+// Single-step reuse is exact: `applyTransition` returns the same snapshot
+// object iff the next snapshot equals it, including NaN and -0.
+lemma ApplyReuseIsExact(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent)
+  requires resolveTransition(selected, snapshot.context, event).Some?
+  requires DistinctKeys(ResolvedPatch(resolveTransition(selected, snapshot.context, event)))
+  ensures applyTransition(selected, snapshot, event).Some?
+  ensures applyTransition(selected, snapshot, event).value.reused <==>
+          applyTransition(selected, snapshot, event).value.snapshot == snapshot
+{
+  var cfg := resolveTransition(selected, snapshot.context, event);
+  var patch := ResolvedPatch(cfg);
+  ApplyTransitionMeaning(selected, snapshot, event);
+  if patchChanges(snapshot.context, patch) {
+    PatchUnchangedIffOwned(snapshot.context, patch);
+    PatchKeysOwnedAfterApply(selected, snapshot, event);
+  }
+}
+
+// A resolved single step that keeps the state with the given patch.
+ghost predicate ApplyKeepsStateWithPatch(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent, patch: seq<PatchEntry>)
+{
+  var cfg := resolveTransition(selected, snapshot.context, event);
+  cfg.Some? &&
+  ResolvedTarget(cfg, snapshot.value) == snapshot.value &&
+  ResolvedPatch(cfg) == patch
+}
+
+// A resolved transition that keeps the state with a patch that changes nothing
+// returns the same snapshot object.
+lemma UnchangedPatchKeepsSnapshot(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent)
+  requires resolveTransition(selected, snapshot.context, event).Some?
+  requires ResolvedTarget(resolveTransition(selected, snapshot.context, event), snapshot.value) == snapshot.value
+  requires !patchChanges(snapshot.context, ResolvedPatch(resolveTransition(selected, snapshot.context, event)))
+  ensures applyTransition(selected, snapshot, event) == Some(Step(snapshot, true))
+{
+}
+
+lemma EmptyConfigKeepsSnapshot(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent)
+  requires resolveTransition(selected, snapshot.context, event) == Some(TransitionConfig(None, None))
+  ensures applyTransition(selected, snapshot, event) == Some(Step(snapshot, true))
+{
+}
+
+lemma ApplyKeepsContextKeys(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent)
+  requires applyTransition(selected, snapshot, event).Some?
+  ensures snapshot.context.Keys <= applyTransition(selected, snapshot, event).value.snapshot.context.Keys
+{
+  ApplyTransitionMeaning(selected, snapshot, event);
+  var cfg := resolveTransition(selected, snapshot.context, event);
+  forall k | k in snapshot.context
+    ensures k in applyTransition(selected, snapshot, event).value.snapshot.context
+  {
+    MergeKeys(snapshot.context, ResolvedPatch(cfg), k);
+  }
+}
+
+// A patch entry for a key the context does not own always copies and gives
+// the context an own key, whatever the value: undefined, or a value equal to
+// one the context inherits, such as Object.prototype.toString.
+lemma AbsentKeyAlwaysChanges(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent, k: string, v: Value)
+  requires resolveTransition(selected, snapshot.context, event).Some?
+  requires k !in snapshot.context
+  requires ResolvedPatch(resolveTransition(selected, snapshot.context, event)) == [PatchEntry(k, v)]
+  ensures applyTransition(selected, snapshot, event).Some?
+  ensures !applyTransition(selected, snapshot, event).value.reused
+  ensures applyTransition(selected, snapshot, event).value.snapshot.context == snapshot.context[k := v]
+{
+  var patch := [PatchEntry(k, v)];
+  assert patch[0] in patch;
+  assert patch[1..] == [];
+  ChangedPatchCopies(selected, snapshot, event);
+}
+
+// For a key the context owns, a step that keeps the state keeps the snapshot
+// exactly when the patch value is the same value under Object.is, and the
+// next context holds the patch value either way.
+lemma OwnedEntryComparesWithObjectIs(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent, k: string, v: Value)
+  requires k in snapshot.context
+  requires ApplyKeepsStateWithPatch(selected, snapshot, event, [PatchEntry(k, v)])
+  ensures applyTransition(selected, snapshot, event).Some?
+  ensures applyTransition(selected, snapshot, event).value.reused <==> sameValue(v, snapshot.context[k])
+  ensures applyTransition(selected, snapshot, event).value.snapshot.context == snapshot.context[k := v]
+{
+  var patch := [PatchEntry(k, v)];
+  assert patch[0] in patch;
+  assert patch[1..] == [];
+  sameValue_ensures(v, snapshot.context[k]);
+  sameValue_ensures(snapshot.context[k], v);
+  if sameValue(v, snapshot.context[k]) {
+    assert !patchChanges(snapshot.context, patch);
+    UnchangedPatchKeepsSnapshot(selected, snapshot, event);
+    assert snapshot.context[k := v] == snapshot.context;
+  } else {
+    assert patchChanges(snapshot.context, patch);
+    ChangedPatchCopies(selected, snapshot, event);
+  }
+}
+
+// -0 over an own 0 copies, and the context then holds -0.
+lemma NegativeZeroOverZeroCopies(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent, k: string)
+  requires k in snapshot.context && snapshot.context[k] == Value.integer(0)
+  requires ApplyKeepsStateWithPatch(selected, snapshot, event, [PatchEntry(k, Value.negativeZero)])
+  ensures applyTransition(selected, snapshot, event).Some?
+  ensures !applyTransition(selected, snapshot, event).value.reused
+  ensures k in applyTransition(selected, snapshot, event).value.snapshot.context &&
+          applyTransition(selected, snapshot, event).value.snapshot.context[k] == Value.negativeZero
+{
+  OwnedEntryComparesWithObjectIs(selected, snapshot, event, k, Value.negativeZero);
+}
+
+// NaN over an own NaN keeps the snapshot.
+lemma NotANumberOverOwnNotANumberKeepsSnapshot(selected: Option<Transition>, snapshot: Snapshot, event: FSMEvent, k: string)
+  requires k in snapshot.context && snapshot.context[k] == Value.notANumber
+  requires ApplyKeepsStateWithPatch(selected, snapshot, event, [PatchEntry(k, Value.notANumber)])
+  ensures applyTransition(selected, snapshot, event) == Some(Step(snapshot, true))
+{
+  OwnedEntryComparesWithObjectIs(selected, snapshot, event, k, Value.notANumber);
+  applyTransition_ensures(selected, snapshot, event);
 }
 
 // A value is declared when `config.states` owns a state with that name.
@@ -370,6 +590,13 @@ lemma DeclaredStateLookup(machine: Machine, value: string, type_: string)
 {
 }
 
+// A declared value finds its `always` transition on its own state node.
+lemma DeclaredStateAlwaysLookup(machine: Machine, value: string)
+  requires Declared(machine, value)
+  ensures lookupAlways(machine, value) == machine.states[value].always
+{
+}
+
 // A state that `config.states` only inherits contributes no transitions.
 lemma InheritedStateHasNoTransitions(machine: Machine, value: string, type_: string)
   requires value !in machine.states && value in machine.inheritedStates
@@ -377,13 +604,11 @@ lemma InheritedStateHasNoTransitions(machine: Machine, value: string, type_: str
 {
 }
 
-// Replacing every inherited state leaves every step unchanged.
-lemma InheritedStatesIgnored(machine: Machine, snapshot: Snapshot, event: FSMEvent, inherited: map<string, StateNode>)
-  ensures transition(machine.(inheritedStates := inherited), snapshot, event) == transition(machine, snapshot, event)
+// A state that `config.states` only inherits contributes no `always` transition.
+lemma InheritedStateHasNoAlways(machine: Machine, value: string)
+  requires value !in machine.states && value in machine.inheritedStates
+  ensures lookupAlways(machine, value).None?
 {
-  var other := machine.(inheritedStates := inherited);
-  assert lookupState(other, snapshot.value) == lookupState(machine, snapshot.value);
-  assert lookupTransition(other, snapshot.value, event.type_) == lookupTransition(machine, snapshot.value, event.type_);
 }
 
 // An event that the found state's `on` table does not own finds no
@@ -395,128 +620,248 @@ lemma InheritedEventIsNotFound(machine: Machine, value: string, type_: string)
 {
 }
 
-lemma MissingTransitionKeepsSnapshot(machine: Machine, snapshot: Snapshot, event: FSMEvent)
+// Replacing every inherited state leaves `settle`, `initialState`, and
+// `transition` unchanged.
+lemma InheritedStatesIgnored(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int, inherited: map<string, StateNode>)
+  requires fuel >= 0
+  ensures settle(machine.(inheritedStates := inherited), snapshot, event, fuel) == settle(machine, snapshot, event, fuel)
+  ensures initialState(machine.(inheritedStates := inherited), fuel) == initialState(machine, fuel)
+  ensures transition(machine.(inheritedStates := inherited), snapshot, event, fuel) == transition(machine, snapshot, event, fuel)
+  decreases fuel
+{
+  var other := machine.(inheritedStates := inherited);
+  assert lookupState(other, snapshot.value) == lookupState(machine, snapshot.value);
+  assert lookupAlways(other, snapshot.value) == lookupAlways(machine, snapshot.value);
+  assert lookupTransition(other, snapshot.value, event.type_) == lookupTransition(machine, snapshot.value, event.type_);
+  if fuel > 0 {
+    var alwaysNext := applyTransition(lookupAlways(machine, snapshot.value), snapshot, event);
+    if alwaysNext.Some? && !alwaysNext.value.reused {
+      InheritedStatesIgnored(machine, alwaysNext.value.snapshot, event, fuel - 1, inherited);
+    }
+    var raw := rawInitialState(machine);
+    var initEvent := FSMEvent("xstate.init", None);
+    var initNext := applyTransition(lookupAlways(machine, raw.value), raw, initEvent);
+    if initNext.Some? && !initNext.value.reused {
+      InheritedStatesIgnored(machine, initNext.value.snapshot, initEvent, fuel - 1, inherited);
+    }
+    var onNext := applyTransition(lookupTransition(machine, snapshot.value, event.type_), snapshot, event);
+    if onNext.Some? {
+      var s := onNext.value.snapshot;
+      var sNext := applyTransition(lookupAlways(machine, s.value), s, event);
+      if sNext.Some? && !sNext.value.reused {
+        InheritedStatesIgnored(machine, sNext.value.snapshot, event, fuel - 1, inherited);
+      }
+    }
+  }
+}
+
+// ---- `always` and `settle` laws ----
+
+// If no own state declares `always`, `settle` returns immediately without
+// stepping. This justifies the `hasAlways` fast path in `fsm.ts`.
+lemma NoAlwaysSettlesImmediately(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires fuel >= 0
+  requires forall v :: v in machine.states ==> machine.states[v].always.None?
+  ensures settle(machine, snapshot, event, fuel) == SettleResult(snapshot, true, true)
+{
+}
+
+// An `always` transition that resolves to nothing or changes nothing ends
+// settling immediately, even with zero fuel (statelyai/xstate#5947).
+lemma NoOpAlwaysSettles(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires fuel >= 0
+  requires applyTransition(lookupAlways(machine, snapshot.value), snapshot, event).None? ||
+           applyTransition(lookupAlways(machine, snapshot.value), snapshot, event).value.reused
+  ensures settle(machine, snapshot, event, fuel) == SettleResult(snapshot, true, true)
+{
+}
+
+// With zero fuel, settling takes no steps: it always keeps the snapshot
+// (`reused: true`) and reports `settled: false` iff a changing `always`
+// transition is enabled.
+lemma SettleZeroFuel(machine: Machine, snapshot: Snapshot, event: FSMEvent)
+  ensures var next := applyTransition(lookupAlways(machine, snapshot.value), snapshot, event);
+          settle(machine, snapshot, event, 0) ==
+            SettleResult(snapshot, true, next.None? || next.value.reused)
+{
+}
+
+// One changing `always` step consumes one unit of fuel and marks `reused` false.
+lemma SettleStep(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires fuel > 0
+  requires applyTransition(lookupAlways(machine, snapshot.value), snapshot, event).Some?
+  requires !applyTransition(lookupAlways(machine, snapshot.value), snapshot, event).value.reused
+  ensures var next := applyTransition(lookupAlways(machine, snapshot.value), snapshot, event).value;
+          var rest := settle(machine, next.snapshot, event, fuel - 1);
+          settle(machine, snapshot, event, fuel) == SettleResult(rest.snapshot, false, rest.settled)
+{
+}
+
+// Whenever settling completes, the resulting snapshot has no changing `always`
+// transition under the same event.
+lemma SettleRest(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires fuel >= 0
+  requires settle(machine, snapshot, event, fuel).settled
+  ensures var end := settle(machine, snapshot, event, fuel).snapshot;
+          var next := applyTransition(lookupAlways(machine, end.value), end, event);
+          next.None? || next.value.reused
+  decreases fuel
+{
+  var next := applyTransition(lookupAlways(machine, snapshot.value), snapshot, event);
+  if next.Some? && !next.value.reused {
+    SettleRest(machine, next.value.snapshot, event, fuel - 1);
+  }
+}
+
+// Settling a settled snapshot again returns it unchanged in zero steps.
+lemma SettleIdempotent(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int, fuel2: int)
+  requires fuel >= 0 && fuel2 >= 0
+  requires settle(machine, snapshot, event, fuel).settled
+  ensures settle(machine, settle(machine, snapshot, event, fuel).snapshot, event, fuel2) ==
+          SettleResult(settle(machine, snapshot, event, fuel).snapshot, true, true)
+{
+  SettleRest(machine, snapshot, event, fuel);
+  NoOpAlwaysSettles(machine, settle(machine, snapshot, event, fuel).snapshot, event, fuel2);
+}
+
+// Once a chain settles within `fuel1` steps, giving more fuel produces the
+// exact same result.
+lemma SettleStable(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel1: int, fuel2: int)
+  requires 0 <= fuel1 <= fuel2
+  requires settle(machine, snapshot, event, fuel1).settled
+  ensures settle(machine, snapshot, event, fuel2) == settle(machine, snapshot, event, fuel1)
+  decreases fuel1
+{
+  var next := applyTransition(lookupAlways(machine, snapshot.value), snapshot, event);
+  if next.Some? && !next.value.reused {
+    SettleStable(machine, next.value.snapshot, event, fuel1 - 1, fuel2 - 1);
+  }
+}
+
+// When fuel runs out, the returned snapshot still has a changing `always` step.
+lemma SettleOutOfFuel(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires fuel >= 0
+  requires !settle(machine, snapshot, event, fuel).settled
+  ensures var end := settle(machine, snapshot, event, fuel).snapshot;
+          var next := applyTransition(lookupAlways(machine, end.value), end, event);
+          next.Some? && !next.value.reused
+  decreases fuel
+{
+  var next := applyTransition(lookupAlways(machine, snapshot.value), snapshot, event);
+  if fuel > 0 && next.Some? && !next.value.reused {
+    SettleOutOfFuel(machine, next.value.snapshot, event, fuel - 1);
+  }
+}
+
+ghost function CycleMachine(): Machine
+{
+  Machine("a", None,
+          map["a" := StateNode(map[], map[], Some(config(TransitionConfig(Some("b"), None)))),
+              "b" := StateNode(map[], map[], Some(config(TransitionConfig(Some("a"), None))))],
+          map[])
+}
+
+// A genuine `always` cycle never settles for any finite fuel bound.
+lemma CycleNeverSettles(v: string, context: map<string, Value>, event: FSMEvent, fuel: int)
+  requires fuel >= 0
+  requires v == "a" || v == "b"
+  ensures !settle(CycleMachine(), Snapshot(v, context), event, fuel).settled
+  decreases fuel
+{
+  var m := CycleMachine();
+  var s := Snapshot(v, context);
+  if fuel > 0 {
+    var nextV := if v == "a" then "b" else "a";
+    assert applyTransition(lookupAlways(m, v), s, event) == Some(Step(Snapshot(nextV, context), false));
+    CycleNeverSettles(nextV, context, event, fuel - 1);
+  }
+}
+
+// ---- `transition` and `initialState` laws ----
+
+// An unhandled event returns the snapshot without running `always`.
+lemma MissingTransitionKeepsSnapshot(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires fuel >= 0
   requires lookupTransition(machine, snapshot.value, event.type_).None?
-  ensures transition(machine, snapshot, event) == Step(snapshot, true)
+  ensures transition(machine, snapshot, event, fuel) == SettleResult(snapshot, true, true)
 {
 }
 
-// The implementation returns the same snapshot object exactly when the next
-// snapshot equals it, for every value including NaN and -0.
-lemma ReuseIsExact(machine: Machine, snapshot: Snapshot, event: FSMEvent)
-  requires DistinctKeys(ResolvedPatch(Resolve(machine, snapshot, event)))
-  ensures transition(machine, snapshot, event).reused <==> transition(machine, snapshot, event).snapshot == snapshot
+// A transition function that returns `undefined` also skips `always`.
+lemma UndefinedFunctionSkipsAlways(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires fuel >= 0
+  requires Resolve(machine, snapshot, event).None?
+  ensures transition(machine, snapshot, event, fuel) == SettleResult(snapshot, true, true)
 {
-  var patch := ResolvedPatch(Resolve(machine, snapshot, event));
-  TransitionMeaning(machine, snapshot, event);
-  if patchChanges(snapshot.context, patch) {
-    PatchUnchangedIffOwned(snapshot.context, patch);
-    PatchKeysOwnedAfterStep(machine, snapshot, event);
+}
+
+// A handled event whose own transition changes nothing (e.g. `{}`) still runs
+// `always` with that event.
+lemma HandledNoOpRunsAlways(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires fuel >= 0
+  requires applyTransition(lookupTransition(machine, snapshot.value, event.type_), snapshot, event) == Some(Step(snapshot, true))
+  ensures transition(machine, snapshot, event, fuel) == settle(machine, snapshot, event, fuel)
+{
+}
+
+// A handled event applies its `on` transition, settles `always` with the same
+// event, and reuses the snapshot iff both stages reused it.
+lemma TransitionMeaning(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires fuel >= 0
+  requires applyTransition(lookupTransition(machine, snapshot.value, event.type_), snapshot, event).Some?
+  ensures var next := applyTransition(lookupTransition(machine, snapshot.value, event.type_), snapshot, event).value;
+          var settled := settle(machine, next.snapshot, event, fuel);
+          transition(machine, snapshot, event, fuel) ==
+            SettleResult(settled.snapshot, next.reused && settled.reused, settled.settled)
+{
+}
+
+// The initial snapshot starts from the configured context (or empty) and
+// settles `always` with `{ type: 'xstate.init' }`.
+lemma InitialContextAndSettle(machine: Machine, fuel: int)
+  requires fuel >= 0
+  ensures rawInitialState(machine).context == (if machine.context.Some? then machine.context.value else map[])
+  ensures initialState(machine, fuel) == settle(machine, rawInitialState(machine), FSMEvent("xstate.init", None), fuel)
+{
+}
+
+// ---- Closure, context keys, `run`, and prefix invariants ----
+
+lemma SettleKeepsContextKeys(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires fuel >= 0
+  ensures snapshot.context.Keys <= settle(machine, snapshot, event, fuel).snapshot.context.Keys
+  decreases fuel
+{
+  var next := applyTransition(lookupAlways(machine, snapshot.value), snapshot, event);
+  if next.Some? && !next.value.reused && fuel > 0 {
+    ApplyKeepsContextKeys(lookupAlways(machine, snapshot.value), snapshot, event);
+    SettleKeepsContextKeys(machine, next.value.snapshot, event, fuel - 1);
   }
 }
 
-// A transition that keeps the state with the given patch.
-ghost predicate KeepsStateWithPatch(machine: Machine, snapshot: Snapshot, event: FSMEvent, patch: seq<PatchEntry>)
+lemma ContextKeysKept(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires fuel >= 0
+  ensures snapshot.context.Keys <= transition(machine, snapshot, event, fuel).snapshot.context.Keys
 {
-  ResolvedTarget(Resolve(machine, snapshot, event), snapshot.value) == snapshot.value &&
-  ResolvedPatch(Resolve(machine, snapshot, event)) == patch
-}
-
-// A transition that keeps the state with a patch that changes nothing returns
-// the same snapshot object.
-lemma UnchangedPatchKeepsSnapshot(machine: Machine, snapshot: Snapshot, event: FSMEvent)
-  requires ResolvedTarget(Resolve(machine, snapshot, event), snapshot.value) == snapshot.value
-  requires !patchChanges(snapshot.context, ResolvedPatch(Resolve(machine, snapshot, event)))
-  ensures transition(machine, snapshot, event) == Step(snapshot, true)
-{
-}
-
-lemma StringTargetIsConfigTarget(target: string, context: map<string, Value>, event: FSMEvent)
-  ensures resolveTransition(Some(Transition.target(target)), context, event) ==
-          resolveTransition(Some(config(TransitionConfig(Some(target), None))), context, event)
-{
-}
-
-lemma FunctionTransitionComputes(compute: (map<string, Value>, FSMEvent) -> Option<TransitionConfig>, context: map<string, Value>, event: FSMEvent)
-  ensures resolveTransition(Some(function_(compute)), context, event) == compute(context, event)
-{
-}
-
-lemma EmptyConfigKeepsSnapshot(machine: Machine, snapshot: Snapshot, event: FSMEvent)
-  requires Resolve(machine, snapshot, event) == Some(TransitionConfig(None, None))
-  ensures transition(machine, snapshot, event) == Step(snapshot, true)
-{
-}
-
-lemma ContextKeysKept(machine: Machine, snapshot: Snapshot, event: FSMEvent)
-  ensures snapshot.context.Keys <= transition(machine, snapshot, event).snapshot.context.Keys
-{
-  TransitionMeaning(machine, snapshot, event);
-  forall k | k in snapshot.context
-    ensures k in transition(machine, snapshot, event).snapshot.context
-  {
-    MergeKeys(snapshot.context, ResolvedPatch(Resolve(machine, snapshot, event)), k);
+  var next := applyTransition(lookupTransition(machine, snapshot.value, event.type_), snapshot, event);
+  if next.Some? {
+    ApplyKeepsContextKeys(lookupTransition(machine, snapshot.value, event.type_), snapshot, event);
+    SettleKeepsContextKeys(machine, next.value.snapshot, event, fuel);
   }
 }
 
-// A patch entry for a key the context does not own always copies and gives
-// the context an own key, whatever the value: undefined, or a value equal to
-// one the context inherits, such as Object.prototype.toString.
-lemma AbsentKeyAlwaysChanges(machine: Machine, snapshot: Snapshot, event: FSMEvent, k: string, v: Value)
-  requires k !in snapshot.context
-  requires ResolvedPatch(Resolve(machine, snapshot, event)) == [PatchEntry(k, v)]
-  ensures !transition(machine, snapshot, event).reused
-  ensures transition(machine, snapshot, event).snapshot.context == snapshot.context[k := v]
+lemma RunKeepsContextKeys(machine: Machine, snapshot: Snapshot, events: seq<FSMEvent>, fuel: int)
+  requires fuel >= 0
+  ensures snapshot.context.Keys <= run(machine, snapshot, events, fuel).snapshot.context.Keys
+  decreases |events|
 {
-  var patch := [PatchEntry(k, v)];
-  assert patch[0] in patch;
-  assert patch[1..] == [];
-  ChangedPatchCopies(machine, snapshot, event);
-}
-
-// For a key the context owns, a step that keeps the state keeps the snapshot
-// exactly when the patch value is the same value under Object.is, and the
-// next context holds the patch value either way.
-lemma OwnedEntryComparesWithObjectIs(machine: Machine, snapshot: Snapshot, event: FSMEvent, k: string, v: Value)
-  requires k in snapshot.context
-  requires KeepsStateWithPatch(machine, snapshot, event, [PatchEntry(k, v)])
-  ensures transition(machine, snapshot, event).reused <==> sameValue(v, snapshot.context[k])
-  ensures transition(machine, snapshot, event).snapshot.context == snapshot.context[k := v]
-{
-  var patch := [PatchEntry(k, v)];
-  assert patch[0] in patch;
-  assert patch[1..] == [];
-  sameValue_ensures(v, snapshot.context[k]);
-  sameValue_ensures(snapshot.context[k], v);
-  if sameValue(v, snapshot.context[k]) {
-    assert !patchChanges(snapshot.context, patch);
-    UnchangedPatchKeepsSnapshot(machine, snapshot, event);
-    assert snapshot.context[k := v] == snapshot.context;
-  } else {
-    assert patchChanges(snapshot.context, patch);
-    ChangedPatchCopies(machine, snapshot, event);
+  if |events| > 0 {
+    ContextKeysKept(machine, snapshot, events[0], fuel);
+    var step := transition(machine, snapshot, events[0], fuel);
+    if step.settled {
+      RunKeepsContextKeys(machine, step.snapshot, events[1..], fuel);
+    }
   }
-}
-
-// -0 over an own 0 copies, and the context then holds -0.
-lemma NegativeZeroOverZeroCopies(machine: Machine, snapshot: Snapshot, event: FSMEvent, k: string)
-  requires k in snapshot.context && snapshot.context[k] == Value.integer(0)
-  requires KeepsStateWithPatch(machine, snapshot, event, [PatchEntry(k, Value.negativeZero)])
-  ensures !transition(machine, snapshot, event).reused
-  ensures k in transition(machine, snapshot, event).snapshot.context &&
-          transition(machine, snapshot, event).snapshot.context[k] == Value.negativeZero
-{
-  OwnedEntryComparesWithObjectIs(machine, snapshot, event, k, Value.negativeZero);
-}
-
-// NaN over an own NaN keeps the snapshot.
-lemma NotANumberOverOwnNotANumberKeepsSnapshot(machine: Machine, snapshot: Snapshot, event: FSMEvent, k: string)
-  requires k in snapshot.context && snapshot.context[k] == Value.notANumber
-  requires KeepsStateWithPatch(machine, snapshot, event, [PatchEntry(k, Value.notANumber)])
-  ensures transition(machine, snapshot, event) == Step(snapshot, true)
-{
-  OwnedEntryComparesWithObjectIs(machine, snapshot, event, k, Value.notANumber);
-  transition_ensures(machine, snapshot, event);
 }
 
 ghost predicate TargetDeclared(machine: Machine, config: TransitionConfig)
@@ -527,90 +872,199 @@ ghost predicate TargetDeclared(machine: Machine, config: TransitionConfig)
 ghost predicate TransitionTargetsDeclared(machine: Machine, t: Transition)
 {
   match t
-  case target(s) => Declared(machine, s)
   case config(c) => TargetDeclared(machine, c)
   case function_(f) => forall c, e :: f(c, e).Some? ==> TargetDeclared(machine, f(c, e).value)
 }
 
-// The initial value is declared, and so is every target of every transition
-// in the own table of every own state.
+// The initial value is declared, and so is every target of every `on` and
+// `always` transition on every own state.
 ghost predicate TargetsDeclared(machine: Machine)
 {
   Declared(machine, machine.initial) &&
-  forall v, t :: v in machine.states && t in machine.states[v].on.Values ==> TransitionTargetsDeclared(machine, t)
+  (forall v, t :: v in machine.states && t in machine.states[v].on.Values ==> TransitionTargetsDeclared(machine, t)) &&
+  (forall v :: v in machine.states && machine.states[v].always.Some? ==> TransitionTargetsDeclared(machine, machine.states[v].always.value))
 }
 
-lemma StepStaysDeclared(machine: Machine, snapshot: Snapshot, event: FSMEvent)
+lemma SettleStaysDeclared(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires fuel >= 0
   requires TargetsDeclared(machine)
   requires Declared(machine, snapshot.value)
-  ensures Declared(machine, transition(machine, snapshot, event).snapshot.value)
+  ensures Declared(machine, settle(machine, snapshot, event, fuel).snapshot.value)
+  decreases fuel
 {
-  TransitionMeaning(machine, snapshot, event);
-  DeclaredStateLookup(machine, snapshot.value, event.type_);
-  var t := lookupTransition(machine, snapshot.value, event.type_);
-  if t.Some? {
-    assert t.value in machine.states[snapshot.value].on.Values;
+  DeclaredStateAlwaysLookup(machine, snapshot.value);
+  var t := lookupAlways(machine, snapshot.value);
+  var next := applyTransition(t, snapshot, event);
+  if next.Some? && !next.value.reused && fuel > 0 {
+    ApplyTransitionMeaning(t, snapshot, event);
+    assert t.Some?;
     assert TransitionTargetsDeclared(machine, t.value);
     match t.value {
-      case target(s) =>
       case config(c) =>
       case function_(f) =>
         assert f(snapshot.context, event).Some? ==> TargetDeclared(machine, f(snapshot.context, event).value);
     }
+    SettleStaysDeclared(machine, next.value.snapshot, event, fuel - 1);
   }
 }
 
-lemma RunStaysDeclared(machine: Machine, snapshot: Snapshot, events: seq<FSMEvent>)
+lemma InitialDeclared(machine: Machine, fuel: int)
+  requires fuel >= 0
+  requires TargetsDeclared(machine)
+  ensures Declared(machine, initialState(machine, fuel).snapshot.value)
+{
+  SettleStaysDeclared(machine, rawInitialState(machine), FSMEvent("xstate.init", None), fuel);
+}
+
+lemma StepStaysDeclared(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires fuel >= 0
   requires TargetsDeclared(machine)
   requires Declared(machine, snapshot.value)
-  ensures Declared(machine, run(machine, snapshot, events).value)
+  ensures Declared(machine, transition(machine, snapshot, event, fuel).snapshot.value)
+{
+  DeclaredStateLookup(machine, snapshot.value, event.type_);
+  var t := lookupTransition(machine, snapshot.value, event.type_);
+  var next := applyTransition(t, snapshot, event);
+  if next.Some? {
+    ApplyTransitionMeaning(t, snapshot, event);
+    assert t.Some? && t.value in machine.states[snapshot.value].on.Values;
+    assert TransitionTargetsDeclared(machine, t.value);
+    match t.value {
+      case config(c) =>
+      case function_(f) =>
+        assert f(snapshot.context, event).Some? ==> TargetDeclared(machine, f(snapshot.context, event).value);
+    }
+    SettleStaysDeclared(machine, next.value.snapshot, event, fuel);
+  }
+}
+
+lemma RunStaysDeclared(machine: Machine, snapshot: Snapshot, events: seq<FSMEvent>, fuel: int)
+  requires fuel >= 0
+  requires TargetsDeclared(machine)
+  requires Declared(machine, snapshot.value)
+  ensures Declared(machine, run(machine, snapshot, events, fuel).snapshot.value)
   decreases |events|
 {
   if |events| > 0 {
-    StepStaysDeclared(machine, snapshot, events[0]);
-    RunStaysDeclared(machine, transition(machine, snapshot, events[0]).snapshot, events[1..]);
+    StepStaysDeclared(machine, snapshot, events[0], fuel);
+    var step := transition(machine, snapshot, events[0], fuel);
+    if step.settled {
+      RunStaysDeclared(machine, step.snapshot, events[1..], fuel);
+    }
   }
 }
 
-// The initial snapshot uses the configured context, or an empty one.
-lemma InitialContext(machine: Machine)
-  ensures initialState(machine).context == (if machine.context.Some? then machine.context.value else map[])
-{
-}
-
-lemma InitialDeclared(machine: Machine)
-  requires TargetsDeclared(machine)
-  ensures Declared(machine, initialState(machine).value)
-{
-}
-
 // Running one event is one transition.
-lemma RunSingleEvent(machine: Machine, snapshot: Snapshot, event: FSMEvent)
-  ensures run(machine, snapshot, [event]) == transition(machine, snapshot, event).snapshot
+lemma RunSingleEvent(machine: Machine, snapshot: Snapshot, event: FSMEvent, fuel: int)
+  requires fuel >= 0
+  ensures run(machine, snapshot, [event], fuel) ==
+          RunResult(transition(machine, snapshot, event, fuel).snapshot,
+                    transition(machine, snapshot, event, fuel).settled)
 {
   assert [event][1..] == [];
 }
 
-lemma RunConcat(machine: Machine, snapshot: Snapshot, first: seq<FSMEvent>, second: seq<FSMEvent>)
-  ensures run(machine, snapshot, first + second) == run(machine, run(machine, snapshot, first), second)
+lemma RunConcat(machine: Machine, snapshot: Snapshot, first: seq<FSMEvent>, second: seq<FSMEvent>, fuel: int)
+  requires fuel >= 0
+  requires run(machine, snapshot, first, fuel).settled
+  ensures run(machine, snapshot, first + second, fuel) ==
+          run(machine, run(machine, snapshot, first, fuel).snapshot, second, fuel)
   decreases |first|
 {
   if |first| > 0 {
     assert (first + second)[1..] == first[1..] + second;
-    RunConcat(machine, transition(machine, snapshot, first[0]).snapshot, first[1..], second);
+    var step := transition(machine, snapshot, first[0], fuel);
+    RunConcat(machine, step.snapshot, first[1..], second, fuel);
   } else {
     assert first + second == second;
   }
 }
 
-lemma RunKeepsContextKeys(machine: Machine, snapshot: Snapshot, events: seq<FSMEvent>)
-  ensures snapshot.context.Keys <= run(machine, snapshot, events).context.Keys
+lemma InvariantAtEveryPrefix(m: Machine, events: seq<FSMEvent>, fuel: int, inv: Snapshot -> bool, allowed: (Snapshot, FSMEvent) -> bool)
+  requires fuel >= 0
+  requires initialState(m, fuel).settled
+  requires inv(initialState(m, fuel).snapshot)
+  requires forall s, e :: inv(s) && allowed(s, e) ==> transition(m, s, e, fuel).settled && inv(transition(m, s, e, fuel).snapshot)
+  requires forall i :: 0 <= i < |events| ==> allowed(run(m, initialState(m, fuel).snapshot, events[..i], fuel).snapshot, events[i])
+  ensures forall k :: 0 <= k <= |events| ==> run(m, initialState(m, fuel).snapshot, events[..k], fuel).settled && inv(run(m, initialState(m, fuel).snapshot, events[..k], fuel).snapshot)
   decreases |events|
 {
+  var init := initialState(m, fuel).snapshot;
   if |events| > 0 {
-    ContextKeysKept(machine, snapshot, events[0]);
-    RunKeepsContextKeys(machine, transition(machine, snapshot, events[0]).snapshot, events[1..]);
+    var n := |events| - 1;
+    var earlier := events[..n];
+    forall i | 0 <= i < n
+      ensures allowed(run(m, init, earlier[..i], fuel).snapshot, earlier[i])
+    {
+      assert earlier[..i] == events[..i];
+    }
+    InvariantAtEveryPrefix(m, earlier, fuel, inv, allowed);
+    forall k | 0 <= k <= |events|
+      ensures run(m, init, events[..k], fuel).settled && inv(run(m, init, events[..k], fuel).snapshot)
+    {
+      if k <= n {
+        assert earlier[..k] == events[..k];
+      } else {
+        assert earlier[..n] == earlier;
+        var prefix := run(m, init, earlier, fuel);
+        assert prefix.settled && inv(prefix.snapshot) && allowed(prefix.snapshot, events[n]);
+        assert events[..k] == earlier + [events[n]];
+        RunConcat(m, init, earlier, [events[n]], fuel);
+        RunSingleEvent(m, prefix.snapshot, events[n], fuel);
+      }
+    }
   }
+}
+
+ghost function AtmMachine(): Machine
+{
+  var login := config(TransitionConfig(Some("banking"), Some([PatchEntry(":authorized", Value.opaque_(1))])));
+  var expire := config(TransitionConfig(Some("idle"), Some([PatchEntry(":authorized", Value.opaque_(0))])));
+  Machine("idle", Some(map[":authorized" := Value.opaque_(0)]),
+          map["idle" := StateNode(map["LOGIN" := login], map[], None),
+              "banking" := StateNode(map["EXPIRE" := expire], map[], None)], map[])
+}
+
+ghost predicate BankingIsAuthorized(s: Snapshot)
+{
+  s.value == "banking" ==> ":authorized" in s.context && s.context[":authorized"] == Value.opaque_(1)
+}
+
+lemma AtmPreservesAuthorization(s: Snapshot, e: FSMEvent, fuel: int)
+  requires fuel >= 0
+  requires BankingIsAuthorized(s)
+  ensures transition(AtmMachine(), s, e, fuel).settled
+  ensures BankingIsAuthorized(transition(AtmMachine(), s, e, fuel).snapshot)
+{
+  var m := AtmMachine();
+  if s.value == "idle" && e.type_ == "LOGIN" {
+    var sel := lookupTransition(m, s.value, e.type_);
+    ApplyTransitionMeaning(sel, s, e);
+    PatchKeysOwnedAfterApply(sel, s, e);
+    TransitionMeaning(m, s, e, fuel);
+    NoAlwaysSettlesImmediately(m, applyTransition(sel, s, e).value.snapshot, e, fuel);
+  } else if s.value == "banking" && e.type_ == "EXPIRE" {
+    var sel := lookupTransition(m, s.value, e.type_);
+    ApplyTransitionMeaning(sel, s, e);
+    TransitionMeaning(m, s, e, fuel);
+    NoAlwaysSettlesImmediately(m, applyTransition(sel, s, e).value.snapshot, e, fuel);
+  } else {
+    MissingTransitionKeepsSnapshot(m, s, e, fuel);
+  }
+}
+
+lemma AtmAuthorizedAtEveryPrefix(events: seq<FSMEvent>, fuel: int)
+  requires fuel >= 0
+  ensures forall k :: 0 <= k <= |events| ==> run(AtmMachine(), initialState(AtmMachine(), fuel).snapshot, events[..k], fuel).settled && BankingIsAuthorized(run(AtmMachine(), initialState(AtmMachine(), fuel).snapshot, events[..k], fuel).snapshot)
+{
+  var m := AtmMachine();
+  NoAlwaysSettlesImmediately(m, rawInitialState(m), FSMEvent("xstate.init", None), fuel);
+  forall s, e | BankingIsAuthorized(s)
+    ensures transition(m, s, e, fuel).settled && BankingIsAuthorized(transition(m, s, e, fuel).snapshot)
+  {
+    AtmPreservesAuthorization(s, e, fuel);
+  }
+  InvariantAtEveryPrefix(m, events, fuel, BankingIsAuthorized, (s, e) => true);
 }
 
 // ---- Witnesses: every law's preconditions can hold ----
@@ -624,9 +1078,9 @@ lemma RunKeepsContextKeys(machine: Machine, snapshot: Snapshot, events: seq<FSME
 ghost function WitnessMachine(go: Transition): Machine
 {
   Machine("idle", None,
-          map["idle" := StateNode(map["go" := go], map["back" := Transition.target("busy")]),
-              "busy" := StateNode(map[], map[])],
-          map["away" := StateNode(map["go" := Transition.target("idle")], map[])])
+          map["idle" := StateNode(map["go" := go], map["back" := config(TransitionConfig(Some("busy"), None))], None),
+              "busy" := StateNode(map[], map[], None)],
+          map["away" := StateNode(map["go" := config(TransitionConfig(Some("idle"), None))], map[], Some(config(TransitionConfig(Some("idle"), None))))])
 }
 
 // A transition that keeps the state and applies the patch.
@@ -659,48 +1113,32 @@ lemma MergeIdempotentWitness()
                   [PatchEntry("n", Value.notANumber), PatchEntry("z", Value.negativeZero)]);
 }
 
-// The patch changes `x` from 1 to 2.
 lemma ChangedPatchCopiesWitness()
 {
   var entry := PatchEntry("x", Value.integer(2));
-  var machine := WitnessMachine(PatchTransition([entry]));
+  var sel := Some(PatchTransition([entry]));
   var snapshot := Snapshot("idle", map["x" := Value.integer(1)]);
   assert entry in [entry] && !entryUnchanged(snapshot.context, entry);
-  ChangedPatchCopies(machine, snapshot, FSMEvent("go", 0));
+  ChangedPatchCopies(sel, snapshot, FSMEvent("go", Some(0)));
 }
 
-lemma PatchKeysOwnedAfterStepWitness()
+lemma ApplyContextIsFullMergeWitness()
 {
-  var machine := WitnessMachine(PatchTransition([PatchEntry("x", Value.integer(2)), PatchEntry("y", Value.undefinedValue)]));
-  PatchKeysOwnedAfterStep(machine, Snapshot("idle", map["x" := Value.integer(1)]), FSMEvent("go", 0));
+  var sel := Some(PatchTransition([PatchEntry("x", Value.integer(2))]));
+  ApplyContextIsFullMerge(sel, Snapshot("idle", map["x" := Value.integer(1)]), FSMEvent("go", Some(0)));
 }
 
-lemma DeclaredStateLookupWitness()
+lemma PatchKeysOwnedAfterApplyWitness()
 {
-  DeclaredStateLookup(WitnessMachine(Transition.target("busy")), "idle", "go");
+  var sel := Some(PatchTransition([PatchEntry("x", Value.integer(2)), PatchEntry("y", Value.undefinedValue)]));
+  PatchKeysOwnedAfterApply(sel, Snapshot("idle", map["x" := Value.integer(1)]), FSMEvent("go", Some(0)));
 }
 
-lemma InheritedStateHasNoTransitionsWitness()
-{
-  InheritedStateHasNoTransitions(WitnessMachine(Transition.target("busy")), "away", "go");
-}
-
-lemma InheritedEventIsNotFoundWitness()
-{
-  InheritedEventIsNotFound(WitnessMachine(Transition.target("busy")), "idle", "back");
-}
-
-lemma MissingTransitionKeepsSnapshotWitness()
-{
-  MissingTransitionKeepsSnapshot(WitnessMachine(Transition.target("busy")), Snapshot("idle", map[]), FSMEvent("back", 0));
-}
-
-// One step reuses the snapshot and one copies it.
-lemma ReuseIsExactWitness()
+lemma ApplyReuseIsExactWitness()
 {
   var snapshot := Snapshot("idle", map["n" := Value.notANumber]);
-  ReuseIsExact(WitnessMachine(PatchTransition([PatchEntry("n", Value.notANumber)])), snapshot, FSMEvent("go", 0));
-  ReuseIsExact(WitnessMachine(PatchTransition([PatchEntry("n", Value.integer(0))])), snapshot, FSMEvent("go", 0));
+  ApplyReuseIsExact(Some(PatchTransition([PatchEntry("n", Value.notANumber)])), snapshot, FSMEvent("go", Some(0)));
+  ApplyReuseIsExact(Some(PatchTransition([PatchEntry("n", Value.integer(0))])), snapshot, FSMEvent("go", Some(0)));
 }
 
 lemma UnchangedPatchKeepsSnapshotWitness()
@@ -708,162 +1146,265 @@ lemma UnchangedPatchKeepsSnapshotWitness()
   var entry := PatchEntry("n", Value.notANumber);
   var snapshot := Snapshot("idle", map["n" := Value.notANumber]);
   assert forall e :: e in [entry] ==> e == entry;
-  UnchangedPatchKeepsSnapshot(WitnessMachine(PatchTransition([entry])), snapshot, FSMEvent("go", 0));
+  UnchangedPatchKeepsSnapshot(Some(PatchTransition([entry])), snapshot, FSMEvent("go", Some(0)));
 }
 
-// A function that returns `{}`.
 lemma EmptyConfigKeepsSnapshotWitness()
 {
-  var machine := WitnessMachine(function_((c: map<string, Value>, e: FSMEvent) => Some(TransitionConfig(None, None))));
-  EmptyConfigKeepsSnapshot(machine, Snapshot("idle", map[]), FSMEvent("go", 0));
+  var sel := Some(function_((c: map<string, Value>, e: FSMEvent) => Some(TransitionConfig(None, None))));
+  EmptyConfigKeepsSnapshot(sel, Snapshot("idle", map[]), FSMEvent("go", Some(0)));
+}
+
+lemma ApplyKeepsContextKeysWitness()
+{
+  var sel := Some(PatchTransition([PatchEntry("y", Value.integer(2))]));
+  ApplyKeepsContextKeys(sel, Snapshot("idle", map["x" := Value.integer(1)]), FSMEvent("go", Some(0)));
 }
 
 lemma AbsentKeyAlwaysChangesWitness()
 {
-  var machine := WitnessMachine(PatchTransition([PatchEntry("y", Value.undefinedValue)]));
-  AbsentKeyAlwaysChanges(machine, Snapshot("idle", map["x" := Value.integer(1)]), FSMEvent("go", 0), "y", Value.undefinedValue);
+  var sel := Some(PatchTransition([PatchEntry("y", Value.undefinedValue)]));
+  AbsentKeyAlwaysChanges(sel, Snapshot("idle", map["x" := Value.integer(1)]), FSMEvent("go", Some(0)), "y", Value.undefinedValue);
 }
 
 lemma OwnedEntryComparesWithObjectIsWitness()
 {
-  var machine := WitnessMachine(PatchTransition([PatchEntry("x", Value.opaque_(2))]));
-  OwnedEntryComparesWithObjectIs(machine, Snapshot("idle", map["x" := Value.opaque_(1)]), FSMEvent("go", 0), "x", Value.opaque_(2));
+  var sel := Some(PatchTransition([PatchEntry("x", Value.opaque_(2))]));
+  OwnedEntryComparesWithObjectIs(sel, Snapshot("idle", map["x" := Value.opaque_(1)]), FSMEvent("go", Some(0)), "x", Value.opaque_(2));
 }
 
 lemma NegativeZeroOverZeroCopiesWitness()
 {
-  var machine := WitnessMachine(PatchTransition([PatchEntry("z", Value.negativeZero)]));
-  NegativeZeroOverZeroCopies(machine, Snapshot("idle", map["z" := Value.integer(0)]), FSMEvent("go", 0), "z");
+  var sel := Some(PatchTransition([PatchEntry("z", Value.negativeZero)]));
+  NegativeZeroOverZeroCopies(sel, Snapshot("idle", map["z" := Value.integer(0)]), FSMEvent("go", Some(0)), "z");
 }
 
 lemma NotANumberOverOwnNotANumberKeepsSnapshotWitness()
 {
-  var machine := WitnessMachine(PatchTransition([PatchEntry("n", Value.notANumber)]));
-  NotANumberOverOwnNotANumberKeepsSnapshot(machine, Snapshot("idle", map["n" := Value.notANumber]), FSMEvent("go", 0), "n");
+  var sel := Some(PatchTransition([PatchEntry("n", Value.notANumber)]));
+  NotANumberOverOwnNotANumberKeepsSnapshot(sel, Snapshot("idle", map["n" := Value.notANumber]), FSMEvent("go", Some(0)), "n");
 }
 
-// `go` is a function that targets `busy`, so every target is declared.
-lemma StepStaysDeclaredWitness()
+lemma DeclaredStateLookupWitness()
 {
-  var machine := WitnessMachine(function_((c: map<string, Value>, e: FSMEvent) => Some(TransitionConfig(Some("busy"), None))));
-  assert machine.states["idle"].on.Values == {machine.states["idle"].on["go"]};
-  StepStaysDeclared(machine, Snapshot("idle", map[]), FSMEvent("go", 0));
+  DeclaredStateLookup(WitnessMachine(config(TransitionConfig(Some("busy"), None))), "idle", "go");
 }
 
-lemma RunStaysDeclaredWitness()
+lemma DeclaredStateAlwaysLookupWitness()
 {
-  var machine := WitnessMachine(Transition.target("busy"));
-  assert machine.states["idle"].on.Values == {machine.states["idle"].on["go"]};
-  RunStaysDeclared(machine, Snapshot("idle", map[]), [FSMEvent("go", 0), FSMEvent("back", 0), FSMEvent("go", 0)]);
+  DeclaredStateAlwaysLookup(WitnessMachine(config(TransitionConfig(Some("busy"), None))), "idle");
+}
+
+lemma InheritedStateHasNoTransitionsWitness()
+{
+  InheritedStateHasNoTransitions(WitnessMachine(config(TransitionConfig(Some("busy"), None))), "away", "go");
+}
+
+lemma InheritedStateHasNoAlwaysWitness()
+{
+  InheritedStateHasNoAlways(WitnessMachine(config(TransitionConfig(Some("busy"), None))), "away");
+}
+
+lemma InheritedEventIsNotFoundWitness()
+{
+  InheritedEventIsNotFound(WitnessMachine(config(TransitionConfig(Some("busy"), None))), "idle", "back");
+}
+
+lemma InheritedStatesIgnoredWitness()
+{
+  InheritedStatesIgnored(WitnessMachine(config(TransitionConfig(Some("busy"), None))), Snapshot("idle", map[]), FSMEvent("go", Some(0)), 4, map[]);
+}
+
+lemma NoAlwaysSettlesImmediatelyWitness()
+{
+  NoAlwaysSettlesImmediately(WitnessMachine(config(TransitionConfig(Some("busy"), None))), Snapshot("idle", map[]), FSMEvent("go", Some(0)), 4);
+}
+
+lemma NoOpAlwaysSettlesWitness()
+{
+  var m := Machine("idle", None,
+                   map["idle" := StateNode(map[], map[], Some(config(TransitionConfig(None, None))))],
+                   map[]);
+  NoOpAlwaysSettles(m, Snapshot("idle", map[]), FSMEvent("xstate.init", None), 0);
+}
+
+lemma SettleStepWitness()
+{
+  var m := Machine("a", None,
+                   map["a" := StateNode(map[], map[], Some(config(TransitionConfig(Some("b"), None)))),
+                       "b" := StateNode(map[], map[], None)],
+                   map[]);
+  SettleStep(m, Snapshot("a", map[]), FSMEvent("xstate.init", None), 2);
+}
+
+lemma SettleRestWitness()
+{
+  var m := Machine("a", None,
+                   map["a" := StateNode(map[], map[], Some(config(TransitionConfig(Some("b"), None)))),
+                       "b" := StateNode(map[], map[], None)],
+                   map[]);
+  SettleRest(m, Snapshot("a", map[]), FSMEvent("xstate.init", None), 2);
+}
+
+lemma SettleIdempotentWitness()
+{
+  var m := Machine("a", None,
+                   map["a" := StateNode(map[], map[], Some(config(TransitionConfig(Some("b"), None)))),
+                       "b" := StateNode(map[], map[], None)],
+                   map[]);
+  SettleIdempotent(m, Snapshot("a", map[]), FSMEvent("xstate.init", None), 2, 2);
+}
+
+lemma SettleStableWitness()
+{
+  var m := Machine("a", None,
+                   map["a" := StateNode(map[], map[], Some(config(TransitionConfig(Some("b"), None)))),
+                       "b" := StateNode(map[], map[], None)],
+                   map[]);
+  SettleStable(m, Snapshot("a", map[]), FSMEvent("xstate.init", None), 1, 5);
+}
+
+lemma SettleOutOfFuelWitness()
+{
+  SettleOutOfFuel(CycleMachine(), Snapshot("a", map[]), FSMEvent("xstate.init", None), 1);
+}
+
+lemma CycleNeverSettlesWitness()
+{
+  CycleNeverSettles("a", map[], FSMEvent("xstate.init", None), 3);
+}
+
+lemma MissingTransitionKeepsSnapshotWitness()
+{
+  var m := Machine("idle", None,
+                   map["idle" := StateNode(map[], map[], Some(config(TransitionConfig(Some("busy"), None)))),
+                       "busy" := StateNode(map[], map[], None)],
+                   map[]);
+  MissingTransitionKeepsSnapshot(m, Snapshot("idle", map[]), FSMEvent("back", Some(0)), 2);
+}
+
+lemma UndefinedFunctionSkipsAlwaysWitness()
+{
+  var m := Machine("idle", None,
+                   map["idle" := StateNode(map["go" := function_((c: map<string, Value>, e: FSMEvent) => None)], map[], Some(config(TransitionConfig(Some("busy"), None)))),
+                       "busy" := StateNode(map[], map[], None)],
+                   map[]);
+  UndefinedFunctionSkipsAlways(m, Snapshot("idle", map[]), FSMEvent("go", Some(0)), 2);
+}
+
+lemma HandledNoOpRunsAlwaysWitness()
+{
+  var m := Machine("idle", None,
+                   map["idle" := StateNode(map["go" := config(TransitionConfig(None, None))], map[], Some(config(TransitionConfig(Some("busy"), None)))),
+                       "busy" := StateNode(map[], map[], None)],
+                   map[]);
+  HandledNoOpRunsAlways(m, Snapshot("idle", map[]), FSMEvent("go", Some(0)), 2);
+}
+
+lemma TransitionMeaningWitness()
+{
+  TransitionMeaning(WitnessMachine(config(TransitionConfig(Some("busy"), None))), Snapshot("idle", map[]), FSMEvent("go", Some(0)), 2);
+}
+
+lemma InitialContextAndSettleWitness()
+{
+  InitialContextAndSettle(WitnessMachine(config(TransitionConfig(Some("busy"), None))), 2);
+}
+
+lemma SettleKeepsContextKeysWitness()
+{
+  SettleKeepsContextKeys(WitnessMachine(config(TransitionConfig(Some("busy"), None))), Snapshot("idle", map["x" := Value.integer(1)]), FSMEvent("go", Some(0)), 2);
+}
+
+lemma ContextKeysKeptWitness()
+{
+  ContextKeysKept(WitnessMachine(config(TransitionConfig(Some("busy"), None))), Snapshot("idle", map["x" := Value.integer(1)]), FSMEvent("go", Some(0)), 2);
+}
+
+lemma RunKeepsContextKeysWitness()
+{
+  RunKeepsContextKeys(WitnessMachine(config(TransitionConfig(Some("busy"), None))), Snapshot("idle", map["x" := Value.integer(1)]), [FSMEvent("go", Some(0))], 2);
+}
+
+lemma SettleStaysDeclaredWitness()
+{
+  var m := Machine("a", None,
+                   map["a" := StateNode(map[], map[], Some(config(TransitionConfig(Some("b"), None)))),
+                       "b" := StateNode(map[], map[], None)],
+                   map[]);
+  SettleStaysDeclared(m, Snapshot("a", map[]), FSMEvent("xstate.init", None), 2);
 }
 
 lemma InitialDeclaredWitness()
 {
-  var machine := WitnessMachine(Transition.target("busy"));
+  var m := Machine("a", None,
+                   map["a" := StateNode(map[], map[], Some(config(TransitionConfig(Some("b"), None)))),
+                       "b" := StateNode(map[], map[], None)],
+                   map[]);
+  InitialDeclared(m, 2);
+}
+
+lemma StepStaysDeclaredWitness()
+{
+  var machine := WitnessMachine(function_((c: map<string, Value>, e: FSMEvent) => Some(TransitionConfig(Some("busy"), None))));
   assert machine.states["idle"].on.Values == {machine.states["idle"].on["go"]};
-  InitialDeclared(machine);
+  StepStaysDeclared(machine, Snapshot("idle", map[]), FSMEvent("go", Some(0)), 2);
 }
 
-lemma InvariantAtEveryPrefix(m: Machine, events: seq<FSMEvent>, inv: Snapshot -> bool, allowed: (Snapshot, FSMEvent) -> bool)
-  requires inv(initialState(m))
-  requires forall s, e :: inv(s) && allowed(s, e) ==> inv(transition(m, s, e).snapshot)
-  requires forall i :: 0 <= i < |events| ==> allowed(run(m, initialState(m), events[..i]), events[i])
-  ensures forall k :: 0 <= k <= |events| ==> inv(run(m, initialState(m), events[..k]))
-  decreases |events|
+lemma RunStaysDeclaredWitness()
 {
-  if |events| > 0 {
-    var n := |events|-1;
-    var earlier := events[..n];
-    forall i | 0 <= i < n
-      ensures allowed(run(m, initialState(m), earlier[..i]), earlier[i])
-    {
-      assert earlier[..i] == events[..i];
-    }
-    InvariantAtEveryPrefix(m, earlier, inv, allowed);
-    forall k | 0 <= k <= |events|
-      ensures inv(run(m, initialState(m), events[..k]))
-    {
-      if k <= n {
-        assert earlier[..k] == events[..k];
-      } else {
-        assert earlier[..n] == earlier;
-        var s := run(m, initialState(m), earlier);
-        assert inv(s) && allowed(s, events[n]);
-        assert events[..k] == earlier + [events[n]];
-        RunConcat(m, initialState(m), earlier, [events[n]]);
-        RunSingleEvent(m, s, events[n]);
-      }
-    }
-  }
+  var machine := WitnessMachine(config(TransitionConfig(Some("busy"), None)));
+  assert machine.states["idle"].on.Values == {machine.states["idle"].on["go"]};
+  RunStaysDeclared(machine, Snapshot("idle", map[]), [FSMEvent("go", Some(0)), FSMEvent("back", Some(0)), FSMEvent("go", Some(0))], 2);
 }
 
-ghost function AtmMachine(): Machine
+lemma RunSingleEventWitness()
 {
-  var login := config(TransitionConfig(Some("banking"), Some([PatchEntry(":authorized", Value.opaque_(1))])));
-  var expire := config(TransitionConfig(Some("idle"), Some([PatchEntry(":authorized", Value.opaque_(0))])));
-  Machine("idle", Some(map[":authorized" := Value.opaque_(0)]),
-          map["idle" := StateNode(map["LOGIN" := login], map[]),
-              "banking" := StateNode(map["EXPIRE" := expire], map[])], map[])
+  RunSingleEvent(WitnessMachine(config(TransitionConfig(Some("busy"), None))), Snapshot("idle", map[]), FSMEvent("go", Some(0)), 2);
 }
 
-ghost predicate BankingIsAuthorized(s: Snapshot)
+lemma RunConcatWitness()
 {
-  s.value == "banking" ==> ":authorized" in s.context && s.context[":authorized"] == Value.opaque_(1)
-}
-
-lemma AtmPreservesAuthorization(s: Snapshot, e: FSMEvent)
-  requires BankingIsAuthorized(s)
-  ensures BankingIsAuthorized(transition(AtmMachine(), s, e).snapshot)
-{
-  var m := AtmMachine();
-  if s.value == "idle" && e.type_ == "LOGIN" {
-    TransitionMeaning(m, s, e);
-    PatchKeysOwnedAfterStep(m, s, e);
-  } else if s.value == "banking" && e.type_ == "EXPIRE" {
-    TransitionMeaning(m, s, e);
-  } else {
-    MissingTransitionKeepsSnapshot(m, s, e);
-  }
-}
-
-lemma AtmAuthorizedAtEveryPrefix(events: seq<FSMEvent>)
-  ensures forall k :: 0 <= k <= |events| ==> BankingIsAuthorized(run(AtmMachine(), initialState(AtmMachine()), events[..k]))
-{
-  forall s, e | BankingIsAuthorized(s)
-    ensures BankingIsAuthorized(transition(AtmMachine(), s, e).snapshot)
-  {
-    AtmPreservesAuthorization(s, e);
-  }
-  InvariantAtEveryPrefix(AtmMachine(), events, BankingIsAuthorized, (s, e) => true);
-}
-
-lemma AtmPreservesAuthorizationWitness()
-{
-  var m := AtmMachine();
-  var s := initialState(m);
-  var login := FSMEvent("LOGIN", 0);
-  var expire := FSMEvent("EXPIRE", 0);
-  var ignored := FSMEvent("IGNORED", 0);
-  assert s.value == "idle" && ":authorized" in s.context && s.context[":authorized"] == Value.opaque_(0);
-  AtmPreservesAuthorization(s, login);
-  var banking := transition(m, s, login).snapshot;
-  assert banking.value == "banking" && BankingIsAuthorized(banking);
-  MissingTransitionKeepsSnapshot(m, banking, ignored);
-  AtmPreservesAuthorization(banking, expire);
-  TransitionMeaning(m, banking, expire);
-  PatchKeysOwnedAfterStep(m, banking, expire);
-  var expired := transition(m, banking, expire).snapshot;
-  assert expired.value == "idle" && ":authorized" in expired.context && expired.context[":authorized"] == Value.opaque_(0);
+  var machine := WitnessMachine(config(TransitionConfig(Some("busy"), None)));
+  RunConcat(machine, Snapshot("idle", map[]), [FSMEvent("go", Some(0))], [FSMEvent("back", Some(0))], 2);
 }
 
 lemma InvariantAtEveryPrefixWitness()
 {
   var m := AtmMachine();
-  var es := [FSMEvent("LOGIN", 0), FSMEvent("IGNORED", 0), FSMEvent("EXPIRE", 0)];
+  var es := [FSMEvent("LOGIN", Some(0)), FSMEvent("IGNORED", Some(0)), FSMEvent("EXPIRE", Some(0))];
+  NoAlwaysSettlesImmediately(m, rawInitialState(m), FSMEvent("xstate.init", None), 2);
   forall s, e | BankingIsAuthorized(s)
-    ensures BankingIsAuthorized(transition(m, s, e).snapshot)
+    ensures transition(m, s, e, 2).settled && BankingIsAuthorized(transition(m, s, e, 2).snapshot)
   {
-    AtmPreservesAuthorization(s, e);
+    AtmPreservesAuthorization(s, e, 2);
   }
-  InvariantAtEveryPrefix(m, es, BankingIsAuthorized, (s, e) => true);
+  InvariantAtEveryPrefix(m, es, 2, BankingIsAuthorized, (s, e) => true);
+}
+
+lemma AtmPreservesAuthorizationWitness()
+{
+  var m := AtmMachine();
+  var s := initialState(m, 2).snapshot;
+  var login := FSMEvent("LOGIN", Some(0));
+  var expire := FSMEvent("EXPIRE", Some(0));
+  var ignored := FSMEvent("IGNORED", Some(0));
+  assert s.value == "idle" && ":authorized" in s.context && s.context[":authorized"] == Value.opaque_(0);
+  AtmPreservesAuthorization(s, login, 2);
+  var banking := transition(m, s, login, 2).snapshot;
+  assert banking.value == "banking" && BankingIsAuthorized(banking);
+  MissingTransitionKeepsSnapshot(m, banking, ignored, 2);
+  AtmPreservesAuthorization(banking, expire, 2);
+  var expireSel := lookupTransition(m, banking.value, expire.type_);
+  ApplyTransitionMeaning(expireSel, banking, expire);
+  PatchKeysOwnedAfterApply(expireSel, banking, expire);
+  TransitionMeaning(m, banking, expire, 2);
+  NoAlwaysSettlesImmediately(m, applyTransition(expireSel, banking, expire).value.snapshot, expire, 2);
+  var expired := transition(m, banking, expire, 2).snapshot;
+  assert expired.value == "idle" && ":authorized" in expired.context && expired.context[":authorized"] == Value.opaque_(0);
+}
+
+lemma AtmAuthorizedAtEveryPrefixWitness()
+{
+  AtmAuthorizedAtEveryPrefix([FSMEvent("LOGIN", Some(0)), FSMEvent("IGNORED", Some(0)), FSMEvent("EXPIRE", Some(0))], 2);
 }
